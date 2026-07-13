@@ -38,6 +38,22 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 6371.0088 * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
+def _within_radius_km(
+    lat1: float, lon1: float, lat2: float, lon2: float, radius_km: float
+) -> bool:
+    """Reject distant points cheaply before evaluating great-circle distance."""
+    latitude_margin = radius_km / 110.574
+    if abs(lat2 - lat1) > latitude_margin:
+        return False
+    longitude_margin = radius_km / (
+        111.320 * max(0.1, abs(math.cos(math.radians((lat1 + lat2) / 2))))
+    )
+    longitude_delta = abs((lon2 - lon1 + 180.0) % 360.0 - 180.0)
+    if longitude_delta > longitude_margin:
+        return False
+    return _haversine_km(lat1, lon1, lat2, lon2) <= radius_km
+
+
 def verify_opera_observations(
     observations: Sequence,
     corroborating: Iterable,
@@ -64,9 +80,17 @@ def verify_opera_observations(
             high_quality += 1
             continue
 
+        # Grote of langgerekte cellen kunnen een centroid hebben dat ver van
+        # de werkelijk bevestigde regen ligt. Vergelijk daarom ook met de
+        # compacte footprint van werkelijk bezette OPERA-rasterpixels.
+        footprint = tuple(getattr(obs, "footprint_points", ()) or ())
+        candidate_points = ((obs.lat, obs.lon), *footprint)
         confirmed = any(
             abs(float(obs.timestamp) - float(ref.timestamp)) <= max_age_s
-            and _haversine_km(obs.lat, obs.lon, ref.lat, ref.lon) <= radius_km
+            and any(
+                _within_radius_km(lat, lon, ref.lat, ref.lon, radius_km)
+                for lat, lon in candidate_points
+            )
             for ref in references
         )
         if confirmed:

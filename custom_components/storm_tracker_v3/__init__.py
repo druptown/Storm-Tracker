@@ -519,5 +519,5 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     from homeassistant.helpers import discovery
     await discovery.async_load_platform(hass, "sensor", DOMAIN, {}, config)
 
-    _LOGGER.info("Storm Tracker V3 v0.4.10 gestart")
+    _LOGGER.info("Storm Tracker V3 v0.4.11 gestart")
     return True

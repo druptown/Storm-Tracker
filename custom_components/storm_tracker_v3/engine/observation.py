@@ -51,6 +51,9 @@ class Observation:
     intensity:  Optional[int]  = None   # 1-8 pixelwaarde (KMI-schaal)
     area_km2:   Optional[float] = None  # oppervlakte van het radarpixelcluster
     quality:    Optional[float] = None  # 0-1 bronkwaliteit, indien beschikbaar
+    # Compacte puntenwolk op de werkelijk bezette radarcel. OPERA bewaart
+    # maximaal ongeveer één representatief punt per 8x8 km rasterblok.
+    footprint_points: tuple[tuple[float, float], ...] = ()
 
     # RAIN-specifiek (Netatmo grondstation)
     rain_mm:     Optional[float] = None   # mm/u gemeten (rain_live)

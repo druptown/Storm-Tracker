@@ -385,8 +385,10 @@ def test_cells_to_observations_falls_back_to_now_on_bad_timestamp(opera_module):
 def test_cells_to_observations_preserves_area_and_source(opera_module):
     p = opera_module.OperaProvider(51.026, 4.478)
     cell = _make_cell(opera_module, 35.0, area_km2=42.5)
+    cell.footprint_points = ((50.9, 4.4), (51.1, 4.6))
     obs = p._cells_to_observations([cell], "2026-07-12T12:00:00Z")
     assert obs[0].area_km2 == 42.5
     assert obs[0].source == "opera"
     assert obs[0].quality == 0.9
     assert obs[0].obs_type == opera_module.ObservationType.RADAR
+    assert obs[0].footprint_points == cell.footprint_points

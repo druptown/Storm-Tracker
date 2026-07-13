@@ -33,9 +33,11 @@ def test_no_source_when_none_available(radar_policy_module):
     assert decision.source is None
 
 
-def _obs(*, lat=51.0, lon=4.5, timestamp=1_000.0, quality=None):
+def _obs(*, lat=51.0, lon=4.5, timestamp=1_000.0, quality=None,
+         footprint_points=()):
     return SimpleNamespace(
-        lat=lat, lon=lon, timestamp=timestamp, quality=quality
+        lat=lat, lon=lon, timestamp=timestamp, quality=quality,
+        footprint_points=footprint_points,
     )
 
 
@@ -83,5 +85,27 @@ def test_opera_low_quality_rejects_distant_or_stale_confirmation(radar_policy_mo
     result = radar_policy_module.verify_opera_observations(
         [opera], [distant, stale]
     )
+    assert result.accepted == ()
+    assert result.rejected == 1
+
+
+def test_opera_uses_actual_footprint_not_only_distant_centroid(radar_policy_module):
+    opera = _obs(
+        lat=48.40, lon=-3.60, timestamp=1_000.0, quality=0.1,
+        footprint_points=((49.42, -3.12), (49.45, -3.08)),
+    )
+    rainviewer = _obs(lat=49.43, lon=-3.10, timestamp=1_060.0)
+    result = radar_policy_module.verify_opera_observations([opera], [rainviewer])
+    assert result.accepted == (opera,)
+    assert result.corroborated == 1
+
+
+def test_opera_does_not_treat_whole_area_as_a_centroid_circle(radar_policy_module):
+    opera = _obs(
+        lat=48.40, lon=-3.60, timestamp=1_000.0, quality=0.1,
+        footprint_points=((48.40, -3.60), (48.45, -3.55)),
+    )
+    rainviewer = _obs(lat=49.40, lon=-3.60, timestamp=1_060.0)
+    result = radar_policy_module.verify_opera_observations([opera], [rainviewer])
     assert result.accepted == ()
     assert result.rejected == 1

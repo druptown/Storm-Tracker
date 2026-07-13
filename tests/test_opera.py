@@ -106,6 +106,8 @@ def test_valid_storm_cell_detected_with_gain_offset_applied(opera_module, opera_
 
     storm_cells = [c for c in cells if abs(c.max_dbz - 35.0) < 0.5]
     assert storm_cells, f"verwachtte een cel met max_dbz~35.0, kreeg: {[c.max_dbz for c in cells]}"
+    assert storm_cells[0].footprint_points
+    assert len(storm_cells[0].footprint_points) <= storm_cells[0].pixelcount
     assert timestamp == f"{meta['date']}T{meta['time']}Z"
 
 

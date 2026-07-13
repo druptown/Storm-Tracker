@@ -67,6 +67,7 @@ MIN_QUALITY  = 0.0
 MIN_PIXELS   = 5
 CONNECTIVITY = 8
 MAX_DIAGNOSTIC_CELLS = 40
+FOOTPRINT_SAMPLE_SIZE_M = 8_000.0
 
 # Werkelijk OPERA dekkingsgebied (uit API metadata)
 OPERA_LON_MIN = -22.635361
@@ -117,6 +118,7 @@ class OperaCell:
     mean_dbz:     float
     mean_quality: float
     pixelcount:   int
+    footprint_points: tuple[tuple[float, float], ...] = ()
 
 
 # ── Geometrie helpers ─────────────────────────────────────────────────────────
@@ -225,6 +227,29 @@ def _analyze_components(components, radar, quality, window, grid) -> list[OperaC
         x = (global_col + 0.5) * grid.xscale
         y = -(global_row + 0.5) * grid.yscale
         lon, lat = inverse.transform(x, y)
+
+        # Kies één echte celpixel per ongeveer 8x8 km rasterblok. Dit volgt
+        # ook onregelmatige cellen veel beter dan een centroid of bounding box.
+        row_block = max(1, int(round(FOOTPRINT_SAMPLE_SIZE_M / grid.yscale)))
+        col_block = max(1, int(round(FOOTPRINT_SAMPLE_SIZE_M / grid.xscale)))
+        absolute_rows = row0 + rows
+        absolute_cols = col0 + cols
+        bucket_cols = max(1, math.ceil(grid.xsize / col_block))
+        bucket_keys = (
+            (absolute_rows // row_block) * bucket_cols
+            + (absolute_cols // col_block)
+        )
+        _, sample_indices = np.unique(bucket_keys, return_index=True)
+        sample_rows = absolute_rows[sample_indices].astype(float)
+        sample_cols = absolute_cols[sample_indices].astype(float)
+        sample_x = (sample_cols + 0.5) * grid.xscale
+        sample_y = -(sample_rows + 0.5) * grid.yscale
+        sample_lons, sample_lats = inverse.transform(sample_x, sample_y)
+        footprint_points = tuple(
+            (round(float(sample_lat), 5), round(float(sample_lon), 5))
+            for sample_lat, sample_lon in zip(sample_lats, sample_lons)
+        )
+
         cells.append(OperaCell(
             centroid_lat = round(float(lat), 5),
             centroid_lon = round(float(lon), 5),
@@ -233,6 +258,7 @@ def _analyze_components(components, radar, quality, window, grid) -> list[OperaC
             mean_dbz     = round(float(values.mean()), 2),
             mean_quality = round(float(qualities.mean()), 3),
             pixelcount   = len(pixels),
+            footprint_points = footprint_points,
         ))
     return sorted(cells, key=lambda c: c.area_km2, reverse=True)
 
@@ -612,6 +638,7 @@ class OperaProvider:
                     "mean_dbz": cell.mean_dbz,
                     "quality": cell.mean_quality,
                     "pixels": cell.pixelcount,
+                    "footprint_points": len(cell.footprint_points),
                 }
                 for cell in cells[:MAX_DIAGNOSTIC_CELLS]
             ]
@@ -670,6 +697,7 @@ class OperaProvider:
                 intensity = intensity,
                 area_km2  = cell.area_km2,
                 quality   = cell.mean_quality,
+                footprint_points = cell.footprint_points,
                 source    = "opera",
             ))
         return obs

@@ -1,5 +1,14 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+## v0.4.11
+
+- OPERA-observaties bewaren voortaan een compacte footprint van werkelijk
+  bezette rasterblokken.
+- RainViewer en nationale radars kunnen een lage-quality OPERA-cel nu over de
+  volledige celvorm bevestigen, ook wanneer het centroid ver weg ligt.
+- De footprint gebruikt echte celpixels en geen brede bounding box, zodat lege
+  ruimte naast een langgerekte bui geen valse bevestiging veroorzaakt.
+
 ## v0.4.10
 
 - RainViewer draait parallel als verificatiebron wanneer OPERA gezond is.
