@@ -840,6 +840,8 @@ class OperaProvider:
                 lon       = cell.centroid_lon,
                 timestamp = ts,
                 intensity = intensity,
+                max_dbz   = cell.max_dbz,
+                mean_dbz  = cell.mean_dbz,
                 area_km2  = cell.area_km2,
                 quality   = cell.mean_quality,
                 footprint_points = cell.footprint_points,

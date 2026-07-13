@@ -347,6 +347,8 @@ def test_cells_preserve_parent_and_child_identity(opera_module):
     assert observations[0].parent_system_id.endswith(":p2")
     assert observations[0].parent_area_km2 == 46_627.0
     assert len(observations[0].parent_footprint_points) == 2
+    assert observations[0].max_dbz == 45.0
+    assert observations[0].mean_dbz == 30.0
 
 
 @pytest.mark.parametrize("dbz,expected_intensity", [

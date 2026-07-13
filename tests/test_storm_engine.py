@@ -163,6 +163,81 @@ def test_closest_radar_point_uses_child_footprint(
     assert (lat, lon) == (48.4, -4.45)
 
 
+def _record_mcs_frame(
+    storm, observation_module, timestamp, frame_number, *, intense=True
+):
+    parent_id = f"opera:{timestamp}:p0"
+    footprint = ((48.5, -4.5), (48.5, -2.5), (48.7, -1.0))
+    dbz_values = (55.0 if intense else 45.0, 44.0)
+    for child_number, (lon, dbz) in enumerate(
+        zip((-4.4, -2.7), dbz_values)
+    ):
+        obs = _obs(
+            observation_module,
+            observation_module.ObservationType.RADAR,
+            48.6,
+            lon,
+            ts=timestamp,
+            intensity=8 if dbz >= 50 else 6,
+            max_dbz=dbz,
+            radar_cell_id=f"frame-{frame_number}-cell-{child_number}",
+            parent_system_id=parent_id,
+            parent_area_km2=46_627.0,
+            parent_footprint_points=footprint,
+        )
+        storm.record_radar_cell(obs)
+
+
+def test_single_mcs_shaped_frame_is_only_candidate(
+    storm_module, observation_module
+):
+    storm = storm_module.Storm()
+    _record_mcs_frame(storm, observation_module, time.time(), 0)
+
+    storm.update_radar_classification()
+
+    assert storm.mcs_status == "candidate"
+    assert storm.system_type == "mcs_candidate"
+    assert storm.mcs_duration_minutes == 0.0
+    assert storm.mcs_convective_span_km >= 100.0
+    assert storm.mcs_intense_cells == 1
+
+
+def test_three_hours_of_qualifying_frames_confirms_mcs(
+    storm_module, observation_module
+):
+    storm = storm_module.Storm()
+    start = time.time() - 180 * 60
+    for frame_number in range(37):
+        _record_mcs_frame(
+            storm,
+            observation_module,
+            start + frame_number * 5 * 60,
+            frame_number,
+        )
+
+    storm.update_radar_classification()
+
+    assert storm.mcs_status == "confirmed"
+    assert storm.system_type == "mcs"
+    assert storm.mcs_duration_minutes == pytest.approx(180.0)
+
+
+def test_large_rain_area_without_intense_convection_is_not_mcs(
+    storm_module, observation_module
+):
+    storm = storm_module.Storm()
+    _record_mcs_frame(
+        storm, observation_module, time.time(), 0, intense=False
+    )
+
+    storm.update_radar_classification()
+
+    assert storm.mcs_status == "not_mcs"
+    assert storm.system_type == "convective_cluster"
+    assert storm.mcs_parent_area_km2 == 46_627.0
+
+
 # ── RAIN: verifieert, creëert NOOIT een nieuwe storm ────────────────────────
 
 def test_rain_alone_never_creates_a_storm(storm_engine_module, observation_module):

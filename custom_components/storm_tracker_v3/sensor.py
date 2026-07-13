@@ -54,6 +54,7 @@ async def async_setup_platform(
     # Storm sensoren
     entities.append(StormTellerSensor(hass))
     entities.append(StormDetailSensor(hass))
+    entities.append(McsDetectieSensor(hass))
 
     async_add_entities(entities, update_before_add=True)
 
@@ -521,6 +522,10 @@ class StormTellerSensor(StormTrackerBaseSensor):
                     "plaatsnaam":  getattr(s, "place_name", None),
                     "radarcellen": len(getattr(s, "radar_cells", {})),
                     "bron_systemen": len(getattr(s, "source_system_ids", set())),
+                    "type": getattr(s, "system_type", "unknown"),
+                    "mcs_status": getattr(s, "mcs_status", "not_evaluated"),
+                    "mcs_duur_min": getattr(s, "mcs_duration_minutes", 0.0),
+                    "convectieve_span_km": getattr(s, "mcs_convective_span_km", 0.0),
                 }
                 for s in storms
             ]
@@ -620,4 +625,67 @@ class StormDetailSensor(StormTrackerBaseSensor):
             "radius_km":   round(closest.radius_km, 1),
             "radarcellen": len(getattr(closest, "radar_cells", {})),
             "bron_systemen": len(getattr(closest, "source_system_ids", set())),
+            "type": getattr(closest, "system_type", "unknown"),
+            "mcs_status": getattr(closest, "mcs_status", "not_evaluated"),
+            "mcs_duur_min": getattr(closest, "mcs_duration_minutes", 0.0),
+            "convectieve_span_km": getattr(closest, "mcs_convective_span_km", 0.0),
+            "neerslag_span_km": getattr(closest, "mcs_precipitation_span_km", 0.0),
+            "convectieve_cellen": getattr(closest, "mcs_convective_cells", 0),
+            "intense_cellen": getattr(closest, "mcs_intense_cells", 0),
+            "parent_oppervlakte_km2": getattr(closest, "mcs_parent_area_km2", 0.0),
+        }
+
+
+class McsDetectieSensor(StormTrackerBaseSensor):
+    """Aantal bevestigde MCS'en, met kandidaten afzonderlijk zichtbaar."""
+    _attr_name = "STV3 MCS Detectie"
+    _attr_unique_id = "stv3_mcs_detectie"
+    _attr_icon = "mdi:weather-hurricane"
+    _attr_native_unit_of_measurement = "systemen"
+
+    @property
+    def _listen_events(self):
+        return [f"{DOMAIN}_storms_updated"]
+
+    @property
+    def native_value(self):
+        storms = self.hass.data.get(DOMAIN, {}).get("storms", [])
+        return sum(
+            1 for storm in storms
+            if getattr(storm, "mcs_status", None) == "confirmed"
+        )
+
+    @property
+    def extra_state_attributes(self):
+        storms = self.hass.data.get(DOMAIN, {}).get("storms", [])
+        relevant = [
+            storm for storm in storms
+            if getattr(storm, "mcs_status", None) in {"candidate", "confirmed"}
+        ]
+        return {
+            "kandidaten": sum(
+                1 for storm in relevant if storm.mcs_status == "candidate"
+            ),
+            "bevestigd": sum(
+                1 for storm in relevant if storm.mcs_status == "confirmed"
+            ),
+            "systemen": [
+                {
+                    "id": storm.storm_id,
+                    "status": storm.mcs_status,
+                    "duur_min": storm.mcs_duration_minutes,
+                    "convectieve_span_km": storm.mcs_convective_span_km,
+                    "neerslag_span_km": storm.mcs_precipitation_span_km,
+                    "convectieve_cellen": storm.mcs_convective_cells,
+                    "intense_cellen": storm.mcs_intense_cells,
+                    "oppervlakte_km2": storm.mcs_parent_area_km2,
+                }
+                for storm in relevant
+            ],
+            "criteria": {
+                "min_convectieve_span_km": 100,
+                "min_convectieve_cellen_40dbz": 2,
+                "min_intense_cellen_50dbz": 1,
+                "min_duur_min": 180,
+            },
         }

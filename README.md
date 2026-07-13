@@ -17,6 +17,12 @@ KMI, KNMI, RainViewer, Netatmo en Open-Meteo. OPERA-cellen met lage
 bronkwaliteit worden alleen operationeel gebruikt wanneer KMI, KNMI of
 RainViewer ze geografisch en temporeel bevestigt.
 
+Brede OPERA-systemen behouden hun lokale RadarCells. De integratie markeert
+een systeem eerst als MCS-kandidaat wanneer de radarstructuur aan de
+convectieve criteria voldoet, en pas na drie uur continuïteit als bevestigde
+MCS. De aparte sensor `sensor.stv3_mcs_detectie` maakt dit onderscheid
+zichtbaar.
+
 ## Installatie
 
 Kopieer `custom_components/storm_tracker_v3` naar de map
@@ -52,4 +58,4 @@ release notes.
 
 ## Versie
 
-De huidige integratieversie is **0.4.13**.
+De huidige integratieversie is **0.4.14**.

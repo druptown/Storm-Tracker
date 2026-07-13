@@ -1,5 +1,17 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+## v0.4.14
+
+- Radar-gebaseerde MCS-classificatie toegevoegd met afzonderlijke statussen
+  `candidate` en `confirmed`.
+- Een kandidaat vereist minstens twee kernen van 40 dBZ, minstens één kern van
+  50 dBZ en een convectieve span van minstens 100 km.
+- Bevestiging gebeurt pas wanneer de criteria drie uur aaneengesloten gelden;
+  korte onderbrekingen tot twintig minuten zijn toegestaan.
+- Zes uur parent-framehistoriek wordt compact per WeatherSystem bijgehouden.
+- Nieuwe entiteit `sensor.stv3_mcs_detectie` toont kandidaten, bevestigde MCS'en
+  en de gebruikte metriek/criteria.
+
 ## v0.4.13
 
 - Eén brede OPERA-component wordt als parent-WeatherSystem behouden, met de

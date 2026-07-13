@@ -49,6 +49,8 @@ class Observation:
 
     # RADAR-specifiek
     intensity:  Optional[int]  = None   # 1-8 pixelwaarde (KMI-schaal)
+    max_dbz:    Optional[float] = None  # exacte piekreflectiviteit indien beschikbaar
+    mean_dbz:   Optional[float] = None  # gemiddelde reflectiviteit van de cel
     area_km2:   Optional[float] = None  # oppervlakte van het radarpixelcluster
     quality:    Optional[float] = None  # 0-1 bronkwaliteit, indien beschikbaar
     # Compacte puntenwolk op de werkelijk bezette radarcel. OPERA bewaart
