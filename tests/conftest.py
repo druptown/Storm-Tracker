@@ -172,6 +172,14 @@ def storm_engine_module(storm_module, bounding_box_module, hull_module, geocode_
     )
 
 
+@pytest.fixture(scope="session")
+def region_manager_module(storm_engine_module, ofe_module):
+    return _load_module(
+        f"{PKG_NAME}.engine.region_manager",
+        PKG_ROOT / "engine" / "region_manager.py",
+    )
+
+
 # ── Overige providers ──────────────────────────────────────────────────────
 
 @pytest.fixture(scope="session")

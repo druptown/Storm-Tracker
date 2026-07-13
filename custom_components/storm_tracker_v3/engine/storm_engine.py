@@ -160,6 +160,30 @@ class StormEngine:
     def get_storm(self, storm_id: str) -> Optional[Storm]:
         return self._storms.get(storm_id)
 
+    def export_mcs_history(self) -> list[dict]:
+        """Geef compacte, JSON-veilige MCS-historiek voor persistente opslag."""
+        return [
+            storm.to_mcs_snapshot()
+            for storm in self._storms.values()
+            if storm.radar_system_frames
+        ]
+
+    def restore_mcs_history(self, snapshots: list[dict]) -> int:
+        """Herstel geldige radarhistoriek vóór de eerste nieuwe providerpoll."""
+        restored = 0
+        for snapshot in snapshots:
+            try:
+                storm = Storm.from_mcs_snapshot(snapshot)
+            except (KeyError, TypeError, ValueError):
+                _LOGGER.warning("Ongeldige MCS-snapshot overgeslagen", exc_info=True)
+                continue
+            if not storm.radar_system_frames:
+                continue
+            self._storms[storm.storm_id] = storm
+            self._history.setdefault(storm.storm_id, [])
+            restored += 1
+        return restored
+
     def retain_within(
         self, center_lat: float, center_lon: float, radius_km: float
     ) -> int:

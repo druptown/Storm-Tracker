@@ -176,6 +176,97 @@ class Storm:
     )  # [(ts, lat, lon), ...]
     _dirty: bool = True   # True = cache moet herberekend worden
 
+    def to_mcs_snapshot(self) -> dict:
+        """Serializeer alleen de compacte radarhistoriek die een restart moet overleven."""
+        return {
+            "storm_id": self.storm_id,
+            "centroid_lat": self.centroid_lat,
+            "centroid_lon": self.centroid_lon,
+            "first_seen": self.first_seen,
+            "last_update": self.last_update,
+            "frames": [
+                {
+                    "parent_system_id": frame.parent_system_id,
+                    "timestamp": frame.timestamp,
+                    "area_km2": frame.area_km2,
+                    "footprint_points": [list(point) for point in frame.footprint_points],
+                    "child_ids": sorted(frame.child_ids),
+                    "convective_points": [list(point) for point in frame.convective_points],
+                    "intense_cell_count": frame.intense_cell_count,
+                    "max_dbz": frame.max_dbz,
+                }
+                for frame in self.radar_system_frames.values()
+            ],
+            "radar_cells": [
+                {
+                    "cell_id": cell.cell_id,
+                    "timestamp": cell.timestamp,
+                    "lat": cell.lat,
+                    "lon": cell.lon,
+                    "intensity": cell.intensity,
+                    "area_km2": cell.area_km2,
+                    "max_dbz": cell.max_dbz,
+                    "footprint_points": [list(point) for point in cell.footprint_points],
+                    "parent_system_id": cell.parent_system_id,
+                }
+                for cell in self.radar_cells.values()
+            ],
+        }
+
+    @classmethod
+    def from_mcs_snapshot(cls, data: dict, now: Optional[float] = None) -> "Storm":
+        """Herstel een WeatherSystem met genoeg geometrie om het volgende frame te matchen."""
+        current = time.time() if now is None else now
+        cutoff = current - MCS_HISTORY_HOURS * 3600
+        storm = cls(
+            storm_id=str(data["storm_id"]),
+            centroid_lat=float(data.get("centroid_lat", 0.0)),
+            centroid_lon=float(data.get("centroid_lon", 0.0)),
+            first_seen=float(data.get("first_seen", current)),
+            last_update=float(data.get("last_update", current)),
+        )
+        for raw in data.get("frames", []):
+            timestamp = float(raw["timestamp"])
+            if timestamp < cutoff:
+                continue
+            frame = RadarSystemFrame(
+                parent_system_id=str(raw["parent_system_id"]),
+                timestamp=timestamp,
+                area_km2=float(raw.get("area_km2", 0.0)),
+                footprint_points=tuple(tuple(point) for point in raw.get("footprint_points", [])),
+                child_ids=set(raw.get("child_ids", [])),
+                convective_points=[tuple(point) for point in raw.get("convective_points", [])],
+                intense_cell_count=int(raw.get("intense_cell_count", 0)),
+                max_dbz=float(raw.get("max_dbz", 0.0)),
+            )
+            storm.radar_system_frames[frame.parent_system_id] = frame
+        for raw in data.get("radar_cells", []):
+            timestamp = float(raw["timestamp"])
+            if timestamp < current - 20 * 60:
+                continue
+            cell = RadarCellSnapshot(
+                cell_id=str(raw["cell_id"]),
+                timestamp=timestamp,
+                lat=float(raw["lat"]),
+                lon=float(raw["lon"]),
+                intensity=int(raw.get("intensity", 0)),
+                area_km2=float(raw.get("area_km2", 0.0)),
+                max_dbz=raw.get("max_dbz"),
+                footprint_points=tuple(tuple(point) for point in raw.get("footprint_points", [])),
+                parent_system_id=raw.get("parent_system_id"),
+            )
+            storm.radar_cells[cell.cell_id] = cell
+            if cell.parent_system_id:
+                storm.source_system_ids.add(cell.parent_system_id)
+                storm._source_system_last_seen[cell.parent_system_id] = cell.timestamp
+        if storm.radar_system_frames:
+            storm.last_update = max(
+                storm.last_update,
+                max(frame.timestamp for frame in storm.radar_system_frames.values()),
+            )
+            storm.update_radar_classification()
+        return storm
+
     def add_strikes(self, strikes: list) -> None:
         """Voeg strikes toe en markeer cache als vervallen."""
         now = time.time()

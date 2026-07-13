@@ -223,6 +223,30 @@ def test_three_hours_of_qualifying_frames_confirms_mcs(
     assert storm.mcs_duration_minutes == pytest.approx(180.0)
 
 
+def test_mcs_history_survives_engine_restart(
+    storm_engine_module, storm_module, observation_module
+):
+    source = storm_engine_module.StormEngine()
+    storm = storm_module.Storm(centroid_lat=48.6, centroid_lon=-3.0)
+    start = time.time() - 180 * 60
+    for frame_number in range(37):
+        _record_mcs_frame(
+            storm, observation_module, start + frame_number * 300, frame_number
+        )
+    storm.update_radar_classification()
+    source._storms[storm.storm_id] = storm
+
+    snapshots = source.export_mcs_history()
+    restored_engine = storm_engine_module.StormEngine()
+    assert restored_engine.restore_mcs_history(snapshots) == 1
+
+    restored = restored_engine.get_storm(storm.storm_id)
+    assert restored is not None
+    assert restored.mcs_status == "confirmed"
+    assert restored.mcs_duration_minutes == pytest.approx(180.0)
+    assert len(restored.radar_system_frames) == 37
+
+
 def test_large_rain_area_without_intense_convection_is_not_mcs(
     storm_module, observation_module
 ):

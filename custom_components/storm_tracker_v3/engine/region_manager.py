@@ -1,303 +1,183 @@
-"""Storm Tracker V3 — engine/region_manager.py v0.5.0
+"""Dynamische runtime-regio's voor Storm Tracker V3.
 
-Module 4: StormManager (dynamische RegionEngines)
-
-Kernprincipe (architectuurdocument 'Dynamische RegionEngines'):
-  Een RegionEngine is een RUNTIME-object — geen vaste definitie per land.
-  Hij vertegenwoordigt een geografisch gebied dat nodig is om één of meer
-  ProjectionTargets correct te monitoren. Er zijn GEEN vooraf gedefinieerde
-  regio's. De StormManager bepaalt volledig automatisch:
-
-  1. Of een bestaande RegionEngine de locatie van een ProjectionTarget
-     voldoende dekt (target binnen dekkingsradius van engine).
-  2. Als nee: nieuwe RegionEngine aanmaken gecentreerd op de target-locatie.
-  3. Providers bepalen ZELF of ze een bepaald gebied ondersteunen via
-     `provider.supports(center_lat, center_lon, radius_km)`.
-     De StormManager hoeft nooit te weten welke provider bij welk land hoort.
-
-Lifecycle:
-  - RegionEngine aanmaken: eerste ProjectionTarget buiten alle bestaande engines
-  - RegionEngine afbreken: laatste ProjectionTarget verlaat de engine
-    (timeout → providers stoppen → geheugen vrijgeven)
-
-Versiegeschiedenis:
-  v0.5.0 — volledig dynamische RegionEngines zonder vaste landsgrenzen;
-           providers bepalen zelf hun dekking via supports();
-           StormManager is volledig generiek
-  v0.4.0 — ProjectionTarget-terminologie doorgevoerd
-  v0.3.0 — regio's hebben één canonieke blitz_entity (niet meer geldig)
-  v0.2.0 — geografische regio's op basis van land (niet meer geldig)
-  v0.1.0 — eerste opzet (regio = blitz_entity, verouderd)
+Een regio is geen land en de observatiehorizon is niet de sharing distance.
+De manager bezit de StormEngine/OFE-combinaties; providercontrollers kunnen via
+de lifecycle callbacks per runtime-regio starten en stoppen.
 """
 from __future__ import annotations
 
+import inspect
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Awaitable, Callable, Optional
 
-from homeassistant.core import HomeAssistant
-
-from .storm_engine import StormEngine
 from .observation_fusion_engine import ObservationFusionEngine
+from .storm_engine import StormEngine
 
 _LOGGER = logging.getLogger(__name__)
 
-# Standaard dekkingsradius per RegionEngine in km.
-# 700km dekt ruim een groot land + buurlanden — genoeg om
-# stormen die vanuit een aangrenzend gebied naderen tijdig te zien.
-DEFAULT_REGION_RADIUS_KM = 700.0
+DEFAULT_ENGINE_SHARING_DISTANCE_KM = 150.0
+DEFAULT_OBSERVATION_RADIUS_KM = 350.0
 
 
 def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Afstand in km (Haversine)."""
-    R = 6371.0
+    radius = 6371.0088
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
-    a = (math.sin(dlat / 2) ** 2
-         + math.cos(math.radians(lat1))
-         * math.cos(math.radians(lat2))
-         * math.sin(dlon / 2) ** 2)
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    value = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1))
+        * math.cos(math.radians(lat2))
+        * math.sin(dlon / 2) ** 2
+    )
+    return radius * 2 * math.atan2(math.sqrt(value), math.sqrt(1 - value))
 
 
 @dataclass
 class RegionEngine:
-    """
-    Één dynamische RegionEngine — een geografisch dekkingsgebied.
+    """Eén actieve meteorologische runtime-context."""
 
-    Weet niets van landen, grenzen of providers-per-land.
-    Bevat uitsluitend runtime-state:
-      - center: het geografische middelpunt
-      - radius_km: dekkingsstraal
-      - actieve providers
-      - Observation Fusion Engine (OFE)
-      - Storm Engine (WeatherSystem repository)
-      - geregistreerde ProjectionTargets + update-callbacks
-    """
-    engine_id:     str              # uniek label, bv. "engine@51.03,4.48"
-    center_lat:    float
-    center_lon:    float
-    radius_km:     float
-    storm_engine:  StormEngine
-    ofe:           ObservationFusionEngine
-    providers:     list = field(default_factory=list)   # actieve provider-instanties
-
-    # Bewust gescheiden: 'projection_targets' bepaalt de lifecycle van de engine;
-    # 'update_callbacks' zijn optioneel en sturen updates naar de coordinator.
+    engine_id: str
+    center_lat: float
+    center_lon: float
+    observation_radius_km: float
+    storm_engine: StormEngine
+    ofe: ObservationFusionEngine
     projection_targets: set[str] = field(default_factory=set)
-    update_callbacks:   dict[str, Callable] = field(default_factory=dict)
+    target_locations: dict[str, tuple[float, float]] = field(default_factory=dict)
+    runtime: object | None = None
 
-    def covers(self, lat: float, lon: float) -> bool:
-        """True als deze locatie binnen de dekkingsradius valt."""
-        return _haversine(self.center_lat, self.center_lon, lat, lon) <= self.radius_km
+    @property
+    def storage_key(self) -> str:
+        """Stabiele geografische sleutel voor restart-herstel."""
+        return f"{self.center_lat:.2f},{self.center_lon:.2f},{self.observation_radius_km:.0f}"
+
+    def accepts_observation(self, lat: float, lon: float) -> bool:
+        return _haversine(self.center_lat, self.center_lon, lat, lon) <= self.observation_radius_km
+
+
+LifecycleCallback = Callable[[RegionEngine], object | Awaitable[object]]
 
 
 class StormManager:
-    """
-    Enige instantie (via hass.data) die volledig automatisch:
-      1. Bepaalt welke RegionEngine bij een ProjectionTarget-locatie past.
-      2. Nieuwe RegionEngines aanmaakt als geen bestaande engine de locatie dekt.
-      3. RegionEngines afbreekt zodra ze geen ProjectionTargets meer hebben.
-
-    Providers worden globaal geregistreerd via register_provider().
-    De StormManager vraagt elke provider: "dek jij dit gebied?"
-    via provider.supports(center_lat, center_lon, radius_km).
-    De StormManager hoeft NOOIT te weten welke provider bij welk land hoort.
-    """
+    """Single source of truth voor alle actieve RegionEngines en targets."""
 
     def __init__(
         self,
-        hass: HomeAssistant,
-        region_radius_km: float = DEFAULT_REGION_RADIUS_KM,
+        hass=None,
+        *,
+        sharing_distance_km: float = DEFAULT_ENGINE_SHARING_DISTANCE_KM,
+        observation_radius_km: float = DEFAULT_OBSERVATION_RADIUS_KM,
+        on_engine_created: Optional[LifecycleCallback] = None,
+        on_engine_removed: Optional[LifecycleCallback] = None,
     ) -> None:
-        self._hass          = hass
-        self._region_radius = region_radius_km
-        self._engines:      list[RegionEngine] = []
-        self._target_engine: dict[str, str] = {}     # target_id → engine_id
-        self._provider_factories: list = []           # globaal geregistreerde providers
+        self._hass = hass
+        self.sharing_distance_km = sharing_distance_km
+        self.observation_radius_km = observation_radius_km
+        self._on_engine_created = on_engine_created
+        self._on_engine_removed = on_engine_removed
+        self._engines: dict[str, RegionEngine] = {}
+        self._target_engine: dict[str, str] = {}
+        self._next_engine_number = 1
 
-    def register_provider(self, provider_factory) -> None:
-        """
-        Registreer een provider-factory globaal.
+    def assign_target(self, target_id: str, lat: float, lon: float) -> RegionEngine:
+        """Koppel een target aan de dichtstbijzijnde deelbare runtime-regio."""
+        old = self.get_engine_for_target(target_id)
+        if old and _haversine(old.center_lat, old.center_lon, lat, lon) <= self.sharing_distance_km:
+            old.projection_targets.add(target_id)
+            old.target_locations[target_id] = (lat, lon)
+            return old
 
-        Een provider-factory is een callable die (hass, center_lat, center_lon,
-        radius_km) ontvangt en een gematerialiseerde provider-instantie terugstuurt,
-        of None als de provider dat gebied niet ondersteunt.
+        candidate = self._find_shareable(lat, lon)
+        if old is not None and old is not candidate:
+            self.release(target_id)
+        if candidate is None:
+            candidate = self._create_engine(lat, lon)
+        candidate.projection_targets.add(target_id)
+        candidate.target_locations[target_id] = (lat, lon)
+        self._target_engine[target_id] = candidate.engine_id
+        return candidate
 
-        Voorbeeld:
-            storm_manager.register_provider(BlitzortungProviderFactory(entity_id))
-            storm_manager.register_provider(KmiProviderFactory())
-            storm_manager.register_provider(RainViewerProviderFactory())
-            storm_manager.register_provider(NetatmoProviderFactory(token_manager))
-        """
-        self._provider_factories.append(provider_factory)
+    def release(self, target_id: str) -> Optional[RegionEngine]:
+        engine_id = self._target_engine.pop(target_id, None)
+        engine = self._engines.get(engine_id) if engine_id else None
+        if engine is None:
+            return None
+        engine.projection_targets.discard(target_id)
+        engine.target_locations.pop(target_id, None)
+        if not engine.projection_targets:
+            self._engines.pop(engine.engine_id, None)
+            self._invoke(self._on_engine_removed, engine)
+            _LOGGER.info("RegionEngine %s verwijderd: geen targets", engine.engine_id)
+        return engine
 
-    def assign_target(
-        self,
-        projection_target_id: str,
-        lat: float,
-        lon: float,
-        on_storms_updated: Optional[Callable] = None,
-        **storm_engine_kwargs,
-    ) -> Optional[RegionEngine]:
-        """
-        Koppel een ProjectionTarget aan een geschikte RegionEngine.
-
-        Stap 1: Zoek een bestaande engine die de locatie dekt.
-        Stap 2: Indien geen: maak een nieuwe engine gecentreerd op de locatie.
-        Stap 3: Als target al in een andere engine zat: ontkoppel die eerst.
-
-        Geeft de toegewezen RegionEngine terug.
-        """
-        # Zoek bestaande engine die de locatie dekt
-        covering_engine = self._find_covering_engine(lat, lon)
-
-        old_engine_id = self._target_engine.get(projection_target_id)
-
-        # Zelfde engine als voorheen: gewoon callback bijwerken indien nodig
-        if covering_engine is not None and old_engine_id == covering_engine.engine_id:
-            covering_engine.projection_targets.add(projection_target_id)
-            if on_storms_updated is not None:
-                covering_engine.update_callbacks[projection_target_id] = on_storms_updated
-                self._rebuild_dispatcher(covering_engine)
-            return covering_engine
-
-        # Target verhuist naar andere (of nieuwe) engine
-        if old_engine_id is not None:
-            old_engine = self._get_engine(old_engine_id)
-            if old_engine:
-                self._leave_engine(projection_target_id, old_engine)
-                _LOGGER.info(
-                    "ProjectionTarget %s verhuist van %s naar %s",
-                    projection_target_id, old_engine_id,
-                    covering_engine.engine_id if covering_engine else "nieuwe engine"
-                )
-
-        if covering_engine is None:
-            covering_engine = self._create_engine(lat, lon, storm_engine_kwargs)
-
-        covering_engine.projection_targets.add(projection_target_id)
-        if on_storms_updated is not None:
-            covering_engine.update_callbacks[projection_target_id] = on_storms_updated
-            self._rebuild_dispatcher(covering_engine)
-
-        self._target_engine[projection_target_id] = covering_engine.engine_id
-        return covering_engine
-
-    def release(self, projection_target_id: str) -> None:
-        """ProjectionTarget stopt volledig (config entry unload)."""
-        engine_id = self._target_engine.pop(projection_target_id, None)
-        engine = self._get_engine(engine_id) if engine_id else None
-        if engine:
-            self._leave_engine(projection_target_id, engine)
-
-    def get_engine_for_target(
-        self, projection_target_id: str
-    ) -> Optional[RegionEngine]:
-        engine_id = self._target_engine.get(projection_target_id)
-        return self._get_engine(engine_id) if engine_id else None
+    def get_engine_for_target(self, target_id: str) -> Optional[RegionEngine]:
+        return self._engines.get(self._target_engine.get(target_id, ""))
 
     def get_all_engines(self) -> list[RegionEngine]:
-        return list(self._engines)
+        return list(self._engines.values())
 
-    # ── Interne engine-beheer ─────────────────────────────────────────────
+    def route_observation(self, observation) -> int:
+        """Routeer globale pushdata éénmaal naar elke relevante engine."""
+        routed = 0
+        for engine in self._engines.values():
+            if engine.accepts_observation(observation.lat, observation.lon):
+                self._schedule(engine.ofe.add_observation(observation))
+                routed += 1
+        return routed
 
-    def _find_covering_engine(self, lat: float, lon: float) -> Optional[RegionEngine]:
-        """
-        Zoek een bestaande RegionEngine die deze locatie dekt.
-        Bij meerdere kandidaten: kies de engine waarvan het centrum
-        het dichtst bij de doellocatie ligt (meest relevante data).
-        """
-        candidates = [e for e in self._engines if e.covers(lat, lon)]
-        if not candidates:
-            return None
-        return min(candidates,
-                   key=lambda e: _haversine(e.center_lat, e.center_lon, lat, lon))
+    def _find_shareable(self, lat: float, lon: float) -> Optional[RegionEngine]:
+        candidates = [
+            engine for engine in self._engines.values()
+            if _haversine(engine.center_lat, engine.center_lon, lat, lon)
+            <= self.sharing_distance_km
+        ]
+        return min(
+            candidates,
+            key=lambda engine: _haversine(engine.center_lat, engine.center_lon, lat, lon),
+            default=None,
+        )
 
-    def _get_engine(self, engine_id: str) -> Optional[RegionEngine]:
-        for e in self._engines:
-            if e.engine_id == engine_id:
-                return e
-        return None
+    def _create_engine(self, lat: float, lon: float) -> RegionEngine:
+        engine_id = f"region-{self._next_engine_number}"
+        self._next_engine_number += 1
+        storm_engine = StormEngine()
 
-    def _create_engine(
-        self, center_lat: float, center_lon: float, storm_engine_kwargs: dict
-    ) -> RegionEngine:
-        """
-        Maak een nieuwe RegionEngine gecentreerd op (center_lat, center_lon).
-        Vraag elke geregistreerde provider of hij dit gebied ondersteunt.
-        """
-        engine_id = f"engine@{center_lat:.2f},{center_lon:.2f}"
+        async def on_batch(observations: list) -> None:
+            scoped = [
+                observation for observation in observations
+                if _haversine(lat, lon, observation.lat, observation.lon)
+                <= self.observation_radius_km
+            ]
+            await storm_engine.process_batch(scoped)
 
-        storm_engine = StormEngine(**storm_engine_kwargs)
-
-        async def _on_observation_batch(observations):
-            await storm_engine.process_batch(observations)
-
-        ofe = ObservationFusionEngine(on_batch=_on_observation_batch)
-
-        # Vraag elke provider-factory of hij dit gebied ondersteunt
-        active_providers = []
-        for factory in self._provider_factories:
-            provider = factory.create(
-                self._hass, center_lat, center_lon, self._region_radius
-            )
-            if provider is not None:
-                def _make_obs_callback(p=provider):
-                    def _on_obs(obs):
-                        self._hass.async_create_task(ofe.add_observation(obs))
-                    return _on_obs
-                provider.set_callback(_make_obs_callback())
-                provider.start()
-                active_providers.append(provider)
-                _LOGGER.debug(
-                    "Provider %s gestart voor engine %s",
-                    provider.__class__.__name__, engine_id
-                )
-
-        region = RegionEngine(
+        engine = RegionEngine(
             engine_id=engine_id,
-            center_lat=center_lat,
-            center_lon=center_lon,
-            radius_km=self._region_radius,
+            center_lat=lat,
+            center_lon=lon,
+            observation_radius_km=self.observation_radius_km,
             storm_engine=storm_engine,
-            ofe=ofe,
-            providers=active_providers,
+            ofe=ObservationFusionEngine(on_batch=on_batch),
         )
-        self._engines.append(region)
+        self._engines[engine_id] = engine
+        self._invoke(self._on_engine_created, engine)
         _LOGGER.info(
-            "Nieuwe RegionEngine aangemaakt: %s (%.0f km, %d providers)",
-            engine_id, self._region_radius, len(active_providers)
+            "RegionEngine %s aangemaakt op %.4f,%.4f (sharing %.0f km; observatie %.0f km)",
+            engine_id, lat, lon, self.sharing_distance_km, self.observation_radius_km,
         )
-        return region
+        return engine
 
-    def _leave_engine(
-        self, projection_target_id: str, engine: RegionEngine
-    ) -> None:
-        """Verwijder een ProjectionTarget uit een engine; breek af als leeg."""
-        engine.projection_targets.discard(projection_target_id)
-        engine.update_callbacks.pop(projection_target_id, None)
-        self._rebuild_dispatcher(engine)
+    def _invoke(self, callback: Optional[LifecycleCallback], engine: RegionEngine) -> None:
+        if callback is None:
+            return
+        result = callback(engine)
+        if inspect.isawaitable(result):
+            self._schedule(result)
 
-        if not engine.projection_targets:
-            for provider in engine.providers:
-                try:
-                    provider.stop()
-                except Exception:
-                    pass
-            self._engines = [e for e in self._engines if e.engine_id != engine.engine_id]
-            _LOGGER.info(
-                "RegionEngine %s afgebroken (geen ProjectionTargets meer)",
-                engine.engine_id
-            )
-
-    def _rebuild_dispatcher(self, engine: RegionEngine) -> None:
-        """Stel storm_engine callback in op dispatcher naar alle update_callbacks."""
-        def _dispatch(weather_systems):
-            for cb in list(engine.update_callbacks.values()):
-                try:
-                    cb(weather_systems)
-                except Exception:
-                    _LOGGER.exception("Fout in WeatherSystem update-callback")
-        engine.storm_engine._on_updated = _dispatch
+    def _schedule(self, awaitable) -> None:
+        if self._hass is not None:
+            self._hass.async_create_task(awaitable)
+            return
+        import asyncio
+        asyncio.get_running_loop().create_task(awaitable)

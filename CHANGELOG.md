@@ -1,5 +1,20 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+## v0.4.15
+
+- De `StormManager` bezit nu de werkelijk gebruikte StormEngine/OFE-runtime;
+  `region_manager.py` is niet langer ongebruikte architectuurcode.
+- Sharing distance en observatieradius zijn onafhankelijk configureerbaar.
+- Een target buiten de sharing distance krijgt een nieuwe dynamische
+  RegionEngine; een lege engine wordt automatisch verwijderd.
+- De globale Blitzortung-stream wordt naar alle relevante actieve engines
+  gerouteerd zonder een extra listener per regio.
+- Compacte MCS-framehistoriek wordt met Home Assistant `Store` per geografische
+  runtime-regio bewaard en na een restart hersteld.
+- Volledige OPERA-rasters worden nooit persistent opgeslagen.
+- Nieuwe diagnostische entiteit `sensor.stv3_region_engines` toont actieve
+  engines, centra, observatieradius, gekoppelde targets en WeatherSystems.
+
 ## v0.4.14
 
 - Radar-gebaseerde MCS-classificatie toegevoegd met afzonderlijke statussen

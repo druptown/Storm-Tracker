@@ -9,7 +9,9 @@ radar- en grondobservaties tot weersystemen en locatiegebonden voorspellingen.
 ## Architectuur
 
 ```text
-Providers -> Observation Fusion Engine -> Storm Engine -> Home Assistant
+ProjectionTargets -> StormManager -> dynamische RegionEngine(s)
+                                      |-> Providers -> OFE -> Storm Engine
+                                      `-> persistente MCS-historiek
 ```
 
 De huidige providers omvatten onder andere Blitzortung, OPERA/EUMETNET,
@@ -37,6 +39,7 @@ storm_tracker_v3:
   home_lon: !secret home_longitude
   fictieve_tracker_entity: device_tracker.fictieve_tracker
   radar_radius_km: 350
+  engine_sharing_distance_km: 150
   knmi_api_key: !secret knmi_api_key
   knmi_wms_api_key: !secret knmi_wms_api_key
 ```
@@ -58,4 +61,4 @@ release notes.
 
 ## Versie
 
-De huidige integratieversie is **0.4.14**.
+De huidige integratieversie is **0.4.15**.

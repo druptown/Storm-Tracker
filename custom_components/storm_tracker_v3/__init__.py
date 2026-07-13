@@ -32,8 +32,8 @@ import voluptuous as vol
 
 from .const import DOMAIN
 from .providers.blitzortung import BlitzortungProvider
-from .engine.observation_fusion_engine import ObservationFusionEngine
-from .engine.storm_engine import StormEngine
+from .engine.region_manager import StormManager
+from .engine.mcs_store import McsHistoryStore
 from .plogger.provider_logger import (
     log_lightning, log_kmi, log_rainviewer, log_knmi, log_netatmo, log_open_meteo
 )
@@ -62,6 +62,7 @@ CONFIG_SCHEMA = vol.Schema({
         vol.Required("home_lon"): cv.longitude,
         vol.Optional("fictieve_tracker_entity", default="device_tracker.fictieve_tracker"): cv.string,
         vol.Optional("radar_radius_km", default=300): vol.Coerce(float),
+        vol.Optional("engine_sharing_distance_km", default=150): vol.Coerce(float),
         vol.Optional("knmi_api_key"): cv.string,
         vol.Optional("knmi_wms_api_key"): cv.string,
         vol.Optional("netatmo_client_id"): cv.string,
@@ -87,6 +88,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     knmi_wms_key    = conf.get("knmi_wms_api_key", knmi_api_key)
     netatmo_radius  = conf.get("netatmo_radius_km", 175.0)
     radar_radius    = conf.get("radar_radius_km", 200.0)
+    sharing_distance = conf.get("engine_sharing_distance_km", 150.0)
     from homeassistant.helpers.aiohttp_client import async_get_clientsession
     http_session = async_get_clientsession(hass)
 
@@ -95,39 +97,52 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     hass.data[DOMAIN]["fictieve_lon"]    = home_lon
 
     # ── StormEngine + OFE aanmaken ────────────────────────────────────────
-    storm_engine = StormEngine()
-    hass.data[DOMAIN]["storm_engine"] = storm_engine
+    mcs_store = McsHistoryStore(hass)
+    await mcs_store.async_load()
+    storm_manager = StormManager(
+        hass,
+        sharing_distance_km=sharing_distance,
+        observation_radius_km=radar_radius,
+    )
+    active_region = storm_manager.assign_target(fictieve_entity, home_lat, home_lon)
+    storm_engine = active_region.storm_engine
+    ofe = active_region.ofe
 
-    async def _on_ofe_batch(observations: list) -> None:
-        """OFE stuurt een batch observaties naar de StormEngine."""
-        center_lat = hass.data[DOMAIN].get("fictieve_lat", home_lat)
-        center_lon = hass.data[DOMAIN].get("fictieve_lon", home_lon)
-        scoped = [
-            observation
-            for observation in observations
-            if _distance_km(
-                center_lat,
-                center_lon,
-                observation.lat,
-                observation.lon,
-            ) <= radar_radius
-        ]
-        rejected = len(observations) - len(scoped)
-        if rejected:
-            _LOGGER.debug(
-                "Dekkingsfilter: %d observaties buiten %.0f km genegeerd",
-                rejected,
-                radar_radius,
+    def _activate_region(region) -> int:
+        """Maak een manager-engine zichtbaar voor providers, opslag en sensoren."""
+        nonlocal active_region, storm_engine, ofe
+        active_region = region
+        storm_engine = region.storm_engine
+        ofe = region.ofe
+        region_storm_engine = region.storm_engine
+        restored = mcs_store.restore_engine(region.storage_key, region_storm_engine)
+
+        def _publish(storms) -> None:
+            hass.data[DOMAIN]["storms"] = storms
+            hass.bus.async_fire(
+                f"{DOMAIN}_storms_updated",
+                {"count": len(storms), "region_engine": region.engine_id},
             )
-        await storm_engine.process_batch(scoped)
-        storms = storm_engine.get_storms()
-        hass.data[DOMAIN]["storms"] = storms
-        hass.bus.async_fire(f"{DOMAIN}_storms_updated", {"count": len(storms)})
-        _LOGGER.debug("StormEngine: %d actieve storms na batch van %d observaties",
-                      len(storms), len(observations))
+            hass.async_create_task(
+                mcs_store.async_save_engine(region.storage_key, region_storm_engine)
+            )
 
-    ofe = ObservationFusionEngine(on_batch=_on_ofe_batch)
-    hass.data[DOMAIN]["ofe"] = ofe
+        storm_engine._on_updated = _publish
+        hass.data[DOMAIN].update({
+            "storm_manager": storm_manager,
+            "region_engine": region,
+            "region_engines": storm_manager.get_all_engines(),
+            "storm_engine": storm_engine,
+            "ofe": ofe,
+            "storms": storm_engine.get_storms(),
+        })
+        _LOGGER.info(
+            "RegionEngine %s actief; %d persistente MCS-systemen hersteld",
+            region.engine_id, restored,
+        )
+        return restored
+
+    _activate_region(active_region)
 
     # ── Netatmo token (locatie-onafhankelijk) ─────────────────────────────
     client_id     = conf.get("netatmo_client_id")
@@ -140,9 +155,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     # ── Blitzortung (wereldwijd, locatie-onafhankelijk) ───────────────────
     def _on_blitz(obs):
-        center_lat = hass.data[DOMAIN].get("fictieve_lat", home_lat)
-        center_lon = hass.data[DOMAIN].get("fictieve_lon", home_lon)
-        if _distance_km(center_lat, center_lon, obs.lat, obs.lon) > radar_radius:
+        if storm_manager.route_observation(obs) == 0:
             return
         hass.data[DOMAIN]["last_lightning"] = obs
         hass.data[DOMAIN].setdefault("lightning_count", 0)
@@ -151,7 +164,6 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             "lat": obs.lat, "lon": obs.lon, "timestamp": obs.timestamp
         })
         log_lightning(hass, obs.lat, obs.lon, obs.timestamp)
-        hass.async_create_task(ofe.add_observation(obs))
 
     blitz = BlitzortungProvider(on_observation=_on_blitz)
     blitz.start()
@@ -439,6 +451,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     # ── Fictieve tracker locatie volgen ───────────────────────────────────
     async def _update_fictieve_location(now=None):
+        nonlocal active_region, storm_engine, ofe
         state = hass.states.get(fictieve_entity)
         if not state:
             _LOGGER.debug("Fictieve tracker: geen state voor %s", fictieve_entity)
@@ -465,8 +478,18 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
         hass.data[DOMAIN]["fictieve_lat"] = lat
         hass.data[DOMAIN]["fictieve_lon"] = lon
-        await ofe.reset()
-        removed = storm_engine.retain_within(lat, lon, radar_radius)
+        previous_region = active_region
+        region = storm_manager.assign_target(fictieve_entity, lat, lon)
+        if region is not previous_region:
+            await mcs_store.async_save_engine(
+                previous_region.storage_key, previous_region.storm_engine
+            )
+            _activate_region(region)
+        else:
+            active_region.target_locations[fictieve_entity] = (lat, lon)
+        removed = storm_engine.retain_within(
+            active_region.center_lat, active_region.center_lon, radar_radius
+        )
         hass.data[DOMAIN]["storms"] = storm_engine.get_storms()
         hass.data[DOMAIN]["lightning_count"] = 0
         hass.data[DOMAIN].pop("last_lightning", None)
@@ -509,6 +532,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     @callback
     def _on_ha_stop(event):
         blitz.stop()
+        for region in storm_manager.get_all_engines():
+            hass.async_create_task(
+                mcs_store.async_save_engine(region.storage_key, region.storm_engine)
+            )
         for unsubscribe in hass.data[DOMAIN].get("unsubscribers", []):
             unsubscribe()
         hass.data[DOMAIN]["unsubscribers"] = []
@@ -519,5 +546,5 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     from homeassistant.helpers import discovery
     await discovery.async_load_platform(hass, "sensor", DOMAIN, {}, config)
 
-    _LOGGER.info("Storm Tracker V3 v0.4.12 gestart")
+    _LOGGER.info("Storm Tracker V3 v0.4.15 gestart met echte RegionEngine-runtime")
     return True

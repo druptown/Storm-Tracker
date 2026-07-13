@@ -55,6 +55,7 @@ async def async_setup_platform(
     entities.append(StormTellerSensor(hass))
     entities.append(StormDetailSensor(hass))
     entities.append(McsDetectieSensor(hass))
+    entities.append(RegionEngineSensor(hass))
 
     async_add_entities(entities, update_before_add=True)
 
@@ -688,4 +689,43 @@ class McsDetectieSensor(StormTrackerBaseSensor):
                 "min_intense_cellen_50dbz": 1,
                 "min_duur_min": 180,
             },
+        }
+
+
+class RegionEngineSensor(StormTrackerBaseSensor):
+    """Diagnostiek van de werkelijk actieve dynamische runtime-regio's."""
+    _attr_name = "STV3 Region Engines"
+    _attr_unique_id = "stv3_region_engines"
+    _attr_icon = "mdi:radar"
+    _attr_native_unit_of_measurement = "engines"
+
+    @property
+    def _listen_events(self):
+        return [f"{DOMAIN}_storms_updated", f"{DOMAIN}_fictieve_update"]
+
+    @property
+    def native_value(self):
+        manager = self.hass.data.get(DOMAIN, {}).get("storm_manager")
+        return len(manager.get_all_engines()) if manager else 0
+
+    @property
+    def extra_state_attributes(self):
+        manager = self.hass.data.get(DOMAIN, {}).get("storm_manager")
+        if not manager:
+            return {"engines": []}
+        return {
+            "sharing_distance_km": manager.sharing_distance_km,
+            "engines": [
+                {
+                    "id": engine.engine_id,
+                    "centrum": [
+                        round(engine.center_lat, 4),
+                        round(engine.center_lon, 4),
+                    ],
+                    "observatieradius_km": engine.observation_radius_km,
+                    "targets": sorted(engine.projection_targets),
+                    "weather_systemen": len(engine.storm_engine.get_storms()),
+                }
+                for engine in manager.get_all_engines()
+            ],
         }
