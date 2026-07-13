@@ -95,6 +95,17 @@ class ObservationFusionEngine:
     ) -> int:
         return len(self.observations_last_n_min(minutes, obs_type))
 
+    async def reset(self) -> None:
+        """Wis observaties en annuleer een batch uit een vorige regio."""
+        task = self._batch_task
+        if task is not None and not task.done():
+            task.cancel()
+
+        async with self._lock:
+            self._buffer.clear()
+            self._pending.clear()
+            self._batch_task = None
+
     # ── Interne logica ────────────────────────────────────────────────────
 
     def _is_duplicate(self, obs: Observation) -> bool:

@@ -42,6 +42,20 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = ["sensor"]
 
+
+def _distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle afstand tussen twee WGS84-punten."""
+    radius_km = 6371.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+    a = (
+        math.sin(delta_phi / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
+    )
+    return radius_km * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
 CONFIG_SCHEMA = vol.Schema({
     DOMAIN: vol.Schema({
         vol.Required("home_lat"): cv.latitude,
@@ -86,7 +100,26 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     async def _on_ofe_batch(observations: list) -> None:
         """OFE stuurt een batch observaties naar de StormEngine."""
-        await storm_engine.process_batch(observations)
+        center_lat = hass.data[DOMAIN].get("fictieve_lat", home_lat)
+        center_lon = hass.data[DOMAIN].get("fictieve_lon", home_lon)
+        scoped = [
+            observation
+            for observation in observations
+            if _distance_km(
+                center_lat,
+                center_lon,
+                observation.lat,
+                observation.lon,
+            ) <= radar_radius
+        ]
+        rejected = len(observations) - len(scoped)
+        if rejected:
+            _LOGGER.debug(
+                "Dekkingsfilter: %d observaties buiten %.0f km genegeerd",
+                rejected,
+                radar_radius,
+            )
+        await storm_engine.process_batch(scoped)
         storms = storm_engine.get_storms()
         hass.data[DOMAIN]["storms"] = storms
         hass.bus.async_fire(f"{DOMAIN}_storms_updated", {"count": len(storms)})
@@ -107,6 +140,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     # ── Blitzortung (wereldwijd, locatie-onafhankelijk) ───────────────────
     def _on_blitz(obs):
+        center_lat = hass.data[DOMAIN].get("fictieve_lat", home_lat)
+        center_lon = hass.data[DOMAIN].get("fictieve_lon", home_lon)
+        if _distance_km(center_lat, center_lon, obs.lat, obs.lon) > radar_radius:
+            return
         hass.data[DOMAIN]["last_lightning"] = obs
         hass.data[DOMAIN].setdefault("lightning_count", 0)
         hass.data[DOMAIN]["lightning_count"] += 1
@@ -424,6 +461,20 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
         hass.data[DOMAIN]["fictieve_lat"] = lat
         hass.data[DOMAIN]["fictieve_lon"] = lon
+        await ofe.reset()
+        removed = storm_engine.retain_within(lat, lon, radar_radius)
+        hass.data[DOMAIN]["storms"] = storm_engine.get_storms()
+        hass.data[DOMAIN]["lightning_count"] = 0
+        hass.data[DOMAIN].pop("last_lightning", None)
+        hass.bus.async_fire(
+            f"{DOMAIN}_storms_updated",
+            {"count": len(hass.data[DOMAIN]["storms"]), "removed": removed},
+        )
+        _LOGGER.info(
+            "Regiowissel: %d WeatherSystems buiten %.0f km verwijderd",
+            removed,
+            radar_radius,
+        )
         _LOGGER.info("Fictieve tracker: (%.4f,%.4f) — providers herinitialiseren", lat, lon)
         hass.bus.async_fire(f"{DOMAIN}_fictieve_update", {"lat": lat, "lon": lon})
         await _init_location_providers(lat, lon)
@@ -464,5 +515,5 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     from homeassistant.helpers import discovery
     await discovery.async_load_platform(hass, "sensor", DOMAIN, {}, config)
 
-    _LOGGER.info("Storm Tracker V3 v0.4.3 gestart")
+    _LOGGER.info("Storm Tracker V3 v0.4.9 gestart")
     return True

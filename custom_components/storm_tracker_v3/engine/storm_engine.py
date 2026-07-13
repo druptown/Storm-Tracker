@@ -158,6 +158,31 @@ class StormEngine:
     def get_storm(self, storm_id: str) -> Optional[Storm]:
         return self._storms.get(storm_id)
 
+    def retain_within(
+        self, center_lat: float, center_lon: float, radius_km: float
+    ) -> int:
+        """Verwijder WeatherSystems buiten het actuele monitoringsgebied."""
+        remove_ids = [
+            storm_id
+            for storm_id, storm in self._storms.items()
+            if _haversine(
+                center_lat,
+                center_lon,
+                storm.centroid_lat,
+                storm.centroid_lon,
+            ) > radius_km
+        ]
+
+        for storm_id in remove_ids:
+            self._storms.pop(storm_id, None)
+            self._history.pop(storm_id, None)
+            self._last_geocode_pos.pop(storm_id, None)
+
+        if remove_ids and self._on_updated:
+            self._on_updated(list(self._storms.values()))
+
+        return len(remove_ids)
+
     # ── Observatie-verwerking per type ────────────────────────────────────
 
     def _assign_observation(self, obs, may_create: bool = True) -> None:

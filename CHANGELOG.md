@@ -1,5 +1,13 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+## v0.4.9
+
+- Alle providerobservaties worden begrensd tot het actuele monitoringsgebied.
+- Wereldwijde Blitzortung-inslagen buiten de ingestelde radarradius worden genegeerd.
+- Bij een trackerverplaatsing verdwijnen WeatherSystems buiten de nieuwe regio.
+- Wachtende OFE-observaties uit de vorige regio worden bij de wissel gewist.
+- De sensor `STV3 Actieve Radarbron` publiceert opnieuw zijn runtimewaarde.
+
 ## Overzicht per module
 
 | Module | Huidig | Omschrijving |

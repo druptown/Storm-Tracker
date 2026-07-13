@@ -196,3 +196,30 @@ def test_observations_last_n_min_filters_by_type_and_age(ofe_module, observation
     assert len(recent_radar) == 0, "radar-observatie van 1u geleden mag niet binnen de laatste 5 min tellen"
 
     assert ofe.total_observations(5, observation_module.ObservationType.LIGHTNING) == 1
+
+
+def test_reset_clears_old_region_and_cancels_pending_batch(
+    ofe_module, observation_module
+):
+    async def _run():
+        received = []
+
+        async def _on_batch(batch):
+            received.append(batch)
+
+        ofe = ofe_module.ObservationFusionEngine(on_batch=_on_batch)
+        observation = _obs(
+            observation_module,
+            observation_module.ObservationType.LIGHTNING,
+            44.8378,
+            -0.5792,
+        )
+        await ofe.add_observation(observation)
+        await ofe.reset()
+        await asyncio.sleep(ofe_module.BATCH_INTERVAL_S + 0.1)
+        return ofe, received
+
+    ofe, received = asyncio.run(_run())
+    assert ofe._buffer == []
+    assert ofe._pending == []
+    assert received == []

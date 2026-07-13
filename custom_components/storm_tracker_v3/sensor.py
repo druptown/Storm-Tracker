@@ -185,7 +185,15 @@ class ActiveRadarSourceSensor(StormTrackerBaseSensor):
 
     @property
     def _listen_events(self):
-        return [f"{DOMAIN}_radar_source_update"]
+        return [f"{DOMAIN}_radar_source_update", f"{DOMAIN}_radar_update"]
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.async_write_ha_state()
+
+    @property
+    def available(self) -> bool:
+        return True
 
     @property
     def native_value(self):

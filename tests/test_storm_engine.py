@@ -57,6 +57,33 @@ def test_far_lightning_creates_a_second_storm(storm_engine_module, observation_m
     assert len(storms) == 2, "twee ver uit elkaar liggende strikes horen twee storms te worden"
 
 
+def test_retain_within_removes_systems_from_previous_region(
+    storm_engine_module, observation_module
+):
+    engine = storm_engine_module.StormEngine(cluster_radius_km=10.0)
+    brest = _obs(
+        observation_module,
+        observation_module.ObservationType.LIGHTNING,
+        48.3904,
+        -4.4861,
+    )
+    bordeaux = _obs(
+        observation_module,
+        observation_module.ObservationType.LIGHTNING,
+        44.8378,
+        -0.5792,
+    )
+    asyncio.run(engine.process_batch([brest, bordeaux]))
+
+    removed = engine.retain_within(48.3904, -4.4861, 350.0)
+    storms = engine.get_storms()
+
+    assert removed == 1
+    assert len(storms) == 1
+    assert storms[0].centroid_lat == pytest.approx(48.3904)
+    assert set(engine._history) == {storms[0].storm_id}
+
+
 # ── MAX_STORMS: bescherming tegen ruis / verre cellen (Blokker 1) ──────────
 
 def test_max_storms_limit_is_respected(storm_engine_module, observation_module):
