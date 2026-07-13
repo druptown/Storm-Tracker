@@ -1,6 +1,7 @@
 """Storm Tracker V3 — tests/test_rainviewer.py v0.1.0"""
 from __future__ import annotations
 
+import asyncio
 import io
 
 import pytest
@@ -78,3 +79,37 @@ def test_extract_observations_all_dry_gives_empty_list(rainviewer_module):
     provider = rainviewer_module.RainViewerProvider(51.026, 4.478)
     obs = provider._extract_observations(buf.getvalue(), tx=16, ty=10)
     assert obs == []
+
+
+def test_same_frame_reuses_last_observations(rainviewer_module, observation_module):
+    async def _run():
+        provider = rainviewer_module.RainViewerProvider(48.3904, -4.4861)
+        calls = 0
+        expected = [
+            observation_module.Observation(
+                obs_type=observation_module.ObservationType.RADAR,
+                lat=48.4,
+                lon=-4.5,
+                timestamp=1_000.0,
+                intensity=4,
+                source="rainviewer",
+            )
+        ]
+
+        async def _path():
+            return "https://example.test/frame"
+
+        async def _observations(path):
+            nonlocal calls
+            calls += 1
+            return expected
+
+        provider._fetch_latest_path = _path
+        provider._fetch_tile_observations = _observations
+        first = await provider.fetch_observations()
+        second = await provider.fetch_observations()
+        return first, second, calls
+
+    first, second, calls = asyncio.run(_run())
+    assert first == second
+    assert calls == 1

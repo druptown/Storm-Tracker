@@ -46,12 +46,12 @@ def verify_opera_observations(
     radius_km: float = OPERA_CORROBORATION_RADIUS_KM,
     max_age_s: float = OPERA_CORROBORATION_MAX_AGE_S,
 ) -> OperaVerification:
-    """Accept trustworthy OPERA cells or low-quality cells seen by KMI/KNMI.
+    """Accept trustworthy OPERA cells or cells confirmed by another radar.
 
     OPERA's composite can contain strong but low-quality clutter.  Quality is
     therefore sufficient, but not required: a nearby, recent national-radar
-    pixel also confirms the cell.  Forecast observations are excluded by the
-    caller; this function remains provider-agnostic and easy to test.
+    observation also confirms the cell. Forecast observations are excluded by
+    the caller; this function remains provider-agnostic and easy to test.
     """
     references = tuple(corroborating)
     accepted = []

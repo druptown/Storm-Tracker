@@ -66,6 +66,16 @@ def test_opera_low_quality_is_accepted_near_recent_national_radar(radar_policy_m
     assert result.rejected == 0
 
 
+def test_opera_low_quality_is_accepted_near_recent_rainviewer(radar_policy_module):
+    opera = _obs(lat=48.37, lon=-3.65, timestamp=1_000.0, quality=0.1)
+    rainviewer = _obs(lat=48.40, lon=-3.62, timestamp=1_120.0)
+    result = radar_policy_module.verify_opera_observations(
+        [opera], [rainviewer]
+    )
+    assert result.accepted == (opera,)
+    assert result.corroborated == 1
+
+
 def test_opera_low_quality_rejects_distant_or_stale_confirmation(radar_policy_module):
     opera = _obs(lat=50.68, lon=5.80, timestamp=10_000.0, quality=0.0)
     distant = _obs(lat=52.60, lon=3.39, timestamp=10_000.0)

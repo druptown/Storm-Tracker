@@ -87,6 +87,7 @@ class RainViewerProvider:
         self._center_lat  = center_lat
         self._center_lon  = center_lon
         self._last_path:  Optional[str] = None   # om dubbele frames te skippen
+        self._last_observations: list[Observation] = []
 
     async def fetch_observations(self) -> list[Observation]:
         """
@@ -98,10 +99,11 @@ class RainViewerProvider:
             if path is None:
                 return []
             if path == self._last_path:
-                return []
+                return list(self._last_observations)
             self._last_path = path
-
-            return await self._fetch_tile_observations(path)
+            observations = await self._fetch_tile_observations(path)
+            self._last_observations = list(observations)
+            return observations
 
         except Exception:
             _LOGGER.exception("RainViewerProvider: fout bij ophalen radardata")

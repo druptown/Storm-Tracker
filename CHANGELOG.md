@@ -1,5 +1,13 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+## v0.4.10
+
+- RainViewer draait parallel als verificatiebron wanneer OPERA gezond is.
+- Lage OPERA-quality kan nu door recente RainViewer-neerslag bevestigd worden.
+- Bij OPERA-uitval wordt dezelfde RainViewer-fetch als fallback hergebruikt.
+- Een ongewijzigd RainViewer-frame hergebruikt zijn observaties in plaats van
+  tijdelijk nul observaties te publiceren.
+
 ## v0.4.9
 
 - Alle providerobservaties worden begrensd tot het actuele monitoringsgebied.

@@ -223,7 +223,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     async def _poll_rv(now=None, operational: bool = False):
         p = hass.data[DOMAIN].get("rv_provider")
-        if not p: return
+        if not p: return []
         obs = await p.fetch_observations()
         hass.data[DOMAIN]["last_rv_observations"] = obs
         hass.data[DOMAIN]["rv_count"] = len(obs)
@@ -274,15 +274,16 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         if not p: return []
         raw_obs = await p.fetch_observations(hass)
 
-        # A low OPERA quality score is not automatically dry: national radar
-        # may still confirm a genuine shower.  Conversely, unconfirmed q=0
-        # echoes must not create phantom WeatherSystems.
+        # A low OPERA quality score is not automatically dry: RainViewer or a
+        # national radar may still confirm a genuine shower. Conversely,
+        # unconfirmed low-quality echoes must not create phantom systems.
         from .providers.radar_policy import (
             OPERA_MIN_STANDALONE_QUALITY,
             verify_opera_observations,
         )
         references = list(hass.data[DOMAIN].get("last_kmi_observations", []))
         references.extend(hass.data[DOMAIN].get("knmi_current", []))
+        references.extend(hass.data[DOMAIN].get("last_rv_observations", []))
         verification = verify_opera_observations(raw_obs, references)
         obs = list(verification.accepted)
 
@@ -311,6 +312,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             "corroboration_sources": {
                 "kmi": len(hass.data[DOMAIN].get("last_kmi_observations", [])),
                 "knmi": len(hass.data[DOMAIN].get("knmi_current", [])),
+                "rainviewer": len(hass.data[DOMAIN].get("last_rv_observations", [])),
             },
         })
         hass.data[DOMAIN]["opera_count"] = len(obs)
@@ -342,6 +344,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
         opera = hass.data[DOMAIN].get("opera_provider")
         rainviewer = hass.data[DOMAIN].get("rv_provider")
+        rainviewer_obs = await _poll_rv(operational=False) if rainviewer else []
         if opera:
             await _poll_opera()
 
@@ -354,7 +357,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         hass.data[DOMAIN]["radar_source_reason"] = decision.reason
 
         if decision.source == "rainviewer":
-            await _poll_rv(operational=True)
+            for observation in rainviewer_obs:
+                hass.async_create_task(ofe.add_observation(observation))
         elif decision.source is None:
             _LOGGER.warning("Geen operationele radarbron: %s", decision.reason)
 
@@ -515,5 +519,5 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     from homeassistant.helpers import discovery
     await discovery.async_load_platform(hass, "sensor", DOMAIN, {}, config)
 
-    _LOGGER.info("Storm Tracker V3 v0.4.9 gestart")
+    _LOGGER.info("Storm Tracker V3 v0.4.10 gestart")
     return True
