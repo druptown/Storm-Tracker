@@ -1,0 +1,7 @@
+pytest>=8,<10
+pytest-asyncio>=0.24,<2
+aiohttp>=3.11,<4
+h5py>=3.11,<4
+numpy>=2.0,<3
+Pillow>=11,<13
+pyproj>=3.6,<4

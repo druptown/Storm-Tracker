@@ -1,0 +1,17 @@
+{
+  "domain": "storm_tracker_v3",
+  "name": "Storm Tracker V3",
+  "version": "0.4.8",
+  "documentation": "https://github.com/druptown/Storm-Tracker",
+  "issue_tracker": "https://github.com/druptown/Storm-Tracker/issues",
+  "requirements": [
+    "h5py>=3.11,<4",
+    "numpy>=2.0,<3",
+    "pyproj>=3.6,<4"
+  ],
+  "dependencies": [],
+  "codeowners": ["@druptown"],
+  "iot_class": "cloud_polling",
+  "config_flow": false,
+  "icon": "mdi:weather-lightning"
+}
