@@ -1,5 +1,15 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+## v0.4.16
+
+- Open-Meteo-grid verlaagd van 948 naar 324 modelpunten; OPERA blijft de
+  fijnmazige primaire radarbron.
+- Succesvolle Open-Meteo-resultaten worden 30 minuten gecachet en niet opnieuw
+  als verse OFE-observaties verwerkt.
+- HTTP 429 activeert exponentiÃ«le backoff van 30 minuten tot maximaal zes uur
+  en respecteert een numerieke `Retry-After`-header.
+- `wet_locations_now` wordt nu werkelijk geleverd voor grondverificatie.
+
 ## v0.4.15
 
 - De `StormManager` bezit nu de werkelijk gebruikte StormEngine/OFE-runtime;

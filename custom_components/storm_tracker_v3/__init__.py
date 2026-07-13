@@ -408,6 +408,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         result = await p.fetch()
         hass.data[DOMAIN]["open_meteo_result"] = result
         hass.bus.async_fire(f"{DOMAIN}_open_meteo_update", result)
+        sequence = result.get("fetch_sequence", 0)
+        if sequence == hass.data[DOMAIN].get("open_meteo_processed_sequence"):
+            return
+        hass.data[DOMAIN]["open_meteo_processed_sequence"] = sequence
         lat = hass.data[DOMAIN].get("fictieve_lat", home_lat)
         lon = hass.data[DOMAIN].get("fictieve_lon", home_lon)
         log_open_meteo(hass, result, lat, lon)
