@@ -14,6 +14,19 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+@dataclass(slots=True)
+class RadarCellSnapshot:
+    """Compacte lokale radarcel binnen een groter WeatherSystem."""
+    cell_id: str
+    timestamp: float
+    lat: float
+    lon: float
+    intensity: int
+    area_km2: float
+    footprint_points: tuple[tuple[float, float], ...] = ()
+    parent_system_id: Optional[str] = None
+
+
 @dataclass
 class Storm:
     """
@@ -58,6 +71,15 @@ class Storm:
     # Elk element: (timestamp, lat, lon, intensity)
     max_radar_intensity:  int = 0   # hoogste intensiteit (0-8) gezien in huidige cyclus
     _radar_observations:  list = field(default_factory=list, repr=False)
+    radar_cells: dict[str, RadarCellSnapshot] = field(default_factory=dict)
+    source_system_ids: set[str] = field(default_factory=set)
+    parent_system_areas: dict[str, float] = field(default_factory=dict)
+    parent_system_footprints: dict[
+        str, tuple[tuple[float, float], ...]
+    ] = field(default_factory=dict, repr=False)
+    _source_system_last_seen: dict[str, float] = field(
+        default_factory=dict, repr=False
+    )
 
     # Netatmo-verificatie
     # Tellers worden per poll-cyclus bijgehouden; de Coordinator kan
@@ -103,3 +125,39 @@ class Storm:
         """Verwijder oude strikes uit history."""
         cutoff = time.time() - max_age_minutes * 60
         self._strike_history = [(ts, la, lo) for ts, la, lo in self._strike_history if ts >= cutoff]
+
+    def prune_radar_cells(self, max_age_minutes: int = 20) -> None:
+        """Houd alleen recente lokale radarcellen en bron-parent-ID's bij."""
+        cutoff = time.time() - max_age_minutes * 60
+        self.radar_cells = {
+            key: cell for key, cell in self.radar_cells.items()
+            if cell.timestamp >= cutoff
+        }
+        stale_parents = [
+            parent_id
+            for parent_id, last_seen in self._source_system_last_seen.items()
+            if last_seen < cutoff
+        ]
+        for parent_id in stale_parents:
+            self._source_system_last_seen.pop(parent_id, None)
+            self.source_system_ids.discard(parent_id)
+            self.parent_system_areas.pop(parent_id, None)
+            self.parent_system_footprints.pop(parent_id, None)
+
+    def closest_radar_point(
+        self, target_lat: float, target_lon: float
+    ) -> Optional[tuple[float, float, float]]:
+        """Geef (afstand_km, lat, lon) van de dichtste lokale radarcel."""
+        if not self.radar_cells:
+            return None
+        from .storm_engine import _haversine
+
+        candidates = []
+        for cell in self.radar_cells.values():
+            points = cell.footprint_points or ((cell.lat, cell.lon),)
+            distance, point = min(
+                (_haversine(target_lat, target_lon, lat, lon), (lat, lon))
+                for lat, lon in points
+            )
+            candidates.append((distance, point[0], point[1]))
+        return min(candidates, key=lambda item: item[0])

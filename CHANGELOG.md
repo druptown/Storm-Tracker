@@ -1,5 +1,15 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+## v0.4.13
+
+- Eén brede OPERA-component wordt als parent-WeatherSystem behouden, met de
+  adaptief gesegmenteerde zware kernen als afzonderlijke RadarCells.
+- Parent- en cell-ID's, oppervlaktes en compacte footprints blijven door de
+  Observation Pipeline tot in de WeatherSystem Engine beschikbaar.
+- Afstand tot de dichtstbijzijnde storm gebruikt voortaan de dichtste lokale
+  RadarCell-footprint in plaats van uitsluitend de systeemcentroid.
+- Diagnostiek toont per OPERA-cel ook de parent-component en parentoppervlakte.
+
 ## v0.4.12
 
 - Buitensporig grote OPERA-componenten worden adaptief opgesplitst rond

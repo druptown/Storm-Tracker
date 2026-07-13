@@ -202,6 +202,11 @@ def test_large_cells_are_split_on_strong_cores(opera_module):
     assert len(segmented) == 2
     assert all(len(component) < len(plain[0]) for component in segmented)
 
+    groups = opera_module._segment_component_groups(mask, radar, min_pixels=5)
+    assert len(groups) == 1
+    assert len(groups[0].parent_pixels) == len(plain[0])
+    assert len(groups[0].child_pixels) == 2
+
 
 def test_small_light_rain_cell_keeps_original_sensitivity(opera_module):
     import numpy as np

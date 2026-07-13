@@ -326,6 +326,29 @@ def _make_cell(opera_module, max_dbz, area_km2=10.0):
     )
 
 
+def test_cells_preserve_parent_and_child_identity(opera_module):
+    provider = opera_module.OperaProvider(51.0, 4.5)
+    cells = [
+        opera_module.OperaCell(
+            centroid_lat=48.8, centroid_lon=-3.2, area_km2=300.0,
+            max_dbz=45.0, mean_dbz=30.0, mean_quality=0.4,
+            pixelcount=300, footprint_points=((48.8, -3.2),),
+            parent_component=2, child_component=1,
+            parent_area_km2=46_627.0,
+            parent_footprint_points=((48.4, -4.5), (48.8, -1.4)),
+        )
+    ]
+
+    observations = provider._cells_to_observations(
+        cells, "20260713T120500Z"
+    )
+
+    assert observations[0].radar_cell_id.endswith(":p2:c1")
+    assert observations[0].parent_system_id.endswith(":p2")
+    assert observations[0].parent_area_km2 == 46_627.0
+    assert len(observations[0].parent_footprint_points) == 2
+
+
 @pytest.mark.parametrize("dbz,expected_intensity", [
     (5.0, 0),
     (9.9, 0),

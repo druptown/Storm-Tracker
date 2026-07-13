@@ -54,6 +54,13 @@ class Observation:
     # Compacte puntenwolk op de werkelijk bezette radarcel. OPERA bewaart
     # maximaal ongeveer één representatief punt per 8x8 km rasterblok.
     footprint_points: tuple[tuple[float, float], ...] = ()
+    # Radarhiërarchie. Een bron kan één brede neerslagband opsplitsen in
+    # meerdere lokale cellen. ``parent_system_id`` groepeert die cellen per
+    # radarframe; de WeatherSystem Engine bewaart vervolgens de kinderen.
+    radar_cell_id: Optional[str] = None
+    parent_system_id: Optional[str] = None
+    parent_area_km2: Optional[float] = None
+    parent_footprint_points: tuple[tuple[float, float], ...] = ()
 
     # RAIN-specifiek (Netatmo grondstation)
     rain_mm:     Optional[float] = None   # mm/u gemeten (rain_live)

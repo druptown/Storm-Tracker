@@ -124,6 +124,17 @@ class OperaCell:
     mean_quality: float
     pixelcount:   int
     footprint_points: tuple[tuple[float, float], ...] = ()
+    parent_component: int = 0
+    child_component: int = 0
+    parent_area_km2: float = 0.0
+    parent_footprint_points: tuple[tuple[float, float], ...] = ()
+
+
+@dataclass
+class ComponentGroup:
+    """Eén oorspronkelijke radarecho met één of meer lokale kernen."""
+    parent_pixels: object
+    child_pixels: list
 
 
 # ── Geometrie helpers ─────────────────────────────────────────────────────────
@@ -253,7 +264,7 @@ def _grow_seed_components(
     ]
 
 
-def _segment_components(mask, radar, min_pixels: int) -> list:
+def _segment_component_groups(mask, radar, min_pixels: int) -> list[ComponentGroup]:
     """Split only implausibly large echoes using adaptive strong-rain cores.
 
     Ordinary and light-rain components keep the original 8 dBZ sensitivity.
@@ -267,7 +278,7 @@ def _segment_components(mask, radar, min_pixels: int) -> list:
     result = []
     for component in _label_components(mask, min_pixels):
         if len(component) <= MAX_UNSPLIT_CELL_PIXELS:
-            result.append(component)
+            result.append(ComponentGroup(component, [component]))
             continue
 
         component_mask = np.zeros(mask.shape, dtype=np.bool_)
@@ -284,18 +295,29 @@ def _segment_components(mask, radar, min_pixels: int) -> list:
         if not seeds:
             # A broad but uniformly light field has no defensible strong cores;
             # retain it rather than silently losing precipitation data.
-            result.append(component)
+            result.append(ComponentGroup(component, [component]))
             continue
 
         grown = _grow_seed_components(
             component_mask, seeds, SPLIT_GROWTH_PIXELS
         )
-        result.extend(grown or [component])
+        result.append(ComponentGroup(component, grown or [component]))
 
     return result
 
 
-def _analyze_components(components, radar, quality, window, grid) -> list[OperaCell]:
+def _segment_components(mask, radar, min_pixels: int) -> list:
+    """Compatibele vlakke lijst van lokale cellen voor bestaande callers."""
+    return [
+        child
+        for group in _segment_component_groups(mask, radar, min_pixels)
+        for child in group.child_pixels
+    ]
+
+
+def _analyze_components(
+    components, radar, quality, window, grid, component_metadata=None
+) -> list[OperaCell]:
     import numpy as np
     from pyproj import CRS, Transformer
 
@@ -306,7 +328,7 @@ def _analyze_components(components, radar, quality, window, grid) -> list[OperaC
         always_xy=True
     )
     cells = []
-    for pixels in components:
+    for component_index, pixels in enumerate(components):
         rows, cols = pixels[:, 0], pixels[:, 1]
         values    = radar[rows, cols]
         qualities = quality[rows, cols]
@@ -338,6 +360,10 @@ def _analyze_components(components, radar, quality, window, grid) -> list[OperaC
             for sample_lat, sample_lon in zip(sample_lats, sample_lons)
         )
 
+        metadata = (
+            component_metadata[component_index]
+            if component_metadata is not None else {}
+        )
         cells.append(OperaCell(
             centroid_lat = round(float(lat), 5),
             centroid_lon = round(float(lon), 5),
@@ -347,6 +373,7 @@ def _analyze_components(components, radar, quality, window, grid) -> list[OperaC
             mean_quality = round(float(qualities.mean()), 3),
             pixelcount   = len(pixels),
             footprint_points = footprint_points,
+            **metadata,
         ))
     return sorted(cells, key=lambda c: c.area_km2, reverse=True)
 
@@ -401,8 +428,30 @@ def _parse_hdf5_slice(data: bytes, bbox: tuple) -> tuple[list[OperaCell], str]:
             & (quality != quality_nodata)
         )
         mask       = valid & (radar >= MIN_DBZ)
-        components = _segment_components(mask, radar, MIN_PIXELS)
-        cells      = _analyze_components(components, radar, quality, window, grid)
+        groups = _segment_component_groups(mask, radar, MIN_PIXELS)
+        cells = []
+        for parent_index, group in enumerate(groups):
+            parent = _analyze_components(
+                [group.parent_pixels], radar, quality, window, grid
+            )[0]
+            metadata = [
+                {
+                    "parent_component": parent_index,
+                    "child_component": child_index,
+                    "parent_area_km2": parent.area_km2,
+                    "parent_footprint_points": parent.footprint_points,
+                }
+                for child_index, _ in enumerate(group.child_pixels)
+            ]
+            cells.extend(_analyze_components(
+                group.child_pixels,
+                radar,
+                quality,
+                window,
+                grid,
+                component_metadata=metadata,
+            ))
+        cells.sort(key=lambda cell: cell.area_km2, reverse=True)
 
         date = _text_attr(h5["what"].attrs.get("date", ""))
         time_ = _text_attr(h5["what"].attrs.get("time", ""))
@@ -732,6 +781,9 @@ class OperaProvider:
                     "quality": cell.mean_quality,
                     "pixels": cell.pixelcount,
                     "footprint_points": len(cell.footprint_points),
+                    "parent_component": cell.parent_component,
+                    "parent_area_km2": cell.parent_area_km2,
+                    "parent_footprint_points": len(cell.parent_footprint_points),
                 }
                 for cell in cells[:MAX_DIAGNOSTIC_CELLS]
             ]
@@ -791,6 +843,15 @@ class OperaProvider:
                 area_km2  = cell.area_km2,
                 quality   = cell.mean_quality,
                 footprint_points = cell.footprint_points,
+                radar_cell_id = (
+                    f"opera:{timestamp_str}:p{cell.parent_component}:"
+                    f"c{cell.child_component}"
+                ),
+                parent_system_id = (
+                    f"opera:{timestamp_str}:p{cell.parent_component}"
+                ),
+                parent_area_km2 = cell.parent_area_km2,
+                parent_footprint_points = cell.parent_footprint_points,
                 source    = "opera",
             ))
         return obs

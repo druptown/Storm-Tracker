@@ -26,7 +26,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from .storm import Storm
+from .storm import RadarCellSnapshot, Storm
 from ..geometry.bounding_box import compute_bounding_box, bounding_box_changed
 from ..geometry.hull import convex_hull, hull_radius_km
 from ..geometry.geocode import nearest_place, PlaceEntry
@@ -130,6 +130,7 @@ class StormEngine:
 
         # 4. Alle actieve storms bijwerken
         for storm in self._storms.values():
+            storm.prune_radar_cells()
             storm.update_counts()
             self._update_centroid(storm)
             self._update_movement(storm)
@@ -195,11 +196,23 @@ class StormEngine:
         best_storm: Optional[Storm] = None
         best_dist:  float           = self._cluster_radius
 
-        for storm in self._storms.values():
+        # Alle lokale kernen uit dezelfde oorspronkelijke OPERA-component
+        # horen binnen deze batch onvoorwaardelijk bij hetzelfde WeatherSystem.
+        parent_system_id = getattr(obs, "parent_system_id", None)
+        if parent_system_id:
+            best_storm = next(
+                (
+                    storm for storm in self._storms.values()
+                    if not storm.is_dormant
+                    and parent_system_id in storm.source_system_ids
+                ),
+                None,
+            )
+
+        for storm in self._storms.values() if best_storm is None else ():
             if storm.is_dormant:
                 continue
-            dist = _haversine(obs.lat, obs.lon,
-                              storm.centroid_lat, storm.centroid_lon)
+            dist = self._distance_to_storm(obs, storm)
             if dist < best_dist:
                 best_dist  = dist
                 best_storm = storm
@@ -217,6 +230,23 @@ class StormEngine:
                 self._new_storm(obs)
             else:
                 _LOGGER.debug("Max storms bereikt, observatie genegeerd")
+
+    @staticmethod
+    def _distance_to_storm(obs, storm: Storm) -> float:
+        """Match tegen lokale radarcellen, niet enkel de systeemcentroid."""
+        distances = [
+            _haversine(
+                obs.lat,
+                obs.lon,
+                storm.centroid_lat,
+                storm.centroid_lon,
+            )
+        ]
+        distances.extend(
+            _haversine(obs.lat, obs.lon, cell.lat, cell.lon)
+            for cell in storm.radar_cells.values()
+        )
+        return min(distances)
 
     def _apply_observation_to_storm(self, storm: Storm, obs) -> None:
         """Pas de effecten van een observatie toe op een storm-object."""
@@ -243,6 +273,29 @@ class StormEngine:
             # Max intensiteit bijhouden voor clutter-filtering
             if (obs.intensity or 0) > storm.max_radar_intensity:
                 storm.max_radar_intensity = obs.intensity or 0
+            cell_id = getattr(obs, "radar_cell_id", None) or (
+                f"{obs.source}:{obs.timestamp:.0f}:{obs.lat:.4f}:{obs.lon:.4f}"
+            )
+            parent_system_id = getattr(obs, "parent_system_id", None)
+            storm.radar_cells[cell_id] = RadarCellSnapshot(
+                cell_id=cell_id,
+                timestamp=obs.timestamp,
+                lat=obs.lat,
+                lon=obs.lon,
+                intensity=obs.intensity or 0,
+                area_km2=obs.area_km2 or 0.0,
+                footprint_points=tuple(obs.footprint_points or ()),
+                parent_system_id=parent_system_id,
+            )
+            if parent_system_id:
+                storm.source_system_ids.add(parent_system_id)
+                storm._source_system_last_seen[parent_system_id] = obs.timestamp
+                if obs.parent_area_km2 is not None:
+                    storm.parent_system_areas[parent_system_id] = obs.parent_area_km2
+                if obs.parent_footprint_points:
+                    storm.parent_system_footprints[parent_system_id] = tuple(
+                        obs.parent_footprint_points
+                    )
 
     def _apply_rain_verification(self, obs) -> None:
         """
@@ -529,6 +582,11 @@ class StormEngine:
         keeper.strike_count += other.strike_count
         keeper.update_counts()
         keeper._dirty = True
+        keeper.radar_cells.update(other.radar_cells)
+        keeper.source_system_ids.update(other.source_system_ids)
+        keeper.parent_system_areas.update(other.parent_system_areas)
+        keeper.parent_system_footprints.update(other.parent_system_footprints)
+        keeper._source_system_last_seen.update(other._source_system_last_seen)
 
         # Gecombineerde centroid (gewogen naar strike_count)
         total = keeper.strikes_60min + other.strikes_60min

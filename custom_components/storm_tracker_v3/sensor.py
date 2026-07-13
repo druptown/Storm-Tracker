@@ -519,6 +519,8 @@ class StormTellerSensor(StormTrackerBaseSensor):
                     "inslagen":    s.strike_count,
                     "vertrouwen":  s.confidence,
                     "plaatsnaam":  getattr(s, "place_name", None),
+                    "radarcellen": len(getattr(s, "radar_cells", {})),
+                    "bron_systemen": len(getattr(s, "source_system_ids", set())),
                 }
                 for s in storms
             ]
@@ -557,8 +559,18 @@ class StormDetailSensor(StormTrackerBaseSensor):
             dlon = math.radians(lo2 - lo1)
             a = math.sin(dlat/2)**2 + math.cos(math.radians(la1)) * math.cos(math.radians(la2)) * math.sin(dlon/2)**2
             return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-        closest = min(storms, key=lambda s: haversine(lat, lon, s.centroid_lat, s.centroid_lon))
-        return round(haversine(lat, lon, closest.centroid_lat, closest.centroid_lon), 1)
+        def closest_point(storm):
+            radar = storm.closest_radar_point(lat, lon)
+            return radar or (
+                haversine(lat, lon, storm.centroid_lat, storm.centroid_lon),
+                storm.centroid_lat,
+                storm.centroid_lon,
+            )
+        closest_data = min(
+            ((closest_point(storm), storm) for storm in storms),
+            key=lambda item: item[0][0],
+        )
+        return round(closest_data[0][0], 1)
 
     @property
     def extra_state_attributes(self):
@@ -574,8 +586,18 @@ class StormDetailSensor(StormTrackerBaseSensor):
             dlon = math.radians(lo2 - lo1)
             a = math.sin(dlat/2)**2 + math.cos(math.radians(la1)) * math.cos(math.radians(la2)) * math.sin(dlon/2)**2
             return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-        closest = min(storms, key=lambda s: haversine(lat, lon, s.centroid_lat, s.centroid_lon))
-        afstand = haversine(lat, lon, closest.centroid_lat, closest.centroid_lon)
+        def closest_point(storm):
+            radar = storm.closest_radar_point(lat, lon)
+            return radar or (
+                haversine(lat, lon, storm.centroid_lat, storm.centroid_lon),
+                storm.centroid_lat,
+                storm.centroid_lon,
+            )
+        point, closest = min(
+            ((closest_point(storm), storm) for storm in storms),
+            key=lambda item: item[0][0],
+        )
+        afstand, impact_lat, impact_lon = point
 
         # ETA berekenen
         eta_min = None
@@ -584,8 +606,10 @@ class StormDetailSensor(StormTrackerBaseSensor):
 
         return {
             "storm_id":    closest.storm_id,
-            "lat":         round(closest.centroid_lat, 4),
-            "lon":         round(closest.centroid_lon, 4),
+            "lat":         round(impact_lat, 4),
+            "lon":         round(impact_lon, 4),
+            "system_lat":  round(closest.centroid_lat, 4),
+            "system_lon":  round(closest.centroid_lon, 4),
             "afstand_km":  round(afstand, 1),
             "richting":    round(closest.heading_deg, 0) if closest.heading_deg is not None else None,
             "snelheid_kmh": round(closest.speed_kmh, 1) if closest.speed_kmh is not None else None,
@@ -594,4 +618,6 @@ class StormDetailSensor(StormTrackerBaseSensor):
             "vertrouwen":  closest.confidence,
             "plaatsnaam":  getattr(closest, "place_name", None),
             "radius_km":   round(closest.radius_km, 1),
+            "radarcellen": len(getattr(closest, "radar_cells", {})),
+            "bron_systemen": len(getattr(closest, "source_system_ids", set())),
         }

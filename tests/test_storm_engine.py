@@ -116,6 +116,53 @@ def test_radar_cells_also_respect_max_storms(storm_engine_module, observation_mo
     assert len(engine.get_storms()) <= 2
 
 
+def test_radar_children_share_parent_weather_system(
+    storm_engine_module, observation_module
+):
+    engine = storm_engine_module.StormEngine(cluster_radius_km=10.0)
+    timestamp = time.time()
+    children = [
+        _obs(
+            observation_module, observation_module.ObservationType.RADAR,
+            48.4, -4.4, ts=timestamp, intensity=7,
+            radar_cell_id="opera:frame:p0:c0",
+            parent_system_id="opera:frame:p0", area_km2=400.0,
+        ),
+        _obs(
+            observation_module, observation_module.ObservationType.RADAR,
+            48.8, -1.4, ts=timestamp, intensity=8,
+            radar_cell_id="opera:frame:p0:c1",
+            parent_system_id="opera:frame:p0", area_km2=600.0,
+        ),
+    ]
+
+    asyncio.run(engine.process_batch(children))
+
+    storms = engine.get_storms()
+    assert len(storms) == 1
+    assert len(storms[0].radar_cells) == 2
+    assert storms[0].source_system_ids == {"opera:frame:p0"}
+
+
+def test_closest_radar_point_uses_child_footprint(
+    storm_engine_module, observation_module
+):
+    engine = storm_engine_module.StormEngine(cluster_radius_km=10.0)
+    radar = _obs(
+        observation_module, observation_module.ObservationType.RADAR,
+        48.8, -3.2, intensity=8, radar_cell_id="cell-1",
+        parent_system_id="parent-1",
+        footprint_points=((48.4, -4.45), (48.8, -3.2)),
+    )
+    asyncio.run(engine.process_batch([radar]))
+
+    distance, lat, lon = engine.get_storms()[0].closest_radar_point(
+        48.3904, -4.4861
+    )
+    assert distance < 5.0
+    assert (lat, lon) == (48.4, -4.45)
+
+
 # ── RAIN: verifieert, creëert NOOIT een nieuwe storm ────────────────────────
 
 def test_rain_alone_never_creates_a_storm(storm_engine_module, observation_module):
