@@ -184,6 +184,37 @@ def test_component_labeling_is_8_connected_not_4(opera_module):
     )
 
 
+def test_large_cells_are_split_on_strong_cores(opera_module):
+    """A weak bridge must not turn two heavy showers into one giant cell."""
+    import numpy as np
+
+    radar = np.zeros((50, 90), dtype=float)
+    radar[5:45, 2:42] = 45.0
+    radar[5:45, 48:88] = 45.0
+    radar[24, 42:48] = 8.0
+    mask = radar >= opera_module.MIN_DBZ
+
+    plain = opera_module._label_components(mask, min_pixels=5)
+    segmented = opera_module._segment_components(mask, radar, min_pixels=5)
+
+    assert len(plain) == 1
+    assert len(plain[0]) > opera_module.MAX_UNSPLIT_CELL_PIXELS
+    assert len(segmented) == 2
+    assert all(len(component) < len(plain[0]) for component in segmented)
+
+
+def test_small_light_rain_cell_keeps_original_sensitivity(opera_module):
+    import numpy as np
+
+    radar = np.zeros((20, 20), dtype=float)
+    radar[5:10, 5:10] = 9.0
+    mask = radar >= opera_module.MIN_DBZ
+    segmented = opera_module._segment_components(mask, radar, min_pixels=5)
+
+    assert len(segmented) == 1
+    assert len(segmented[0]) == 25
+
+
 # ── 5. Component aan de rand van een slice ────────────────────────────────
 
 def test_edge_cell_detected_when_partially_inside_crop(opera_module, opera_fixture_file):

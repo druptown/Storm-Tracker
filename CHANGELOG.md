@@ -1,5 +1,14 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+## v0.4.12
+
+- Buitensporig grote OPERA-componenten worden adaptief opgesplitst rond
+  afzonderlijke zware regenkernen.
+- Lichte regen mag nog vijf rasterpixels rond een kern meegroeien, maar kan
+  verschillende kernen niet opnieuw aan elkaar verbinden.
+- Kleine en gelijkmatig lichte regengebieden behouden de bestaande 8 dBZ-
+  gevoeligheid.
+
 ## v0.4.11
 
 - OPERA-observaties bewaren voortaan een compacte footprint van werkelijk

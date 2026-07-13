@@ -1,4 +1,4 @@
-"""Storm Tracker V3 — providers/opera.py v0.2.0
+"""Storm Tracker V3 — providers/opera.py v0.3.0
 
 Provider: OPERA radar composiet via EUMETNET MeteoGate S3
 
@@ -23,6 +23,8 @@ Endpoint:  https://s3.waw3-1.cloudferro.com
 Dependencies: h5py, numpy, pyproj (in manifest.json requirements)
 
 Versiegeschiedenis:
+  v0.3.0 — adaptieve kernsegmentatie voor buitensporig grote, door lichte
+            neerslag verbonden componenten
   v0.2.0 — S3 paginering via IsTruncated/NextContinuationToken;
             volledige S3-key bewaren; datum uit bestandsnaam afleiden;
             productleeftijd validatie (max 15 min);
@@ -68,6 +70,9 @@ MIN_PIXELS   = 5
 CONNECTIVITY = 8
 MAX_DIAGNOSTIC_CELLS = 40
 FOOTPRINT_SAMPLE_SIZE_M = 8_000.0
+MAX_UNSPLIT_CELL_PIXELS = 3_000
+SPLIT_CORE_THRESHOLDS_DBZ = (12.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0)
+SPLIT_GROWTH_PIXELS = 5
 
 # Werkelijk OPERA dekkingsgebied (uit API metadata)
 OPERA_LON_MIN = -22.635361
@@ -207,6 +212,89 @@ def _label_components(mask, min_pixels: int) -> list:
     return components
 
 
+def _grow_seed_components(
+    support_mask, seeds: list, max_steps: int
+) -> list:
+    """Grow separate rain cores into weak rain without merging the cores."""
+    import numpy as np
+
+    height, width = support_mask.shape
+    owner = np.full(support_mask.shape, -1, dtype=np.int32)
+    distance = np.full(support_mask.shape, max_steps + 1, dtype=np.int16)
+    queue = deque()
+
+    for seed_id, seed in enumerate(seeds):
+        for row, col in seed:
+            rr, cc = int(row), int(col)
+            owner[rr, cc] = seed_id
+            distance[rr, cc] = 0
+            queue.append((rr, cc))
+
+    while queue:
+        row, col = queue.popleft()
+        current_distance = int(distance[row, col])
+        if current_distance >= max_steps:
+            continue
+        for rr, cc in _neighbors(row, col, height, width):
+            if not support_mask[rr, cc] or owner[rr, cc] >= 0:
+                continue
+            owner[rr, cc] = owner[row, col]
+            distance[rr, cc] = current_distance + 1
+            queue.append((rr, cc))
+
+    owned_pixels = np.argwhere(owner >= 0).astype(np.int32)
+    if not len(owned_pixels):
+        return []
+    owned_ids = owner[owned_pixels[:, 0], owned_pixels[:, 1]]
+    return [
+        owned_pixels[owned_ids == seed_id]
+        for seed_id in range(len(seeds))
+        if np.count_nonzero(owned_ids == seed_id) >= MIN_PIXELS
+    ]
+
+
+def _segment_components(mask, radar, min_pixels: int) -> list:
+    """Split only implausibly large echoes using adaptive strong-rain cores.
+
+    Ordinary and light-rain components keep the original 8 dBZ sensitivity.
+    A component larger than ``MAX_UNSPLIT_CELL_PIXELS`` is progressively
+    thresholded until compact cores emerge. Each core may reclaim only a small
+    halo of the original weak-rain mask, preventing thin drizzle/noise bridges
+    from joining unrelated systems again.
+    """
+    import numpy as np
+
+    result = []
+    for component in _label_components(mask, min_pixels):
+        if len(component) <= MAX_UNSPLIT_CELL_PIXELS:
+            result.append(component)
+            continue
+
+        component_mask = np.zeros(mask.shape, dtype=np.bool_)
+        component_mask[component[:, 0], component[:, 1]] = True
+        seeds = []
+        for threshold in SPLIT_CORE_THRESHOLDS_DBZ:
+            candidates = _label_components(
+                component_mask & (radar >= threshold), min_pixels
+            )
+            if candidates and max(map(len, candidates)) <= MAX_UNSPLIT_CELL_PIXELS:
+                seeds = candidates
+                break
+
+        if not seeds:
+            # A broad but uniformly light field has no defensible strong cores;
+            # retain it rather than silently losing precipitation data.
+            result.append(component)
+            continue
+
+        grown = _grow_seed_components(
+            component_mask, seeds, SPLIT_GROWTH_PIXELS
+        )
+        result.extend(grown or [component])
+
+    return result
+
+
 def _analyze_components(components, radar, quality, window, grid) -> list[OperaCell]:
     import numpy as np
     from pyproj import CRS, Transformer
@@ -313,7 +401,7 @@ def _parse_hdf5_slice(data: bytes, bbox: tuple) -> tuple[list[OperaCell], str]:
             & (quality != quality_nodata)
         )
         mask       = valid & (radar >= MIN_DBZ)
-        components = _label_components(mask, MIN_PIXELS)
+        components = _segment_components(mask, radar, MIN_PIXELS)
         cells      = _analyze_components(components, radar, quality, window, grid)
 
         date = _text_attr(h5["what"].attrs.get("date", ""))
@@ -522,6 +610,11 @@ class OperaProvider:
             "last_key": self._last_key,
             "min_dbz": MIN_DBZ,
             "min_pixels": MIN_PIXELS,
+            "segmentation": {
+                "max_unsplit_pixels": MAX_UNSPLIT_CELL_PIXELS,
+                "core_thresholds_dbz": list(SPLIT_CORE_THRESHOLDS_DBZ),
+                "growth_pixels": SPLIT_GROWTH_PIXELS,
+            },
             "quality_filter_enabled": "cross_source",
             "radius_km": self._radius,
             "bbox": {

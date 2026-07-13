@@ -14,8 +14,8 @@ Providers -> Observation Fusion Engine -> Storm Engine -> Home Assistant
 
 De huidige providers omvatten onder andere Blitzortung, OPERA/EUMETNET,
 KMI, KNMI, RainViewer, Netatmo en Open-Meteo. OPERA-cellen met lage
-bronkwaliteit worden alleen operationeel gebruikt wanneer KMI of KNMI ze
-geografisch en temporeel bevestigt.
+bronkwaliteit worden alleen operationeel gebruikt wanneer KMI, KNMI of
+RainViewer ze geografisch en temporeel bevestigt.
 
 ## Installatie
 
@@ -52,4 +52,4 @@ release notes.
 
 ## Versie
 
-De huidige integratieversie is **0.4.8**.
+De huidige integratieversie is **0.4.12**.
