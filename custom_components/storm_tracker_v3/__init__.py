@@ -747,5 +747,5 @@ async def _async_setup_runtime(
     from homeassistant.helpers import discovery
     await discovery.async_load_platform(hass, "sensor", DOMAIN, {}, config)
 
-    _LOGGER.info("Storm Tracker V3 v0.4.29 gestart met home- en Life360-targets")
+    _LOGGER.info("Storm Tracker V3 v0.4.30 gestart met multi-target GeoJSON-kaartfeed")
     return True

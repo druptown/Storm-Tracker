@@ -176,6 +176,15 @@ def targets_module():
 
 
 @pytest.fixture(scope="session")
+def geojson_module():
+    _ensure_stub_package(f"{PKG_NAME}.engine")
+    return _load_module(
+        f"{PKG_NAME}.engine.geojson",
+        PKG_ROOT / "engine" / "geojson.py",
+    )
+
+
+@pytest.fixture(scope="session")
 def ofe_module(observation_module):
     """engine/observation_fusion_engine.py: `from .observation import ...`."""
     _ensure_stub_package(f"{PKG_NAME}.engine")
