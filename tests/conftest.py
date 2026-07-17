@@ -149,6 +149,24 @@ def storm_module():
 
 
 @pytest.fixture(scope="session")
+def pressure_trend_module():
+    _ensure_stub_package(f"{PKG_NAME}.engine")
+    return _load_module(
+        f"{PKG_NAME}.engine.pressure_trend",
+        PKG_ROOT / "engine" / "pressure_trend.py",
+    )
+
+
+@pytest.fixture(scope="session")
+def nowcast_module():
+    _ensure_stub_package(f"{PKG_NAME}.engine")
+    return _load_module(
+        f"{PKG_NAME}.engine.nowcast",
+        PKG_ROOT / "engine" / "nowcast.py",
+    )
+
+
+@pytest.fixture(scope="session")
 def ofe_module(observation_module):
     """engine/observation_fusion_engine.py: `from .observation import ...`."""
     _ensure_stub_package(f"{PKG_NAME}.engine")

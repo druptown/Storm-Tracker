@@ -60,3 +60,51 @@ def test_blitzortung_factory_create_returns_provider(blitzortung_module):
     factory = blitzortung_module.BlitzortungProviderFactory()
     provider = factory.create(hass=None, center_lat=51.0, center_lon=4.0, radius_km=100.0)
     assert isinstance(provider, blitzortung_module.BlitzortungProvider)
+
+
+def test_topics_are_regional_and_never_global(blitzortung_module):
+    topics = blitzortung_module.topics_for_regions([(51.0, 4.0, 350.0)])
+
+    assert topics
+    assert "blitzortung/1.1/#" not in topics
+    assert all(topic.startswith("blitzortung/1.1/") for topic in topics)
+    assert all(topic.endswith("/#") for topic in topics)
+
+
+def test_overlapping_regions_deduplicate_topics(blitzortung_module):
+    first = blitzortung_module.topics_for_regions([(51.0, 4.0, 350.0)])
+    combined = blitzortung_module.topics_for_regions([
+        (51.0, 4.0, 350.0),
+        (51.05, 4.05, 350.0),
+    ])
+
+    assert first <= combined
+    assert len(combined) < len(first) * 2
+
+
+def test_provider_updates_topics_without_reconnect_when_connected(blitzortung_module):
+    class FakeClient:
+        def __init__(self):
+            self.subscribed = []
+            self.unsubscribed = []
+
+        def subscribe(self, topic, qos=0):
+            self.subscribed.append((topic, qos))
+
+        def unsubscribe(self, topic):
+            self.unsubscribed.append(topic)
+
+    provider = blitzortung_module.BlitzortungProvider(
+        on_observation=lambda obs: None,
+        regions=[(51.0, 4.0, 100.0)],
+    )
+    client = FakeClient()
+    provider._mqttc = client
+    provider._connected = True
+    old_topics = provider._topics.copy()
+
+    provider.update_regions([(48.85, 2.35, 100.0)])
+
+    assert provider._topics != old_topics
+    assert set(client.unsubscribed) == old_topics - provider._topics
+    assert {topic for topic, qos in client.subscribed} == provider._topics - old_topics

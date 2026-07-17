@@ -23,10 +23,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
 
 from homeassistant.core import HomeAssistant, callback, CoreState
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, EVENT_HOMEASSISTANT_STOP
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.helpers.storage import Store
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
 
@@ -34,6 +36,7 @@ from .const import DOMAIN
 from .providers.blitzortung import BlitzortungProvider
 from .engine.region_manager import StormManager
 from .engine.mcs_store import McsHistoryStore
+from .engine.pressure_trend import PressureTrendTracker
 from .plogger.provider_logger import (
     log_lightning, log_kmi, log_rainviewer, log_knmi, log_netatmo, log_open_meteo
 )
@@ -95,6 +98,17 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     hass.data[DOMAIN]["fictieve_entity"] = fictieve_entity
     hass.data[DOMAIN]["fictieve_lat"]    = home_lat
     hass.data[DOMAIN]["fictieve_lon"]    = home_lon
+    pressure_trend = PressureTrendTracker()
+    pressure_store = Store(hass, 1, f"{DOMAIN}_pressure_trend")
+    restored_pressure_stations = pressure_trend.restore(
+        await pressure_store.async_load(), time.time()
+    )
+    if restored_pressure_stations:
+        _LOGGER.info(
+            "Netatmo-drukhistoriek hersteld voor %d stations",
+            restored_pressure_stations,
+        )
+    hass.data[DOMAIN]["netatmo_pressure_trend_tracker"] = pressure_trend
 
     # ── StormEngine + OFE aanmaken ────────────────────────────────────────
     mcs_store = McsHistoryStore(hass)
@@ -134,7 +148,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             "region_engines": storm_manager.get_all_engines(),
             "storm_engine": storm_engine,
             "ofe": ofe,
-            "storms": storm_engine.get_storms(),
+            "storms": storm_engine.get_active_storms(),
         })
         _LOGGER.info(
             "RegionEngine %s actief; %d persistente MCS-systemen hersteld",
@@ -165,7 +179,13 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         })
         log_lightning(hass, obs.lat, obs.lon, obs.timestamp)
 
-    blitz = BlitzortungProvider(on_observation=_on_blitz)
+    def _blitz_regions():
+        return [
+            (region.center_lat, region.center_lon, region.observation_radius_km)
+            for region in storm_manager.get_all_engines()
+        ]
+
+    blitz = BlitzortungProvider(on_observation=_on_blitz, regions=_blitz_regions())
     blitz.start()
     hass.data[DOMAIN]["blitz_provider"] = blitz
 
@@ -291,11 +311,13 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         # unconfirmed low-quality echoes must not create phantom systems.
         from .providers.radar_policy import (
             OPERA_MIN_STANDALONE_QUALITY,
+            usable_corroborating_observations,
             verify_opera_observations,
         )
-        references = list(hass.data[DOMAIN].get("last_kmi_observations", []))
-        references.extend(hass.data[DOMAIN].get("knmi_current", []))
-        references.extend(hass.data[DOMAIN].get("last_rv_observations", []))
+        raw_references = list(hass.data[DOMAIN].get("last_kmi_observations", []))
+        raw_references.extend(hass.data[DOMAIN].get("knmi_current", []))
+        raw_references.extend(hass.data[DOMAIN].get("last_rv_observations", []))
+        references = usable_corroborating_observations(raw_references)
         verification = verify_opera_observations(raw_obs, references)
         obs = list(verification.accepted)
 
@@ -311,6 +333,11 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             cell["verification"] = (
                 "high_quality"
                 if accepted and cell.get("quality", 0) >= OPERA_MIN_STANDALONE_QUALITY
+                else "structured_echo"
+                if accepted
+                and cell.get("mean_dbz", 0) >= 20.0
+                and cell.get("max_dbz", 0) >= 30.0
+                and cell.get("area_km2", 0) >= 50.0
                 else "corroborated"
                 if accepted
                 else "rejected_unconfirmed"
@@ -319,21 +346,27 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             "raw_count": len(raw_obs),
             "accepted_count": len(obs),
             "accepted_high_quality": verification.high_quality,
+            "accepted_structured_echo": verification.structured_echo,
             "accepted_corroborated": verification.corroborated,
             "rejected_unconfirmed": verification.rejected,
             "corroboration_sources": {
-                "kmi": len(hass.data[DOMAIN].get("last_kmi_observations", [])),
-                "knmi": len(hass.data[DOMAIN].get("knmi_current", [])),
-                "rainviewer": len(hass.data[DOMAIN].get("last_rv_observations", [])),
+                "kmi": 0,
+                "knmi": sum(1 for ref in references if ref.source == "knmi"),
+                "rainviewer": sum(
+                    1 for ref in references if ref.source == "rainviewer"
+                ),
             },
+            "corroboration_references_raw": len(raw_references),
+            "corroboration_references_usable": len(references),
         })
         hass.data[DOMAIN]["opera_count"] = len(obs)
         hass.data[DOMAIN]["opera_diagnostics"] = diagnostics
         hass.bus.async_fire(f"{DOMAIN}_radar_update", {"source": "opera", "count": len(obs)})
         _LOGGER.info(
-            "OPERA verificatie: raw=%d accepted=%d (quality=%d confirmed=%d) rejected=%d",
+            "OPERA verificatie: raw=%d accepted=%d (quality=%d structure=%d confirmed=%d) rejected=%d",
             len(raw_obs), len(obs), verification.high_quality,
-            verification.corroborated, verification.rejected,
+            verification.structured_echo, verification.corroborated,
+            verification.rejected,
         )
         for o in obs:
             hass.async_create_task(ofe.add_observation(o))
@@ -364,6 +397,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             opera_configured=opera is not None,
             opera_healthy=bool(opera and opera.healthy),
             rainviewer_configured=rainviewer is not None,
+            rainviewer_healthy=bool(rainviewer and rainviewer.healthy),
         )
         hass.data[DOMAIN]["active_radar_source"] = decision.source
         hass.data[DOMAIN]["radar_source_reason"] = decision.reason
@@ -392,6 +426,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         raining = [o for o in obs if (o.rain_mm or 0) >= 0.1]
         hass.data[DOMAIN]["netatmo_rain_count"]    = len(raining)
         hass.data[DOMAIN]["netatmo_station_count"] = len(obs)
+        hass.data[DOMAIN]["netatmo_pressure_trend"] = pressure_trend.update(obs)
+        await pressure_store.async_save(pressure_trend.to_snapshot())
         hass.bus.async_fire(f"{DOMAIN}_netatmo_update", {
             "stations": len(obs), "raining": len(raining)
         })
@@ -491,6 +527,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             _activate_region(region)
         else:
             active_region.target_locations[fictieve_entity] = (lat, lon)
+        blitz.update_regions(_blitz_regions())
         removed = storm_engine.retain_within(
             active_region.center_lat, active_region.center_lon, radar_radius
         )

@@ -19,15 +19,34 @@ Sensoren:
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
+from .engine.nowcast import build_precipitation_status
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _timestamp_iso(value):
+    """Zet een optionele Unix-timestamp om naar een expliciete UTC-tijd."""
+    if value is None:
+        return None
+    return datetime.fromtimestamp(float(value), tz=timezone.utc).isoformat()
+
+
+def _cardinal_direction(heading):
+    """Zet een koers in graden om naar een compacte windroosrichting."""
+    if heading is None:
+        return None
+    directions = (
+        "N", "NNO", "NO", "ONO", "O", "OZO", "ZO", "ZZO",
+        "Z", "ZZW", "ZW", "WZW", "W", "WNW", "NW", "NNW",
+    )
+    return directions[int((float(heading) + 11.25) // 22.5) % 16]
 
 
 async def async_setup_platform(
@@ -43,6 +62,7 @@ async def async_setup_platform(
         KmiObservatieSensor(hass),
         KmiIntensiteitSensor(hass),
         RainViewerObservatieSensor(hass),
+        OpenMeteoGearSensor(hass),
     ]
 
     # KNMI en Netatmo altijd toevoegen — providers worden later geïnitialiseerd
@@ -50,6 +70,8 @@ async def async_setup_platform(
     entities.append(KnmiNowcastSensor(hass))
     entities.append(NetatmoStationsSensor(hass))
     entities.append(NetatmoRegenSensor(hass))
+    entities.append(NetatmoPressureTrendSensor(hass))
+    entities.append(PrecipitationStatusSensor(hass))
 
     # Storm sensoren
     entities.append(StormTellerSensor(hass))
@@ -284,14 +306,29 @@ class RainViewerObservatieSensor(StormTrackerBaseSensor):
 
     @property
     def extra_state_attributes(self):
-        obs_list = self.hass.data.get(DOMAIN, {}).get("last_rv_observations", [])
-        if not obs_list:
-            return {"status": "geen data"}
+        domain_data = self.hass.data.get(DOMAIN, {})
+        obs_list = domain_data.get("last_rv_observations", [])
+        provider = domain_data.get("rv_provider")
+        diagnostics = provider.diagnostics if provider else {}
         intens = [o.intensity for o in obs_list if o.intensity]
         return {
+            "status": (
+                "gezond" if diagnostics.get("healthy") and obs_list
+                else "droog" if diagnostics.get("healthy")
+                else "ongezond"
+            ),
+            "healthy": diagnostics.get("healthy", False),
             "aantal": len(obs_list),
             "gem_intensiteit": round(sum(intens) / len(intens), 1) if intens else 0,
             "max_intensiteit": max(intens) if intens else 0,
+            "laatste_poll": _timestamp_iso(diagnostics.get("last_poll_ts")),
+            "laatste_succes": _timestamp_iso(diagnostics.get("last_success_ts")),
+            "laatste_frame": _timestamp_iso(diagnostics.get("last_frame_ts")),
+            "frame_leeftijd_minuten": diagnostics.get("frame_age_minutes"),
+            "max_frame_leeftijd_minuten": diagnostics.get("max_frame_age_minutes"),
+            "laatste_fout": diagnostics.get("last_error"),
+            "opeenvolgende_fouten": diagnostics.get("consecutive_failures", 0),
+            "frame_pad": diagnostics.get("last_path"),
         }
 
 
@@ -484,6 +521,82 @@ class NetatmoRegenSensor(StormTrackerBaseSensor):
         return True
 
 
+class NetatmoPressureTrendSensor(StormTrackerBaseSensor):
+    """Regionale drukverandering op basis van gepaarde Netatmo-stations."""
+    _attr_name = "STV3 Netatmo Luchtdruktrend"
+    _attr_unique_id = "stv3_netatmo_luchtdruktrend"
+    _attr_icon = "mdi:gauge"
+    _attr_native_unit_of_measurement = "hPa"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    @property
+    def _listen_events(self):
+        return [f"{DOMAIN}_netatmo_update"]
+
+    @property
+    def native_value(self):
+        trend = self.hass.data.get(DOMAIN, {}).get("netatmo_pressure_trend", {})
+        return trend.get("delta_60m_hpa")
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    @property
+    def extra_state_attributes(self):
+        trend = self.hass.data.get(DOMAIN, {}).get("netatmo_pressure_trend", {})
+        return {
+            "trend": trend.get("trend", "onvoldoende_data"),
+            "snelle_daling": trend.get("rapid_fall", False),
+            "druk_mediaan_hpa": trend.get("median_pressure_hpa"),
+            "drukval_15min_hpa": trend.get("delta_15m_hpa"),
+            "drukval_30min_hpa": trend.get("delta_30m_hpa"),
+            "drukval_60min_hpa": trend.get("delta_60m_hpa"),
+            "drukstations_nu": trend.get("pressure_station_count", 0),
+            "vergelijkbare_stations_15min": trend.get("stations_15m", 0),
+            "vergelijkbare_stations_30min": trend.get("stations_30m", 0),
+            "vergelijkbare_stations_60min": trend.get("stations_60m", 0),
+            "laatste_berekening": _timestamp_iso(trend.get("timestamp")),
+        }
+
+
+class PrecipitationStatusSensor(StormTrackerBaseSensor):
+    """Eén operationele neerslagstatus voor dashboard en automatiseringen."""
+    _attr_name = "STV3 Neerslagstatus"
+    _attr_unique_id = "stv3_neerslagstatus"
+    _attr_icon = "mdi:weather-rainy"
+
+    @property
+    def _listen_events(self):
+        return [
+            f"{DOMAIN}_storms_updated",
+            f"{DOMAIN}_radar_source_update",
+            f"{DOMAIN}_netatmo_update",
+        ]
+
+    def _summary(self):
+        data = self.hass.data.get(DOMAIN, {})
+        return build_precipitation_status(
+            data.get("storms", []),
+            data.get("fictieve_lat", 0.0),
+            data.get("fictieve_lon", 0.0),
+            radar_source=data.get("active_radar_source"),
+            pressure_trend=data.get("netatmo_pressure_trend"),
+        )
+
+    @property
+    def native_value(self):
+        return self._summary()["status"]
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    @property
+    def extra_state_attributes(self):
+        return {key: value for key, value in self._summary().items() if key != "status"}
+
+
 class StormTellerSensor(StormTrackerBaseSensor):
     """Toont het aantal actieve storms in de StormEngine."""
     _attr_name      = "STV3 Actieve Storms"
@@ -517,7 +630,14 @@ class StormTellerSensor(StormTrackerBaseSensor):
                     "lat":         round(s.centroid_lat, 4),
                     "lon":         round(s.centroid_lon, 4),
                     "richting":    round(s.heading_deg, 0) if s.heading_deg is not None else None,
+                    "richting_tekst": _cardinal_direction(s.heading_deg),
                     "snelheid":    round(s.speed_kmh, 1) if s.speed_kmh is not None else None,
+                    "bewegingspunten": s.motion_sample_count,
+                    "bewegingshistorie_min": round(s.motion_history_minutes, 1),
+                    "bewegingsfit": round(s.motion_fit_quality, 3),
+                    "tracking_status": s.tracking_status,
+                    "opeenvolgende_radarframes": s.consecutive_radar_frames,
+                    "laatste_radarframe": _timestamp_iso(s.last_radar_timestamp),
                     "inslagen":    s.strike_count,
                     "vertrouwen":  s.confidence,
                     "plaatsnaam":  getattr(s, "place_name", None),
@@ -605,10 +725,8 @@ class StormDetailSensor(StormTrackerBaseSensor):
         )
         afstand, impact_lat, impact_lon = point
 
-        # ETA berekenen
-        eta_min = None
-        if closest.speed_kmh and closest.speed_kmh > 0:
-            eta_min = round(afstand / closest.speed_kmh * 60, 0)
+        motion = closest.motion_to_target(lat, lon, distance_km=afstand)
+        eta_min = motion["eta_minutes"]
 
         return {
             "storm_id":    closest.storm_id,
@@ -618,8 +736,18 @@ class StormDetailSensor(StormTrackerBaseSensor):
             "system_lon":  round(closest.centroid_lon, 4),
             "afstand_km":  round(afstand, 1),
             "richting":    round(closest.heading_deg, 0) if closest.heading_deg is not None else None,
+            "richting_tekst": _cardinal_direction(closest.heading_deg),
             "snelheid_kmh": round(closest.speed_kmh, 1) if closest.speed_kmh is not None else None,
-            "eta_minuten": eta_min,
+            "koers_naar_tracker": motion["bearing_to_target_deg"],
+            "naderingssnelheid_kmh": motion["approach_speed_kmh"],
+            "beweegt_naar_tracker": motion["moving_towards"],
+            "eta_minuten": round(eta_min, 0) if eta_min is not None else None,
+            "bewegingspunten": closest.motion_sample_count,
+            "bewegingshistorie_min": round(closest.motion_history_minutes, 1),
+            "bewegingsfit": round(closest.motion_fit_quality, 3),
+            "tracking_status": closest.tracking_status,
+            "opeenvolgende_radarframes": closest.consecutive_radar_frames,
+            "laatste_radarframe": _timestamp_iso(closest.last_radar_timestamp),
             "inslagen":    closest.strike_count,
             "vertrouwen":  closest.confidence,
             "plaatsnaam":  getattr(closest, "place_name", None),
