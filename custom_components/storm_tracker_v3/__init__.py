@@ -37,6 +37,7 @@ from .providers.blitzortung import BlitzortungProvider
 from .engine.region_manager import StormManager
 from .engine.mcs_store import McsHistoryStore
 from .engine.pressure_trend import PressureTrendTracker
+from .engine.targets import build_target_specs, coordinates_from_state
 from .plogger.provider_logger import (
     log_lightning, log_kmi, log_rainviewer, log_knmi, log_netatmo, log_open_meteo
 )
@@ -59,11 +60,21 @@ def _distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     )
     return radius_km * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
+TARGET_SCHEMA = vol.Schema({
+    vol.Required("id"): cv.string,
+    vol.Optional("name"): cv.string,
+    vol.Required("location_entity"): cv.entity_id,
+    vol.Optional("latitude"): cv.latitude,
+    vol.Optional("longitude"): cv.longitude,
+})
+
+
 CONFIG_SCHEMA = vol.Schema({
     DOMAIN: vol.Schema({
         vol.Required("home_lat"): cv.latitude,
         vol.Required("home_lon"): cv.longitude,
         vol.Optional("fictieve_tracker_entity", default="device_tracker.fictieve_tracker"): cv.string,
+        vol.Optional("targets", default=[]): [TARGET_SCHEMA],
         vol.Optional("radar_radius_km", default=300): vol.Coerce(float),
         vol.Optional("engine_sharing_distance_km", default=150): vol.Coerce(float),
         vol.Optional("knmi_api_key"): cv.string,
@@ -92,12 +103,30 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     netatmo_radius  = conf.get("netatmo_radius_km", 175.0)
     radar_radius    = conf.get("radar_radius_km", 200.0)
     sharing_distance = conf.get("engine_sharing_distance_km", 150.0)
+    target_specs = build_target_specs(
+        fictieve_entity, home_lat, home_lon, conf.get("targets")
+    )
     from homeassistant.helpers.aiohttp_client import async_get_clientsession
     http_session = async_get_clientsession(hass)
 
     hass.data[DOMAIN]["fictieve_entity"] = fictieve_entity
     hass.data[DOMAIN]["fictieve_lat"]    = home_lat
     hass.data[DOMAIN]["fictieve_lon"]    = home_lon
+    hass.data[DOMAIN]["target_specs"] = target_specs
+    hass.data[DOMAIN]["targets"] = {
+        spec.target_id: {
+            "id": spec.target_id,
+            "name": spec.name,
+            "entity_id": spec.entity_id,
+            "latitude": spec.fallback_lat,
+            "longitude": spec.fallback_lon,
+            "available": spec.fallback_lat is not None,
+            "primary": spec.primary,
+            "radar_covered": spec.primary,
+            "region_engine_id": None,
+        }
+        for spec in target_specs
+    }
     pressure_trend = PressureTrendTracker()
     pressure_store = Store(hass, 1, f"{DOMAIN}_pressure_trend")
     restored_pressure_stations = pressure_trend.restore(
@@ -119,29 +148,48 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         observation_radius_km=radar_radius,
     )
     active_region = storm_manager.assign_target(fictieve_entity, home_lat, home_lon)
+    hass.data[DOMAIN]["targets"]["primary"]["region_engine_id"] = active_region.engine_id
     storm_engine = active_region.storm_engine
     ofe = active_region.ofe
+    prepared_regions: set[str] = set()
 
-    def _activate_region(region) -> int:
-        """Maak een manager-engine zichtbaar voor providers, opslag en sensoren."""
-        nonlocal active_region, storm_engine, ofe
-        active_region = region
-        storm_engine = region.storm_engine
-        ofe = region.ofe
+    def _prepare_region(region) -> int:
+        """Koppel opslag en publicatie eenmaal aan een runtime-regio."""
+        if region.engine_id in prepared_regions:
+            return 0
         region_storm_engine = region.storm_engine
         restored = mcs_store.restore_engine(region.storage_key, region_storm_engine)
 
         def _publish(storms) -> None:
-            hass.data[DOMAIN]["storms"] = storms
+            if region is active_region:
+                hass.data[DOMAIN]["storms"] = storms
             hass.bus.async_fire(
                 f"{DOMAIN}_storms_updated",
-                {"count": len(storms), "region_engine": region.engine_id},
+                {
+                    "count": len(storms),
+                    "region_engine": region.engine_id,
+                    "targets": sorted(region.projection_targets),
+                },
+            )
+            hass.bus.async_fire(
+                f"{DOMAIN}_targets_updated",
+                {"targets": sorted(region.projection_targets)},
             )
             hass.async_create_task(
                 mcs_store.async_save_engine(region.storage_key, region_storm_engine)
             )
 
         storm_engine._on_updated = _publish
+        prepared_regions.add(region.engine_id)
+        return restored
+
+    def _activate_region(region) -> int:
+        """Maak een manager-engine primair zichtbaar voor legacy-sensoren."""
+        nonlocal active_region, storm_engine, ofe
+        active_region = region
+        storm_engine = region.storm_engine
+        ofe = region.ofe
+        restored = _prepare_region(region)
         hass.data[DOMAIN].update({
             "storm_manager": storm_manager,
             "region_engine": region,
@@ -265,7 +313,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         log_rainviewer(hass, obs, lat, lon)
         if operational:
             for o in obs:
-                hass.async_create_task(ofe.add_observation(o))
+                storm_manager.route_observation(o)
         return obs
 
     async def _poll_knmi(now=None):
@@ -369,7 +417,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             verification.rejected,
         )
         for o in obs:
-            hass.async_create_task(ofe.add_observation(o))
+            storm_manager.route_observation(o)
         return obs
 
     async def _poll_radar(now=None):
@@ -404,7 +452,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
         if decision.source == "rainviewer":
             for observation in rainviewer_obs:
-                hass.async_create_task(ofe.add_observation(observation))
+                storm_manager.route_observation(observation)
         elif decision.source is None:
             _LOGGER.warning("Geen operationele radarbron: %s", decision.reason)
 
@@ -436,7 +484,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         log_netatmo(hass, obs, lat, lon)
         # Alleen natte stations naar OFE
         for o in raining:
-            hass.async_create_task(ofe.add_observation(o))
+            storm_manager.route_observation(o)
 
     async def _poll_open_meteo(now=None):
         p = hass.data[DOMAIN].get("open_meteo")
@@ -468,7 +516,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 rain_mm   = loc["mm"],
                 source    = "open_meteo",
             )
-            hass.async_create_task(ofe.add_observation(obs))
+            storm_manager.route_observation(obs)
 
     async def _poll_all(now=None):
         """Initial coordinated poll."""
@@ -527,6 +575,14 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             _activate_region(region)
         else:
             active_region.target_locations[fictieve_entity] = (lat, lon)
+        primary_target = hass.data[DOMAIN]["targets"]["primary"]
+        primary_target.update({
+            "latitude": lat,
+            "longitude": lon,
+            "available": True,
+            "radar_covered": True,
+            "region_engine_id": region.engine_id,
+        })
         blitz.update_regions(_blitz_regions())
         removed = storm_engine.retain_within(
             active_region.center_lat, active_region.center_lon, radar_radius
@@ -556,8 +612,77 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         async_track_state_change_event(hass, [fictieve_entity], _on_fictieve_state_change)
     )
 
+    secondary_specs = [spec for spec in target_specs if not spec.primary]
+
+    async def _update_secondary_target(spec, *, initial: bool = False):
+        state = hass.states.get(spec.entity_id)
+        coordinates = coordinates_from_state(state, spec)
+        target_data = hass.data[DOMAIN]["targets"][spec.target_id]
+        if coordinates is None:
+            target_data["available"] = False
+            hass.bus.async_fire(
+                f"{DOMAIN}_targets_updated", {"targets": [spec.target_id]}
+            )
+            return
+
+        lat, lon = coordinates
+        old_lat = target_data.get("latitude")
+        old_lon = target_data.get("longitude")
+        movement = (
+            _distance_km(old_lat, old_lon, lat, lon)
+            if old_lat is not None and old_lon is not None else float("inf")
+        )
+        current = storm_manager.get_engine_for_target(spec.entity_id)
+        if movement < 1.0 and current is not None and not initial:
+            return
+        if current is not None and movement >= 1.0:
+            await mcs_store.async_save_engine(current.storage_key, current.storm_engine)
+        region = storm_manager.assign_target(spec.entity_id, lat, lon)
+        _prepare_region(region)
+        target_data.update({
+            "latitude": lat,
+            "longitude": lon,
+            "available": True,
+            "radar_covered": _distance_km(
+                hass.data[DOMAIN].get("fictieve_lat", home_lat),
+                hass.data[DOMAIN].get("fictieve_lon", home_lon),
+                lat,
+                lon,
+            ) <= radar_radius,
+            "region_engine_id": region.engine_id,
+        })
+        hass.data[DOMAIN]["region_engines"] = storm_manager.get_all_engines()
+        blitz.update_regions(_blitz_regions())
+        hass.bus.async_fire(
+            f"{DOMAIN}_targets_updated", {"targets": [spec.target_id]}
+        )
+        _LOGGER.info(
+            "Secundair target %s op %.4f,%.4f gekoppeld aan %s",
+            spec.target_id, lat, lon, region.engine_id,
+        )
+
+    @callback
+    def _on_secondary_target_change(event):
+        entity_id = event.data.get("entity_id")
+        spec = next(
+            (item for item in secondary_specs if item.entity_id == entity_id), None
+        )
+        if spec is not None:
+            hass.async_create_task(_update_secondary_target(spec))
+
+    if secondary_specs:
+        hass.data[DOMAIN]["unsubscribers"].append(
+            async_track_state_change_event(
+                hass,
+                [spec.entity_id for spec in secondary_specs],
+                _on_secondary_target_change,
+            )
+        )
+
     async def _do_initial_setup(event=None):
         await _update_fictieve_location()
+        for spec in secondary_specs:
+            await _update_secondary_target(spec, initial=True)
         if not hass.data[DOMAIN].get("providers_initialized"):
             await _init_location_providers(home_lat, home_lon)
             hass.data[DOMAIN]["providers_initialized"] = True
@@ -587,5 +712,5 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     from homeassistant.helpers import discovery
     await discovery.async_load_platform(hass, "sensor", DOMAIN, {}, config)
 
-    _LOGGER.info("Storm Tracker V3 v0.4.15 gestart met echte RegionEngine-runtime")
+    _LOGGER.info("Storm Tracker V3 v0.4.28 gestart met multi-target RegionEngine-runtime")
     return True

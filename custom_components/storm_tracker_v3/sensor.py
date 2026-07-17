@@ -72,6 +72,11 @@ async def async_setup_platform(
     entities.append(NetatmoRegenSensor(hass))
     entities.append(NetatmoPressureTrendSensor(hass))
     entities.append(PrecipitationStatusSensor(hass))
+    entities.extend(
+        TargetPrecipitationStatusSensor(hass, spec)
+        for spec in hass.data.get(DOMAIN, {}).get("target_specs", [])
+        if not spec.primary
+    )
 
     # Storm sensoren
     entities.append(StormTellerSensor(hass))
@@ -591,6 +596,69 @@ class PrecipitationStatusSensor(StormTrackerBaseSensor):
     @property
     def available(self) -> bool:
         return True
+
+    @property
+    def extra_state_attributes(self):
+        return {key: value for key, value in self._summary().items() if key != "status"}
+
+
+class TargetPrecipitationStatusSensor(StormTrackerBaseSensor):
+    """Operationele neerslagstatus voor één geconfigureerd target."""
+    _attr_icon = "mdi:weather-rainy"
+
+    def __init__(self, hass: HomeAssistant, spec) -> None:
+        super().__init__(hass)
+        self._spec = spec
+        self._attr_name = f"STV3 {spec.name} Neerslagstatus"
+        self._attr_unique_id = f"stv3_target_{spec.entity_suffix}_neerslagstatus"
+
+    @property
+    def _listen_events(self):
+        return [
+            f"{DOMAIN}_targets_updated",
+            f"{DOMAIN}_storms_updated",
+            f"{DOMAIN}_radar_source_update",
+            f"{DOMAIN}_netatmo_update",
+        ]
+
+    def _target_data(self):
+        return self.hass.data.get(DOMAIN, {}).get("targets", {}).get(
+            self._spec.target_id, {}
+        )
+
+    def _summary(self):
+        domain_data = self.hass.data.get(DOMAIN, {})
+        target = self._target_data()
+        manager = domain_data.get("storm_manager")
+        region = manager.get_engine_for_target(self._spec.entity_id) if manager else None
+        storms = region.storm_engine.get_active_storms() if region else []
+        result = build_precipitation_status(
+            storms,
+            target.get("latitude", 0.0),
+            target.get("longitude", 0.0),
+            radar_source=domain_data.get("active_radar_source"),
+            pressure_trend=domain_data.get("netatmo_pressure_trend"),
+        )
+        if not target.get("radar_covered", False):
+            result["status"] = "onvoldoende_data"
+        return {
+            **result,
+            "target_id": self._spec.target_id,
+            "target_name": self._spec.name,
+            "location_entity": self._spec.entity_id,
+            "latitude": target.get("latitude"),
+            "longitude": target.get("longitude"),
+            "region_engine_id": target.get("region_engine_id"),
+            "radar_covered": target.get("radar_covered", False),
+        }
+
+    @property
+    def available(self) -> bool:
+        return bool(self._target_data().get("available"))
+
+    @property
+    def native_value(self):
+        return self._summary()["status"] if self.available else None
 
     @property
     def extra_state_attributes(self):
