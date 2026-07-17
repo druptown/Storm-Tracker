@@ -330,3 +330,11 @@
 - Diagnostieklijst is begrensd om state-attributen compact te houden.
 - Cellen in de verre hoeken van de geprojecteerde bbox worden nu met een echte
   grootcirkelafstand begrensd tot `radius_km`.
+## v0.4.29
+
+- Home Assistant `home` is voortaan altijd het primaire target; de locatie komt
+  bij UI-installaties rechtstreeks uit de algemene HA-configuratie.
+- Nieuwe configuratie- en optiesflow voor Life360 `device_tracker`-entiteiten.
+- De fictieve tracker is niet langer verplicht of primair, maar een optioneel
+  en duidelijk gemarkeerd testtarget.
+- Bestaande YAML-configuraties blijven ondersteund tijdens de migratieperiode.

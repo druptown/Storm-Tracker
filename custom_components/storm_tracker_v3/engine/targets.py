@@ -21,22 +21,22 @@ class TargetSpec:
 
 
 def build_target_specs(
-    legacy_entity: str,
     home_lat: float,
     home_lon: float,
     configured: list[dict] | None = None,
+    test_tracker_entity: str | None = None,
 ) -> list[TargetSpec]:
-    """Combineer de bestaande tracker met optionele extra targets."""
+    """Bouw home, Life360-personen en een optionele testtracker."""
     specs = [TargetSpec(
-        target_id="primary",
-        name="Fictieve tracker",
-        entity_id=legacy_entity,
+        target_id="home",
+        name="Thuis",
+        entity_id="zone.home",
         fallback_lat=float(home_lat),
         fallback_lon=float(home_lon),
         primary=True,
     )]
-    seen_ids = {"primary"}
-    seen_entities = {legacy_entity}
+    seen_ids = {"home"}
+    seen_entities = {"zone.home"}
     for raw in configured or []:
         target_id = str(raw["id"]).strip()
         entity_id = str(raw["location_entity"]).strip()
@@ -57,6 +57,14 @@ def build_target_specs(
         ))
         seen_ids.add(target_id)
         seen_entities.add(entity_id)
+    if test_tracker_entity:
+        entity_id = str(test_tracker_entity).strip()
+        if entity_id not in seen_entities:
+            specs.append(TargetSpec(
+                target_id="test_tracker",
+                name="Fictieve tracker (test)",
+                entity_id=entity_id,
+            ))
     return specs
 
 

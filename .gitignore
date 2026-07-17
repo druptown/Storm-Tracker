@@ -5,6 +5,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .codex-test-tmp*/
+.codex-pydeps/
 .coverage
 htmlcov/
 

@@ -73,7 +73,7 @@ CONFIG_SCHEMA = vol.Schema({
     DOMAIN: vol.Schema({
         vol.Required("home_lat"): cv.latitude,
         vol.Required("home_lon"): cv.longitude,
-        vol.Optional("fictieve_tracker_entity", default="device_tracker.fictieve_tracker"): cv.string,
+        vol.Optional("fictieve_tracker_entity"): cv.entity_id,
         vol.Optional("targets", default=[]): [TARGET_SCHEMA],
         vol.Optional("radar_radius_km", default=300): vol.Coerce(float),
         vol.Optional("engine_sharing_distance_km", default=150): vol.Coerce(float),
@@ -88,23 +88,58 @@ CONFIG_SCHEMA = vol.Schema({
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Behoud YAML-installaties; nieuwe installaties gebruiken een config entry."""
     conf = config.get(DOMAIN)
     if conf is None:
         return True
+    return await _async_setup_runtime(hass, conf, config)
+
+
+async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
+    """Start Storm Tracker vanuit de configuratie-UI."""
+    raw = {**entry.data, **entry.options}
+    targets = []
+    for entity_id in raw.get("persons", []):
+        state = hass.states.get(entity_id)
+        name = state.attributes.get("friendly_name") if state is not None else None
+        targets.append({
+            "id": entity_id.split(".", 1)[-1],
+            "name": name or entity_id.split(".", 1)[-1].replace("_", " ").title(),
+            "location_entity": entity_id,
+        })
+    conf = {
+        "home_lat": hass.config.latitude,
+        "home_lon": hass.config.longitude,
+        "targets": targets,
+        "radar_radius_km": raw.get("radar_radius_km", 300.0),
+        "engine_sharing_distance_km": raw.get("engine_sharing_distance_km", 150.0),
+    }
+    if raw.get("test_tracker_entity"):
+        conf["fictieve_tracker_entity"] = raw["test_tracker_entity"]
+    return await _async_setup_runtime(hass, conf, {DOMAIN: conf})
+
+
+async def _async_setup_runtime(
+    hass: HomeAssistant, conf: dict, config: ConfigType
+) -> bool:
+    """Gedeelde runtime voor YAML en config entries."""
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN].setdefault("unsubscribers", [])
 
     home_lat        = conf["home_lat"]
     home_lon        = conf["home_lon"]
-    fictieve_entity = conf["fictieve_tracker_entity"]
+    fictieve_entity = "zone.home"
     knmi_api_key    = conf.get("knmi_api_key")
     knmi_wms_key    = conf.get("knmi_wms_api_key", knmi_api_key)
     netatmo_radius  = conf.get("netatmo_radius_km", 175.0)
     radar_radius    = conf.get("radar_radius_km", 200.0)
     sharing_distance = conf.get("engine_sharing_distance_km", 150.0)
     target_specs = build_target_specs(
-        fictieve_entity, home_lat, home_lon, conf.get("targets")
+        home_lat,
+        home_lon,
+        conf.get("targets"),
+        conf.get("fictieve_tracker_entity"),
     )
     from homeassistant.helpers.aiohttp_client import async_get_clientsession
     http_session = async_get_clientsession(hass)
@@ -148,7 +183,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         observation_radius_km=radar_radius,
     )
     active_region = storm_manager.assign_target(fictieve_entity, home_lat, home_lon)
-    hass.data[DOMAIN]["targets"]["primary"]["region_engine_id"] = active_region.engine_id
+    hass.data[DOMAIN]["targets"]["home"]["region_engine_id"] = active_region.engine_id
     storm_engine = active_region.storm_engine
     ofe = active_region.ofe
     prepared_regions: set[str] = set()
@@ -575,7 +610,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             _activate_region(region)
         else:
             active_region.target_locations[fictieve_entity] = (lat, lon)
-        primary_target = hass.data[DOMAIN]["targets"]["primary"]
+        primary_target = hass.data[DOMAIN]["targets"]["home"]
         primary_target.update({
             "latitude": lat,
             "longitude": lon,
@@ -712,5 +747,5 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     from homeassistant.helpers import discovery
     await discovery.async_load_platform(hass, "sensor", DOMAIN, {}, config)
 
-    _LOGGER.info("Storm Tracker V3 v0.4.28 gestart met multi-target RegionEngine-runtime")
+    _LOGGER.info("Storm Tracker V3 v0.4.29 gestart met home- en Life360-targets")
     return True

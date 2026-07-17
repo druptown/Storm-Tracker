@@ -1,0 +1,33 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Storm Tracker instellen",
+        "description": "De thuislocatie wordt automatisch uit Home Assistant gelezen. Selecteer de Life360-trackers die je afzonderlijk wilt volgen.",
+        "data": {
+          "persons": "Life360-personen",
+          "test_tracker_entity": "Fictieve tracker (optioneel, alleen voor tests)",
+          "radar_radius_km": "Radarbereik",
+          "engine_sharing_distance_km": "Afstand waarop targets dezelfde engine delen"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Storm Tracker kan maar eenmaal worden geconfigureerd."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Locaties beheren",
+        "description": "Thuis is altijd actief. Beheer hier de Life360-personen en de optionele fictieve testtracker. Herstart Home Assistant nadat je de opties hebt opgeslagen.",
+        "data": {
+          "persons": "Life360-personen",
+          "test_tracker_entity": "Fictieve tracker (optioneel, alleen voor tests)",
+          "radar_radius_km": "Radarbereik",
+          "engine_sharing_distance_km": "Afstand waarop targets dezelfde engine delen"
+        }
+      }
+    }
+  }
+}

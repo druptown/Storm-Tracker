@@ -364,7 +364,8 @@ class OpenMeteoGearSensor(StormTrackerBaseSensor):
 
 
 class FictieveTrackerSensor(StormTrackerBaseSensor):
-    _attr_name      = "STV3 Fictieve Tracker Locatie"
+    """Legacy entity-id met de actuele primaire thuislocatie."""
+    _attr_name      = "STV3 Thuislocatie"
     _attr_unique_id = "stv3_fictieve_tracker"
     _attr_icon      = "mdi:map-marker-account"
 
