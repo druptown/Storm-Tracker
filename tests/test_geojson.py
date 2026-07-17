@@ -64,3 +64,25 @@ def test_missing_target_coordinates_are_not_published(geojson_module):
         "away": {"latitude": None, "longitude": None}
     }, [])
     assert result["features"] == []
+
+
+def test_unordered_radar_footprint_is_published_as_convex_ring(geojson_module):
+    cell = SimpleNamespace(
+        cell_id="cell", timestamp=1.0, lat=51.0, lon=4.0,
+        footprint_points=(
+            (51.1, 4.1), (50.9, 3.9), (51.1, 3.9),
+            (51.0, 4.0), (50.9, 4.1),
+        ),
+        intensity=4, max_dbz=40.0, area_km2=20.0,
+    )
+    result = geojson_module.build_feature_collection(
+        {}, [_region(_storm({"cell": cell}))]
+    )
+    feature = next(
+        item for item in result["features"]
+        if item["properties"]["layer"] == "radar_cell"
+    )
+    ring = feature["geometry"]["coordinates"][0]
+    assert len(ring) == 5
+    assert [4.0, 51.0] not in ring
+    assert ring[0] == ring[-1]

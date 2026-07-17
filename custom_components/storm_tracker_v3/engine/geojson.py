@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import math
 
+from ..geometry.hull import convex_hull
+
 MAX_HULL_POINTS = 48
 MAX_RADAR_CELLS = 150
 
@@ -20,8 +22,10 @@ def _feature(feature_id: str, geometry: dict, **properties) -> dict:
     }
 
 
-def _sample_ring(points) -> list[list[float]]:
+def _sample_ring(points, *, order_as_hull: bool = False) -> list[list[float]]:
     values = list(points or [])
+    if order_as_hull and len(values) >= 3:
+        values = convex_hull(values)
     if len(values) > MAX_HULL_POINTS:
         step = math.ceil(len(values) / MAX_HULL_POINTS)
         values = values[::step]
@@ -133,7 +137,11 @@ def build_feature_collection(targets: dict, regions: list) -> dict:
             for cell in cells:
                 if radar_cells_written >= MAX_RADAR_CELLS:
                     break
-                cell_ring = _sample_ring(cell.footprint_points)
+                # OPERA-footprints zijn puntwolken/scanlijnen, geen gegarandeerd
+                # geordende polygonring. Eerst hullen voorkomt zigzagdiagonalen.
+                cell_ring = _sample_ring(
+                    cell.footprint_points, order_as_hull=True
+                )
                 cell_geometry = (
                     {"type": "Polygon", "coordinates": [cell_ring]}
                     if len(cell_ring) >= 4

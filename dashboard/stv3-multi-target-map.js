@@ -46,12 +46,12 @@ class Stv3MultiTargetMap extends HTMLElement {
       ':host{display:block} ha-card{overflow:hidden} .top{display:flex;gap:8px;align-items:center;padding:12px 14px;background:var(--ha-card-background,var(--card-background-color));flex-wrap:wrap}'+
       '.title{font-weight:700;font-size:18px;flex:1;min-width:180px}.controls{display:flex;gap:6px;align-items:center} select,button{font:inherit;color:var(--primary-text-color);background:var(--secondary-background-color);border:1px solid var(--divider-color);border-radius:8px;padding:7px 9px}button{width:36px;font-weight:700;cursor:pointer}'+
       '.map{position:relative;overflow:hidden;background:#cfe7f5;height:'+Number(this.config.height)+'px}.tiles,.overlay{position:absolute;inset:0}.tiles img{position:absolute;width:256px;height:256px}.overlay{pointer-events:none}.legend{position:absolute;left:10px;bottom:10px;background:rgba(20,25,30,.82);color:#fff;border-radius:8px;padding:7px 10px;font-size:12px;line-height:1.6}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}.meta{padding:8px 14px;font-size:12px;color:var(--secondary-text-color)}.error{padding:18px;color:var(--error-color)}'+
-      '</style><ha-card><div class="top"><div class="title">Neerslag en targets</div><div class="controls"><select aria-label="Target"></select><button class="minus" title="Uitzoomen">−</button><button class="plus" title="Inzoomen">+</button></div></div><div class="map"><div class="tiles"></div><svg class="overlay"></svg><div class="legend"><span class="dot" style="background:#00e676"></span>target &nbsp; <span class="dot" style="background:#ff9800"></span>weersysteem<br><span class="dot" style="background:#2196f3"></span>radarcel &nbsp; <span class="dot" style="background:#ab47bc"></span>RegionEngine</div></div><div class="meta"></div></ha-card>';
+      '</style><ha-card><div class="top"><div class="title">Neerslag en targets</div><div class="controls"><select aria-label="Target"></select><button class="minus" title="Uitzoomen">-</button><button class="plus" title="Inzoomen">+</button></div></div><div class="map"><div class="tiles"></div><svg class="overlay"></svg><div class="legend"><span class="dot" style="background:#00e676"></span>target &nbsp; <span class="dot" style="background:#ff9800"></span>weersysteem<br><span class="dot" style="background:#2196f3"></span>radarcel &nbsp; <span class="dot" style="background:#ab47bc"></span>RegionEngine</div></div><div class="meta"></div></ha-card>';
     const select=this.shadowRoot.querySelector('select');
     for(const target of targets){
       const option=document.createElement('option');
       option.value=target.properties.target_id;
-      option.textContent=(target.properties.primary?'🏠 ':'📍 ')+target.properties.name;
+      option.textContent=(target.properties.primary?'Home: ':'Target: ')+target.properties.name;
       option.selected=option.value===this._selected;
       select.appendChild(option);
     }
@@ -74,9 +74,27 @@ class Stv3MultiTargetMap extends HTMLElement {
     }
     svg.setAttribute('viewBox','0 0 '+w+' '+h); svg.setAttribute('width',w); svg.setAttribute('height',h);
     const ordered=[...this._data.features].sort((a,b)=>({region:0,storm:1,radar_cell:2,motion:3,target:4}[a.properties.layer]-({region:0,storm:1,radar_cell:2,motion:3,target:4}[b.properties.layer])));
-    for(const f of ordered) this._feature(svg,f,center,w,h);
+    for(const f of ordered) if(f.properties.layer!=='target') this._feature(svg,f,center,w,h);
+    this._targetGroups(svg,ordered.filter(f=>f.properties.layer==='target'),center,w,h);
     const meta=this._data.metadata||{};
-    this.shadowRoot.querySelector('.meta').textContent=(selected.properties.name||selected.properties.target_id)+' · zoom '+this._zoom+' · '+meta.feature_count+' features · '+meta.radar_cells_included+'/'+meta.radar_cells_total+' radarcellen'+(meta.truncated?' (begrensd)':'');
+    this.shadowRoot.querySelector('.meta').textContent=(selected.properties.name||selected.properties.target_id)+' | zoom '+this._zoom+' | '+meta.feature_count+' features | '+meta.radar_cells_included+'/'+meta.radar_cells_total+' radarcellen'+(meta.truncated?' (begrensd)':'');
+  }
+  _targetGroups(svg,targets,center,w,h) {
+    const groups=new Map();
+    for(const target of targets){
+      const c=target.geometry.coordinates,key=c[0].toFixed(3)+','+c[1].toFixed(3);
+      if(!groups.has(key)) groups.set(key,[]);
+      groups.get(key).push(target);
+    }
+    const ns='http://www.w3.org/2000/svg';
+    for(const group of groups.values()){
+      const active=group.find(f=>f.properties.target_id===this._selected)||group[0];
+      const p=this._screen(active.geometry.coordinates,center,w,h),circle=document.createElementNS(ns,'circle');
+      circle.setAttribute('cx',p[0]);circle.setAttribute('cy',p[1]);circle.setAttribute('r',active.properties.target_id===this._selected?'8':'6');
+      circle.setAttribute('fill','#00e676');circle.setAttribute('stroke','#fff');circle.setAttribute('stroke-width','2');svg.appendChild(circle);
+      const label=document.createElementNS(ns,'text');label.setAttribute('x',p[0]+10);label.setAttribute('y',p[1]-8);label.setAttribute('fill','#111');label.setAttribute('stroke','#fff');label.setAttribute('stroke-width','3');label.setAttribute('paint-order','stroke');label.setAttribute('font-size','12');
+      label.textContent=active.properties.name+(group.length>1?' +'+(group.length-1):'');svg.appendChild(label);
+    }
   }
   _feature(svg,f,center,w,h) {
     const ns='http://www.w3.org/2000/svg',layer=f.properties.layer,type=f.geometry.type;
