@@ -40,12 +40,26 @@ storm_tracker_v3:
   fictieve_tracker_entity: device_tracker.fictieve_tracker
   radar_radius_km: 350
   engine_sharing_distance_km: 150
+  targets:
+    - id: elke
+      name: Elke
+      location_entity: person.elke
+    - id: oma
+      name: Oma
+      location_entity: device_tracker.oma
+      latitude: 51.05       # optionele fallback wanneer de tracker geen GPS heeft
+      longitude: 4.42
   knmi_api_key: !secret knmi_api_key
   knmi_wms_api_key: !secret knmi_wms_api_key
 ```
 
 KNMI- en Netatmo-instellingen zijn optioneel. Bewaar echte tokens en sleutels
 uitsluitend in `secrets.yaml`; commit die nooit naar Git.
+
+Extra targets binnen de geconfigureerde `radar_radius_km` delen de operationele
+radardata. Een verder target krijgt bewust `onvoldoende_data` tot een eigen
+locatiegebonden providerruntime beschikbaar is; zo wordt ontbrekende dekking
+niet ten onrechte als droog weer gepubliceerd.
 
 ## Ontwikkelen en testen
 
@@ -61,4 +75,4 @@ release notes.
 
 ## Versie
 
-De huidige integratieversie is **0.4.27**.
+De huidige integratieversie is **0.4.28**.

@@ -1,5 +1,14 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+## v0.4.28
+
+- Eerste backwards-compatible multi-targetlaag: naast de bestaande fictieve
+  tracker kunnen meerdere personen of vaste locaties worden geregistreerd.
+- Elk target krijgt een stabiele eigen neerslagstatussensor en wordt gekoppeld
+  aan een gedeelde of aparte RegionEngine op basis van de sharing distance.
+- Operationele observaties worden via de StormManager naar alle relevante
+  regio-engines gerouteerd.
+
 ## v0.4.27
 
 - Bewegingshistoriek van radarsystemen wordt nu samen met de MCS-snapshot
