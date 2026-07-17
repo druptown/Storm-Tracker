@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from dataclasses import dataclass
 from typing import Optional
 
 import aiohttp
@@ -36,8 +37,17 @@ _LOGGER = logging.getLogger(__name__)
 
 RAINVIEWER_API_URL = "https://api.rainviewer.com/public/weather-maps.json"
 RAINVIEWER_TIMEOUT = 15
+RAINVIEWER_MAX_FRAME_AGE_S = 20 * 60
 TILE_ZOOM          = 5   # zoom-level 5 = ~300km per tile
 TILE_GRID          = 2   # 2x2 grid = ~600km x ~600km rond het centrum
+
+
+@dataclass(frozen=True, slots=True)
+class RainViewerFrame:
+    """Metadata van het nieuwste frame uit het RainViewer-manifest."""
+
+    path: str
+    timestamp: float
 
 
 def _latlon_to_tile(lat: float, lon: float, zoom: int) -> tuple[int, int]:
@@ -88,47 +98,124 @@ class RainViewerProvider:
         self._center_lon  = center_lon
         self._last_path:  Optional[str] = None   # om dubbele frames te skippen
         self._last_observations: list[Observation] = []
+        self._last_poll_ts: Optional[float] = None
+        self._last_success_ts: Optional[float] = None
+        self._last_frame_ts: Optional[float] = None
+        self._healthy = False
+        self._last_error: Optional[str] = "nog niet opgehaald"
+        self._consecutive_failures = 0
+
+    @property
+    def healthy(self) -> bool:
+        return self._healthy
+
+    @property
+    def diagnostics(self) -> dict:
+        now = time.time()
+        age_s = (
+            max(0.0, now - self._last_frame_ts)
+            if self._last_frame_ts is not None
+            else None
+        )
+        return {
+            "healthy": self._healthy,
+            "last_error": self._last_error,
+            "last_poll_ts": self._last_poll_ts,
+            "last_success_ts": self._last_success_ts,
+            "last_frame_ts": self._last_frame_ts,
+            "frame_age_minutes": round(age_s / 60.0, 1) if age_s is not None else None,
+            "last_path": self._last_path,
+            "max_frame_age_minutes": RAINVIEWER_MAX_FRAME_AGE_S // 60,
+            "consecutive_failures": self._consecutive_failures,
+        }
+
+    def _mark_unhealthy(self, message: str) -> None:
+        first_failure = self._consecutive_failures == 0
+        self._healthy = False
+        self._last_error = message
+        self._consecutive_failures += 1
+        if first_failure:
+            _LOGGER.warning("RainViewerProvider ongezond: %s", message)
+
+    def _mark_healthy(self, now: float) -> None:
+        recovered = self._consecutive_failures > 0
+        self._healthy = True
+        self._last_error = None
+        self._last_success_ts = now
+        self._consecutive_failures = 0
+        if recovered:
+            _LOGGER.info("RainViewerProvider opnieuw gezond")
 
     async def fetch_observations(self) -> list[Observation]:
         """
         Haal het meest recente RainViewer-radarframe op en converteer
         natte pixels naar RADAR Observations.
         """
+        now = time.time()
+        self._last_poll_ts = now
         try:
-            path = await self._fetch_latest_path()
-            if path is None:
+            frame = await self._fetch_latest_frame()
+            if frame is None:
+                self._last_observations = []
                 return []
-            if path == self._last_path:
+
+            self._last_frame_ts = frame.timestamp
+            age_s = max(0.0, now - frame.timestamp)
+            if age_s > RAINVIEWER_MAX_FRAME_AGE_S:
+                self._last_path = frame.path
+                self._last_observations = []
+                self._mark_unhealthy(
+                    f"radarframe is {age_s / 60.0:.1f} minuten oud"
+                )
+                return []
+
+            self._mark_healthy(now)
+            if frame.path == self._last_path:
                 return list(self._last_observations)
-            self._last_path = path
-            observations = await self._fetch_tile_observations(path)
+            self._last_path = frame.path
+            observations = await self._fetch_tile_observations(
+                frame.path, frame.timestamp
+            )
             self._last_observations = list(observations)
             return observations
 
-        except Exception:
+        except Exception as err:
+            self._last_observations = []
+            self._mark_unhealthy(f"onverwachte fout: {err}")
             _LOGGER.exception("RainViewerProvider: fout bij ophalen radardata")
             return []
 
-    async def _fetch_latest_path(self) -> Optional[str]:
-        """Haal het API-manifest op en geef het pad van het meest recente frame."""
+    async def _fetch_latest_frame(self) -> Optional[RainViewerFrame]:
+        """Haal pad en werkelijke radartijd uit het meest recente manifest."""
         try:
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=RAINVIEWER_TIMEOUT)
             ) as session:
                 async with session.get(RAINVIEWER_API_URL) as resp:
                     if resp.status != 200:
+                        self._mark_unhealthy(f"manifest gaf HTTP {resp.status}")
                         return None
                     data = await resp.json(content_type=None)
                     radar = data.get("radar", {}).get("past", [])
                     if not radar:
+                        self._mark_unhealthy("manifest bevat geen radarframes")
                         return None
                     host = data.get("host", "https://tilecache.rainviewer.com")
-                    return host + radar[-1].get("path", "")
-        except Exception:
+                    latest = radar[-1]
+                    path = latest.get("path", "")
+                    frame_ts = latest.get("time")
+                    if not path or not isinstance(frame_ts, (int, float)):
+                        self._mark_unhealthy("nieuwste radarframe mist pad of tijdstip")
+                        return None
+                    return RainViewerFrame(host + path, float(frame_ts))
+        except Exception as err:
+            self._mark_unhealthy(f"manifest-ophaling mislukt: {err}")
             _LOGGER.debug("RainViewerProvider: manifest-ophaling fout", exc_info=True)
             return None
 
-    async def _fetch_tile_observations(self, path: str) -> list[Observation]:
+    async def _fetch_tile_observations(
+        self, path: str, frame_timestamp: float
+    ) -> list[Observation]:
         """Haal een 2×2 grid van tiles op rond het centrum voor een groot gebied."""
         cx, cy = _latlon_to_tile(self._center_lat, self._center_lon, TILE_ZOOM)
         obs    = []
@@ -145,7 +232,9 @@ class RainViewerProvider:
                             if resp.status != 200:
                                 continue
                             image_data = await resp.read()
-                        obs.extend(self._extract_observations(image_data, tx, ty))
+                        obs.extend(self._extract_observations(
+                            image_data, tx, ty, frame_timestamp
+                        ))
                     except Exception:
                         continue
 
@@ -154,7 +243,8 @@ class RainViewerProvider:
         return obs
 
     def _extract_observations(
-        self, image_data: bytes, tx: int, ty: int
+        self, image_data: bytes, tx: int, ty: int,
+        frame_timestamp: Optional[float] = None,
     ) -> list[Observation]:
         try:
             from PIL import Image
@@ -164,7 +254,7 @@ class RainViewerProvider:
             img        = Image.open(io.BytesIO(image_data)).convert("RGBA")
             pixels     = img.load()
             lat_t, lat_b, lon_l, lon_r = _tile_bounds(tx, ty, TILE_ZOOM)
-            now        = time.time()
+            observation_ts = frame_timestamp if frame_timestamp is not None else time.time()
             obs        = []
 
             stride = 8   # elke 8e pixel (~3.5km op zoom-5)
@@ -187,7 +277,7 @@ class RainViewerProvider:
                         obs_type  = ObservationType.RADAR,
                         lat       = lat,
                         lon       = lon,
-                        timestamp = now,
+                        timestamp = observation_ts,
                         intensity = intensity,
                         area_km2  = area_km2,
                         source    = "rainviewer",

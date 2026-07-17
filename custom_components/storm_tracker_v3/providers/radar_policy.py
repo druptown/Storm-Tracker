@@ -9,6 +9,28 @@ from typing import Iterable, Sequence
 OPERA_MIN_STANDALONE_QUALITY = 0.5
 OPERA_CORROBORATION_RADIUS_KM = 25.0
 OPERA_CORROBORATION_MAX_AGE_S = 15 * 60
+OPERA_MIN_STRUCTURED_MEAN_DBZ = 20.0
+OPERA_MIN_STRUCTURED_MAX_DBZ = 30.0
+OPERA_MIN_STRUCTURED_AREA_KM2 = 50.0
+
+
+def usable_corroborating_observations(observations: Iterable) -> tuple:
+    """Selecteer alleen bronnen/pixels die werkelijk neerslag aantonen.
+
+    KMI's product bevat een ingetekende groene basiskaart die niet betrouwbaar
+    van lichte regen te onderscheiden is. KNMI's opaak-witte WMS-achtergrond
+    wordt als intensiteit 1 gedecodeerd. Geen van beide mag droge OPERA-echo's
+    bevestigen; KNMI blijft wel bruikbaar vanaf een echte radarkleur (>= 2).
+    """
+    usable = []
+    for obs in observations:
+        source = getattr(obs, "source", "")
+        intensity = getattr(obs, "intensity", None)
+        if source == "rainviewer" and intensity is not None and intensity >= 1:
+            usable.append(obs)
+        elif source == "knmi" and intensity is not None and intensity >= 2:
+            usable.append(obs)
+    return tuple(usable)
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +45,7 @@ class OperaVerification:
 
     accepted: tuple
     high_quality: int
+    structured_echo: int
     corroborated: int
     rejected: int
 
@@ -71,13 +94,33 @@ def verify_opera_observations(
     """
     references = tuple(corroborating)
     accepted = []
-    high_quality = corroborated = rejected = 0
+    high_quality = structured_echo = corroborated = rejected = 0
 
     for obs in observations:
         quality = getattr(obs, "quality", None)
         if quality is not None and quality >= min_quality:
             accepted.append(obs)
             high_quality += 1
+            continue
+
+        # qi_total is aanvullende kwaliteitsinformatie, geen regen/geen-regen
+        # vlag. Een ruimtelijk substantieel gebied met zowel een hoge
+        # gemiddelde als piekreflectiviteit is zelfstandig meteorologisch
+        # plausibel. Dit laat echte Franse regenbanden door, maar niet de
+        # zwakke Belgische echo (gemiddeld circa 12-14 dBZ) die de bug toonde.
+        mean_dbz = getattr(obs, "mean_dbz", None)
+        max_dbz = getattr(obs, "max_dbz", None)
+        area_km2 = getattr(obs, "area_km2", None)
+        if (
+            mean_dbz is not None
+            and max_dbz is not None
+            and area_km2 is not None
+            and float(mean_dbz) >= OPERA_MIN_STRUCTURED_MEAN_DBZ
+            and float(max_dbz) >= OPERA_MIN_STRUCTURED_MAX_DBZ
+            and float(area_km2) >= OPERA_MIN_STRUCTURED_AREA_KM2
+        ):
+            accepted.append(obs)
+            structured_echo += 1
             continue
 
         # Grote of langgerekte cellen kunnen een centroid hebben dat ver van
@@ -99,15 +142,20 @@ def verify_opera_observations(
         else:
             rejected += 1
 
-    return OperaVerification(tuple(accepted), high_quality, corroborated, rejected)
+    return OperaVerification(
+        tuple(accepted), high_quality, structured_echo, corroborated, rejected
+    )
 
 
 def select_radar_source(*, opera_configured: bool, opera_healthy: bool,
-                        rainviewer_configured: bool) -> RadarDecision:
+                        rainviewer_configured: bool,
+                        rainviewer_healthy: bool) -> RadarDecision:
     """Choose one source. Comparison providers never participate here."""
     if opera_configured and opera_healthy:
         return RadarDecision("opera", "OPERA product is fresh and parsed successfully")
-    if rainviewer_configured:
+    if rainviewer_configured and rainviewer_healthy:
         reason = "OPERA unavailable or stale" if opera_configured else "outside OPERA coverage"
         return RadarDecision("rainviewer", reason)
+    if rainviewer_configured:
+        return RadarDecision(None, "RainViewer unavailable or stale")
     return RadarDecision(None, "no healthy radar provider available")

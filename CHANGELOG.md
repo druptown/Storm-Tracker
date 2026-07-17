@@ -1,5 +1,111 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+## v0.4.27
+
+- Bewegingshistoriek van radarsystemen wordt nu samen met de MCS-snapshot
+  bewaard en na een Home Assistant-herstart onmiddellijk hersteld.
+- Oude snapshots zonder bewegingshistoriek worden automatisch uit hun
+  radarcellen en parent-footprints gereconstrueerd.
+- Meerdere updates van hetzelfde radarproduct vervangen hetzelfde centroidpunt
+  in plaats van kunstmatige nul-tijdsintervallen aan de regressie toe te voegen.
+
+## v0.4.26
+
+- Nieuwe `sensor.stv3_neerslagstatus` vat de operationele toestand samen als
+  `droog`, `waargenomen`, `bevestigd` of `naderend`.
+- De sensor verkiest bevestigde systemen boven eenmalige echo's en publiceert
+  afstand, impactpunt, dBZ, radardekking, beweging, ETA en luchtdruktrend in
+  één stabiel datacontract voor dashboard en automatiseringen.
+
+## v0.4.25
+
+- Sluimerende systemen blijven intern kort beschikbaar voor lifecyclebeheer,
+  maar worden niet langer als actieve storms naar Home Assistant gepubliceerd.
+- Systemen tonen nu `tracking_status`, het aantal opeenvolgende radarframes en
+  het tijdstip van het laatste radarframe.
+- Eén radarframe krijgt status `waargenomen`; vanaf twee aansluitende frames is
+  het systeem `bevestigd`. Daardoor kan het dashboard tijdelijke echo's herkenbaar
+  scheiden van aanhoudende neerslag.
+- Naderingssnelheid en ETA van radarsystemen worden onderdrukt tot het systeem
+  door minstens twee opeenvolgende frames bevestigd is.
+
+## v0.4.24
+
+- OPERA `qi_total` is niet langer de enige zelfstandige toelatingsroute:
+  meteorologisch plausibele cellen van minstens 50 km², gemiddeld minstens
+  20 dBZ en met een piek van minstens 30 dBZ worden als `structured_echo`
+  aanvaard, ook bij een lage quality-score.
+- Zwakke brede echo's blijven kruisbronbevestiging vereisen; de foutcel nabij
+  België van circa 12-14 dBZ wordt dus niet opnieuw toegelaten.
+- Diagnostiek onderscheidt quality-, structuur- en kruisbronacceptatie.
+
+## v0.4.23
+
+- OPERA-cellen kunnen niet langer door de groene KMI-basiskaart worden
+  bevestigd; het KMI-beeld wordt niet als onafhankelijke pixelreferentie
+  gebruikt zolang kaartkleuren en regenkleuren niet betrouwbaar gescheiden zijn.
+- De opaak-witte KNMI WMS-achtergrond (intensiteit 1) telt niet langer als
+  neerslagbevestiging; alleen echte KNMI-radarkleuren vanaf intensiteit 2 en
+  RainViewer-neerslag mogen lage-kwaliteit OPERA-echo's bevestigen.
+- OPERA-diagnostiek toont voortaan zowel het ruwe als bruikbare aantal
+  corroboratiereferenties.
+
+## v0.4.22
+
+- Netatmo-luchtdruk wordt per station over twee uur gevolgd; regionale
+  drukverandering gebruikt de mediaan van gepaarde stations en is daardoor
+  niet gevoelig voor onderlinge hoogteverschillen.
+- Nieuwe sensor `sensor.stv3_netatmo_luchtdruktrend` toont de verandering over
+  60 minuten, trends over 15/30/60 minuten, stationsdekking en snelle drukval.
+- Onrealistische drukwaarden en sprongen worden geweigerd; een trend verschijnt
+  pas zodra minstens drie stations een bruikbare historische vergelijking geven.
+- De twee uur drukhistoriek wordt in Home Assistant-opslag bewaard, zodat een
+  herstart de opgebouwde trend niet wist.
+
+## v0.4.21
+
+- De dichtstbijzijnde-storm-sensor blijft beschikbaar wanneer een nieuw
+  stormsysteem nog geen snelheidsvector heeft; lege naderingssnelheid wordt
+  nu veilig als `null` gepubliceerd.
+
+## v0.4.20
+
+- Bewegingskwaliteit gebruikt nu zowel het aantal meetpunten als de tijdspanne
+  en regressie-fit, zodat een korte of grillige reeks minder vertrouwen krijgt.
+- De dichtstbijzijnde-storm-sensor toont koers, windroosrichting,
+  naderingssnelheid en of het systeem werkelijk naar de tracker beweegt.
+- Een ETA wordt alleen berekend uit de snelheidscomponent richting de tracker;
+  zijwaarts bewegende en wegtrekkende systemen krijgen geen misleidende ETA.
+- Bewegingspunten, historie en fitkwaliteit zijn als diagnostische attributen
+  beschikbaar op de stormsensoren.
+
+## v0.4.19
+
+- Blitzortung abonneert niet langer op de volledige wereldfeed, maar gebruikt
+  een gededupliceerde unie van geohash-topics rond alle actieve RegionEngines.
+- Regiowissels verversen subscriptions op dezelfde gedeelde MQTT-client.
+- MQTT-disconnects worden direct gedetecteerd en krijgen exponentiële backoff
+  van één tot vijftien minuten, met jitter om proxy-rate-limits te respecteren.
+- Foutmeldingen tonen voortaan de foutklasse en een bruikbare reden in plaats
+  van een lege `()`-melding iedere 25 seconden.
+
+## v0.4.18
+
+- De bestaande Open-Meteo Gear-sensor wordt nu daadwerkelijk bij Home
+  Assistant geregistreerd, zodat `sensor.stv3_open_meteo_gear` niet langer
+  als een oude herstelde, maar niet-beschikbare entiteit blijft staan.
+
+## v0.4.17
+
+- RainViewer gebruikt voortaan de werkelijke frame-timestamp uit het manifest
+  in plaats van het lokale verwerkingstijdstip.
+- Radarframes ouder dan twintig minuten worden als ongezond geweigerd en
+  kunnen niet langer als operationele fallback of OPERA-bevestiging dienen.
+- De RainViewer-sensor toont poll-, succes- en frametijd, frameleeftijd,
+  providergezondheid, foutreden, foutenteller en het gebruikte framepad.
+- Manifestproblemen en herstel worden zichtbaar gelogd zonder elke vijf
+  minuten dezelfde waarschuwing te herhalen.
+
 ## v0.4.16
 
 - Open-Meteo-grid verlaagd van 948 naar 324 modelpunten; OPERA blijft de

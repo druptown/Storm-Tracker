@@ -147,7 +147,7 @@ class StormEngine:
 
         # 7. Callback naar coordinator
         if self._on_updated:
-            self._on_updated(list(self._storms.values()))
+            self._on_updated(self.get_active_storms())
 
     def get_storms(self) -> list[Storm]:
         """Geef alle actieve storms terug (gesorteerd op grootte)."""
@@ -157,16 +157,26 @@ class StormEngine:
             reverse=True
         )
 
+    def get_active_storms(self) -> list[Storm]:
+        """Geef alleen systemen die operationeel nog actief zijn."""
+        return [storm for storm in self.get_storms() if not storm.is_dormant]
+
     def get_storm(self, storm_id: str) -> Optional[Storm]:
         return self._storms.get(storm_id)
 
     def export_mcs_history(self) -> list[dict]:
         """Geef compacte, JSON-veilige MCS-historiek voor persistente opslag."""
-        return [
-            storm.to_mcs_snapshot()
-            for storm in self._storms.values()
-            if storm.radar_system_frames
-        ]
+        snapshots = []
+        for storm in self._storms.values():
+            if not storm.radar_system_frames:
+                continue
+            snapshot = storm.to_mcs_snapshot()
+            snapshot["motion_history"] = [
+                {"lat": point.lat, "lon": point.lon, "timestamp": point.ts}
+                for point in self._history.get(storm.storm_id, [])
+            ]
+            snapshots.append(snapshot)
+        return snapshots
 
     def restore_mcs_history(self, snapshots: list[dict]) -> int:
         """Herstel geldige radarhistoriek vóór de eerste nieuwe providerpoll."""
@@ -179,10 +189,68 @@ class StormEngine:
                 continue
             if not storm.radar_system_frames:
                 continue
+            age_minutes = (time.time() - storm.last_update) / 60.0
+            if age_minutes > self._remove_minutes:
+                continue
+            storm.is_dormant = age_minutes > self._expire_minutes
             self._storms[storm.storm_id] = storm
-            self._history.setdefault(storm.storm_id, [])
+            cutoff = time.time() - MAX_HISTORY_AGE_MIN * 60
+            history = []
+            for raw in snapshot.get("motion_history", []):
+                try:
+                    point = CentroidPoint(
+                        lat=float(raw["lat"]),
+                        lon=float(raw["lon"]),
+                        ts=float(raw["timestamp"]),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if point.ts >= cutoff:
+                    history.append(point)
+            if not history:
+                history = self._rebuild_radar_motion_history(storm, cutoff)
+            self._history[storm.storm_id] = sorted(
+                history, key=lambda point: point.ts
+            )[-MAX_HISTORY_POINTS:]
+            storm._dirty = True
+            self._update_movement(storm)
             restored += 1
         return restored
+
+    @staticmethod
+    def _rebuild_radar_motion_history(
+        storm: Storm, cutoff: float
+    ) -> list[CentroidPoint]:
+        """Herbouw centroidpunten uit oudere snapshots zonder motion_history."""
+        grouped: dict[float, list[tuple[float, float, float]]] = {}
+        for cell in storm.radar_cells.values():
+            if cell.timestamp < cutoff:
+                continue
+            weight = max(float(cell.area_km2), 1.0)
+            grouped.setdefault(float(cell.timestamp), []).append(
+                (cell.lat, cell.lon, weight)
+            )
+
+        # Oudere snapshots kunnen voor een tijdstip alleen nog een parent-frame
+        # bevatten. Gebruik dan het midden van de footprint als veilige fallback.
+        for frame in storm.radar_system_frames.values():
+            timestamp = float(frame.timestamp)
+            if timestamp < cutoff or timestamp in grouped:
+                continue
+            points = frame.footprint_points or tuple(frame.convective_points)
+            if not points:
+                continue
+            grouped[timestamp] = [(lat, lon, 1.0) for lat, lon in points]
+
+        history = []
+        for timestamp, points in grouped.items():
+            total_weight = sum(weight for _, _, weight in points)
+            history.append(CentroidPoint(
+                lat=sum(lat * weight for lat, _, weight in points) / total_weight,
+                lon=sum(lon * weight for _, lon, weight in points) / total_weight,
+                ts=timestamp,
+            ))
+        return sorted(history, key=lambda point: point.ts)
 
     def retain_within(
         self, center_lat: float, center_lon: float, radius_km: float
@@ -205,7 +273,7 @@ class StormEngine:
             self._last_geocode_pos.pop(storm_id, None)
 
         if remove_ids and self._on_updated:
-            self._on_updated(list(self._storms.values()))
+            self._on_updated(self.get_active_storms())
 
         return len(remove_ids)
 
@@ -385,7 +453,11 @@ class StormEngine:
             new_lon = lon_sum / total_weight
 
             hist = self._history.setdefault(storm.storm_id, [])
-            hist.append(CentroidPoint(lat=new_lat, lon=new_lon, ts=reference_ts))
+            point = CentroidPoint(lat=new_lat, lon=new_lon, ts=reference_ts)
+            if hist and abs(hist[-1].ts - reference_ts) < 1.0:
+                hist[-1] = point
+            else:
+                hist.append(point)
             self._prune_history(storm.storm_id)
 
             storm.centroid_lat = new_lat
@@ -418,6 +490,9 @@ class StormEngine:
         heading, speed = self._linear_regression(hist)
         storm.heading_deg = heading
         storm.speed_kmh   = speed
+        storm.motion_sample_count = len(hist)
+        storm.motion_history_minutes = round((hist[-1].ts - hist[0].ts) / 60.0, 1)
+        storm.motion_fit_quality = self._fit_quality(hist)
         storm.confidence  = self._calc_confidence(hist, heading, speed)
         storm._dirty      = False
 
@@ -473,13 +548,38 @@ class StormEngine:
     ) -> str:
         """Bereken confidence op basis van history lengte en consistentie."""
         n = len(hist)
-        if heading is None or n < MIN_HISTORY_POINTS:
+        span_minutes = (hist[-1].ts - hist[0].ts) / 60.0 if n > 1 else 0.0
+        fit_quality = self._fit_quality(hist)
+        if heading is None or n < MIN_HISTORY_POINTS or span_minutes < 5:
             return "Onvoldoende data"
-        if n >= 10 and speed is not None and speed > 1:
+        if n >= 6 and span_minutes >= 15 and fit_quality >= 0.85 and speed and speed > 1:
             return "Hoog"
-        if n >= 6:
+        if span_minutes >= 10 and fit_quality >= 0.60:
             return "Matig"
         return "Laag"
+
+    @staticmethod
+    def _fit_quality(hist: list[CentroidPoint]) -> float:
+        """Gemiddelde R² van lat(t) en lon(t), als maat voor rechte beweging."""
+        if len(hist) < 2:
+            return 0.0
+        times = [point.ts - hist[0].ts for point in hist]
+
+        def r_squared(values: list[float]) -> float:
+            slope = _slope(times, values)
+            if slope is None:
+                return 0.0
+            mean_t = sum(times) / len(times)
+            mean_value = sum(values) / len(values)
+            intercept = mean_value - slope * mean_t
+            residual = sum(
+                (value - (intercept + slope * timestamp)) ** 2
+                for timestamp, value in zip(times, values)
+            )
+            total = sum((value - mean_value) ** 2 for value in values)
+            return 1.0 if total <= 1e-12 and residual <= 1e-12 else max(0.0, 1 - residual / total) if total > 0 else 0.0
+
+        return round((r_squared([p.lat for p in hist]) + r_squared([p.lon for p in hist])) / 2, 3)
 
     # ── Geometrie: bounding box, polygon (hull), geocoding ──────────────────
 

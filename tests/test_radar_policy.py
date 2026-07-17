@@ -7,38 +7,71 @@ def _select(radar_policy_module, **kwargs):
 
 def test_healthy_opera_is_primary(radar_policy_module):
     decision = _select(radar_policy_module,
-        opera_configured=True, opera_healthy=True, rainviewer_configured=True
+        opera_configured=True, opera_healthy=True, rainviewer_configured=True,
+        rainviewer_healthy=True
     )
     assert decision.source == "opera"
 
 
 def test_rainviewer_is_fallback_for_unhealthy_opera(radar_policy_module):
     decision = _select(radar_policy_module,
-        opera_configured=True, opera_healthy=False, rainviewer_configured=True
+        opera_configured=True, opera_healthy=False, rainviewer_configured=True,
+        rainviewer_healthy=True
     )
     assert decision.source == "rainviewer"
 
 
 def test_rainviewer_is_primary_outside_opera_coverage(radar_policy_module):
     decision = _select(radar_policy_module,
-        opera_configured=False, opera_healthy=False, rainviewer_configured=True
+        opera_configured=False, opera_healthy=False, rainviewer_configured=True,
+        rainviewer_healthy=True
     )
     assert decision.source == "rainviewer"
 
 
 def test_no_source_when_none_available(radar_policy_module):
     decision = _select(radar_policy_module,
-        opera_configured=False, opera_healthy=False, rainviewer_configured=False
+        opera_configured=False, opera_healthy=False, rainviewer_configured=False,
+        rainviewer_healthy=False
     )
     assert decision.source is None
 
 
+def test_stale_rainviewer_is_not_selected(radar_policy_module):
+    decision = _select(
+        radar_policy_module,
+        opera_configured=True,
+        opera_healthy=False,
+        rainviewer_configured=True,
+        rainviewer_healthy=False,
+    )
+    assert decision.source is None
+    assert "stale" in decision.reason
+
+
 def _obs(*, lat=51.0, lon=4.5, timestamp=1_000.0, quality=None,
-         footprint_points=()):
+         footprint_points=(), source="rainviewer", intensity=2,
+         mean_dbz=None, max_dbz=None, area_km2=None):
     return SimpleNamespace(
         lat=lat, lon=lon, timestamp=timestamp, quality=quality,
-        footprint_points=footprint_points,
+        footprint_points=footprint_points, source=source, intensity=intensity,
+        mean_dbz=mean_dbz, max_dbz=max_dbz, area_km2=area_km2,
     )
+
+
+def test_corroboration_filter_rejects_kmi_basemap_and_knmi_white_background(
+    radar_policy_module,
+):
+    observations = [
+        _obs(source="kmi", intensity=4),
+        _obs(source="knmi", intensity=1),
+        _obs(source="knmi", intensity=2),
+        _obs(source="rainviewer", intensity=1),
+    ]
+
+    usable = radar_policy_module.usable_corroborating_observations(observations)
+
+    assert usable == (observations[2], observations[3])
 
 
 def test_opera_high_quality_is_accepted_without_confirmation(radar_policy_module):
@@ -47,6 +80,7 @@ def test_opera_high_quality_is_accepted_without_confirmation(radar_policy_module
     )
     assert len(result.accepted) == 1
     assert result.high_quality == 1
+    assert result.structured_echo == 0
     assert result.corroborated == 0
     assert result.rejected == 0
 
@@ -86,6 +120,32 @@ def test_opera_low_quality_rejects_distant_or_stale_confirmation(radar_policy_mo
         [opera], [distant, stale]
     )
     assert result.accepted == ()
+    assert result.rejected == 1
+
+
+def test_opera_strong_structured_echo_is_accepted_despite_low_quality(
+    radar_policy_module,
+):
+    opera = _obs(
+        quality=0.01, mean_dbz=31.0, max_dbz=52.0, area_km2=250.0
+    )
+
+    result = radar_policy_module.verify_opera_observations([opera], [])
+
+    assert result.accepted == (opera,)
+    assert result.structured_echo == 1
+    assert result.corroborated == 0
+
+
+def test_opera_weak_broad_echo_still_requires_corroboration(radar_policy_module):
+    opera = _obs(
+        quality=0.01, mean_dbz=14.0, max_dbz=47.5, area_km2=1174.0
+    )
+
+    result = radar_policy_module.verify_opera_observations([opera], [])
+
+    assert result.accepted == ()
+    assert result.structured_echo == 0
     assert result.rejected == 1
 
 

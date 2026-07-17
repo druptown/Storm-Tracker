@@ -61,4 +61,4 @@ release notes.
 
 ## Versie
 
-De huidige integratieversie is **0.4.16**.
+De huidige integratieversie is **0.4.27**.

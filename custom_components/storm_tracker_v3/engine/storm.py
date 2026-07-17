@@ -8,6 +8,7 @@ Alle zware berekeningen worden gecachet.
 """
 from __future__ import annotations
 
+import math
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -115,6 +116,9 @@ class Storm:
     heading_deg:   Optional[float] = None   # richting in graden (0=N)
     speed_kmh:     Optional[float] = None   # snelheid km/h
     confidence:    str             = "Onvoldoende data"
+    motion_sample_count: int = 0
+    motion_history_minutes: float = 0.0
+    motion_fit_quality: float = 0.0
 
     # Geometrie (gecachet)
     # Voorstel pagina 9: "Eerst bounding box. Pas daarna polygon." — de
@@ -426,6 +430,45 @@ class Storm:
             self.mcs_status = "candidate"
             self.system_type = "mcs_candidate"
 
+    @property
+    def radar_frame_timestamps(self) -> tuple[float, ...]:
+        """Unieke radarmomenten; meerdere cellen in één product tellen één keer."""
+        timestamps = {float(cell.timestamp) for cell in self.radar_cells.values()}
+        timestamps.update(float(frame.timestamp) for frame in self.radar_system_frames.values())
+        return tuple(sorted(timestamps))
+
+    @property
+    def consecutive_radar_frames(self) -> int:
+        """Aantal aansluitende recente radarproducten in de huidige reeks."""
+        timestamps = self.radar_frame_timestamps
+        if not timestamps:
+            return 0
+        sequence_count = 1
+        for previous, current in zip(reversed(timestamps[:-1]), reversed(timestamps[1:])):
+            if current - previous > MCS_MAX_FRAME_GAP_MINUTES * 60:
+                break
+            sequence_count += 1
+        return sequence_count
+
+    @property
+    def tracking_status(self) -> str:
+        """Operationele volwassenheid van het systeem voor gebruikersweergave."""
+        if self.is_dormant:
+            return "sluimerend"
+        frames = self.consecutive_radar_frames
+        if frames >= 2:
+            return "bevestigd"
+        if frames == 1:
+            return "waargenomen"
+        if self.strike_count:
+            return "alleen_bliksem"
+        return "onvoldoende_data"
+
+    @property
+    def last_radar_timestamp(self) -> Optional[float]:
+        timestamps = self.radar_frame_timestamps
+        return timestamps[-1] if timestamps else None
+
     def closest_radar_point(
         self, target_lat: float, target_lon: float
     ) -> Optional[tuple[float, float, float]]:
@@ -442,6 +485,48 @@ class Storm:
             candidates.append((distance, point[0], point[1]))
         return min(candidates, key=lambda item: item[0])
 
+    def motion_to_target(
+        self,
+        target_lat: float,
+        target_lon: float,
+        distance_km: Optional[float] = None,
+    ) -> dict:
+        """Projecteer de bewegingsvector op de richting naar een target."""
+        distance = (
+            _haversine_km(
+                self.centroid_lat, self.centroid_lon, target_lat, target_lon
+            )
+            if distance_km is None else float(distance_km)
+        )
+        bearing = _bearing_deg(
+            self.centroid_lat, self.centroid_lon, target_lat, target_lon
+        )
+        if (
+            self.heading_deg is None
+            or self.speed_kmh is None
+            or self.speed_kmh <= 0
+            or (self.radar_cells and self.tracking_status != "bevestigd")
+        ):
+            return {
+                "bearing_to_target_deg": round(bearing, 1),
+                "approach_speed_kmh": None,
+                "moving_towards": None,
+                "eta_minutes": None,
+            }
+
+        angle = abs((self.heading_deg - bearing + 180.0) % 360.0 - 180.0)
+        approach_speed = self.speed_kmh * math.cos(math.radians(angle))
+        moving_towards = approach_speed > 1.0
+        eta_minutes = None
+        if moving_towards and self.confidence != "Onvoldoende data":
+            eta_minutes = distance / approach_speed * 60.0
+        return {
+            "bearing_to_target_deg": round(bearing, 1),
+            "approach_speed_kmh": round(approach_speed, 1),
+            "moving_towards": moving_towards,
+            "eta_minutes": round(eta_minutes, 0) if eta_minutes is not None else None,
+        }
+
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     import math
@@ -455,6 +540,19 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         * math.sin(dlon / 2) ** 2
     )
     return 6371.0088 * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Initiële koers van punt 1 naar punt 2, in graden vanaf noord."""
+    lat1_rad = math.radians(lat1)
+    lat2_rad = math.radians(lat2)
+    dlon = math.radians(lon2 - lon1)
+    y = math.sin(dlon) * math.cos(lat2_rad)
+    x = (
+        math.cos(lat1_rad) * math.sin(lat2_rad)
+        - math.sin(lat1_rad) * math.cos(lat2_rad) * math.cos(dlon)
+    )
+    return math.degrees(math.atan2(y, x)) % 360.0
 
 
 def _point_span_km(points: tuple[tuple[float, float], ...]) -> float:

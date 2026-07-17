@@ -247,6 +247,64 @@ def test_mcs_history_survives_engine_restart(
     assert len(restored.radar_system_frames) == 37
 
 
+def test_motion_history_survives_engine_restart(
+    storm_engine_module, storm_module
+):
+    now = time.time()
+    source = storm_engine_module.StormEngine()
+    storm = storm_module.Storm(last_update=now)
+    storm.radar_system_frames["frame"] = storm_module.RadarSystemFrame(
+        parent_system_id="frame", timestamp=now, area_km2=100.0,
+        footprint_points=((51.0, 4.15),),
+    )
+    source._storms[storm.storm_id] = storm
+    source._history[storm.storm_id] = [
+        storm_engine_module.CentroidPoint(51.0, 4.00 + index * 0.05, now - 900 + index * 300)
+        for index in range(4)
+    ]
+
+    snapshots = source.export_mcs_history()
+    assert len(snapshots[0]["motion_history"]) == 4
+
+    restored_engine = storm_engine_module.StormEngine()
+    assert restored_engine.restore_mcs_history(snapshots) == 1
+    restored = restored_engine.get_storm(storm.storm_id)
+    assert restored.motion_sample_count == 4
+    assert restored.heading_deg == pytest.approx(90.0, abs=5.0)
+    assert restored.speed_kmh is not None
+    assert restored.confidence == "Matig"
+
+
+def test_legacy_snapshot_rebuilds_motion_from_radar_cells(
+    storm_engine_module, storm_module
+):
+    now = time.time()
+    storm = storm_module.Storm(last_update=now)
+    for index in range(4):
+        timestamp = now - 900 + index * 300
+        lon = 4.00 + index * 0.05
+        cell_id = f"cell-{index}"
+        storm.radar_cells[cell_id] = storm_module.RadarCellSnapshot(
+            cell_id=cell_id, timestamp=timestamp, lat=51.0, lon=lon,
+            intensity=3, area_km2=100.0, max_dbz=35.0,
+        )
+        frame_id = f"frame-{index}"
+        storm.radar_system_frames[frame_id] = storm_module.RadarSystemFrame(
+            parent_system_id=frame_id, timestamp=timestamp, area_km2=100.0,
+            footprint_points=((51.0, lon),),
+        )
+
+    legacy_snapshot = storm.to_mcs_snapshot()
+    assert "motion_history" not in legacy_snapshot
+
+    restored_engine = storm_engine_module.StormEngine()
+    assert restored_engine.restore_mcs_history([legacy_snapshot]) == 1
+    restored = restored_engine.get_storm(storm.storm_id)
+    assert restored.motion_sample_count == 4
+    assert restored.heading_deg == pytest.approx(90.0, abs=5.0)
+    assert restored.confidence == "Matig"
+
+
 def test_large_rain_area_without_intense_convection_is_not_mcs(
     storm_module, observation_module
 ):
@@ -359,6 +417,7 @@ def test_storm_becomes_dormant_after_expire_minutes(storm_engine_module, observa
     original = engine.get_storm(storm.storm_id)
     assert original is not None
     assert original.is_dormant is True
+    assert original not in engine.get_active_storms()
 
 
 def test_storm_is_removed_after_remove_minutes(storm_engine_module, observation_module):
@@ -404,7 +463,9 @@ def test_movement_regression_detects_eastward_motion(storm_engine_module, observ
     genoeg history-punten een heading rond 90 graden krijgen.
     """
     engine = storm_engine_module.StormEngine(cluster_radius_km=50.0)
-    base_ts = time.time() - 300
+    # Kleine marge op het vijfminutenvenster voorkomt dat punt nul tijdens
+    # de test door enkele milliseconden klokverloop wordt weggepruned.
+    base_ts = time.time() - 295
     lon = 4.0
     for i in range(6):
         obs = _obs(
@@ -418,6 +479,32 @@ def test_movement_regression_detects_eastward_motion(storm_engine_module, observ
     assert storm.heading_deg is not None
     assert 60 < storm.heading_deg < 120, f"verwacht ~oostwaarts (90°), kreeg {storm.heading_deg}"
     assert storm.speed_kmh is not None and storm.speed_kmh > 0
+    assert storm.motion_sample_count == 6
+    assert storm.motion_history_minutes == pytest.approx(5.0)
+    assert storm.motion_fit_quality > 0.9
+    assert storm.confidence == "Laag"
+
+
+def test_same_radar_timestamp_replaces_centroid_instead_of_duplicating_it(
+    storm_engine_module, observation_module
+):
+    engine = storm_engine_module.StormEngine(cluster_radius_km=50.0)
+    timestamp = time.time()
+    first = _obs(
+        observation_module, observation_module.ObservationType.RADAR,
+        51.0, 4.0, ts=timestamp, intensity=3,
+    )
+    second = _obs(
+        observation_module, observation_module.ObservationType.RADAR,
+        51.0, 4.05, ts=timestamp, intensity=3,
+    )
+
+    asyncio.run(engine.process_batch([first]))
+    asyncio.run(engine.process_batch([second]))
+
+    storm = engine.get_storms()[0]
+    assert len(engine._history[storm.storm_id]) == 1
+    assert engine._history[storm.storm_id][0].lon > 4.0
 
 
 def test_confidence_is_insufficient_with_too_little_history(storm_engine_module, observation_module):

@@ -83,3 +83,92 @@ def test_prune_history_removes_old_strikes(storm_module):
     storm.prune_history(max_age_minutes=90)
     assert len(storm._strike_history) == 1
     assert storm._strike_history[0][1] == 51.1
+
+
+def test_motion_to_target_only_returns_eta_when_approaching(storm_module):
+    storm = storm_module.Storm(
+        centroid_lat=51.0,
+        centroid_lon=4.0,
+        heading_deg=90.0,
+        speed_kmh=60.0,
+        confidence="Matig",
+    )
+
+    east = storm.motion_to_target(51.0, 5.0, distance_km=60.0)
+    assert east["moving_towards"] is True
+    assert east["approach_speed_kmh"] == pytest.approx(60.0, abs=0.1)
+    assert east["eta_minutes"] == pytest.approx(60.0, abs=0.1)
+
+    west = storm.motion_to_target(51.0, 3.0, distance_km=60.0)
+    assert west["moving_towards"] is False
+    assert west["approach_speed_kmh"] == pytest.approx(-60.0, abs=0.1)
+    assert west["eta_minutes"] is None
+
+
+def test_motion_to_target_suppresses_eta_without_reliable_vector(storm_module):
+    storm = storm_module.Storm(
+        centroid_lat=51.0,
+        centroid_lon=4.0,
+        heading_deg=90.0,
+        speed_kmh=60.0,
+        confidence="Onvoldoende data",
+    )
+
+    motion = storm.motion_to_target(51.0, 5.0, distance_km=60.0)
+    assert motion["moving_towards"] is True
+    assert motion["eta_minutes"] is None
+
+
+def test_motion_to_target_without_vector_returns_nullable_sensor_values(storm_module):
+    storm = storm_module.Storm(centroid_lat=51.0, centroid_lon=4.0)
+
+    motion = storm.motion_to_target(51.0, 5.0, distance_km=60.0)
+    assert motion["bearing_to_target_deg"] is not None
+    assert motion["approach_speed_kmh"] is None
+    assert motion["moving_towards"] is None
+    assert motion["eta_minutes"] is None
+
+
+def test_radar_tracking_status_requires_two_frames(storm_module):
+    storm = storm_module.Storm()
+    storm.radar_cells["first"] = storm_module.RadarCellSnapshot(
+        cell_id="first", timestamp=1_000.0, lat=51.0, lon=4.0,
+        intensity=3, area_km2=100.0,
+    )
+    assert storm.consecutive_radar_frames == 1
+    assert storm.tracking_status == "waargenomen"
+
+    storm.radar_cells["second"] = storm_module.RadarCellSnapshot(
+        cell_id="second", timestamp=1_300.0, lat=51.1, lon=4.1,
+        intensity=3, area_km2=100.0,
+    )
+    assert storm.consecutive_radar_frames == 2
+    assert storm.tracking_status == "bevestigd"
+    assert storm.last_radar_timestamp == 1_300.0
+
+
+def test_radar_tracking_sequence_restarts_after_large_gap(storm_module):
+    storm = storm_module.Storm()
+    for key, timestamp in (("old", 1_000.0), ("new", 3_000.0)):
+        storm.radar_cells[key] = storm_module.RadarCellSnapshot(
+            cell_id=key, timestamp=timestamp, lat=51.0, lon=4.0,
+            intensity=3, area_km2=100.0,
+        )
+
+    assert storm.consecutive_radar_frames == 1
+    assert storm.tracking_status == "waargenomen"
+
+
+def test_unconfirmed_radar_system_suppresses_motion_projection(storm_module):
+    storm = storm_module.Storm(
+        centroid_lat=51.0, centroid_lon=4.0,
+        heading_deg=90.0, speed_kmh=60.0, confidence="Matig",
+    )
+    storm.radar_cells["only"] = storm_module.RadarCellSnapshot(
+        cell_id="only", timestamp=1_000.0, lat=51.0, lon=4.0,
+        intensity=3, area_km2=100.0,
+    )
+
+    motion = storm.motion_to_target(51.0, 5.0, distance_km=60.0)
+    assert motion["approach_speed_kmh"] is None
+    assert motion["eta_minutes"] is None

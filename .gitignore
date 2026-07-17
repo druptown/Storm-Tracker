@@ -4,6 +4,7 @@ venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.codex-test-tmp*/
 .coverage
 htmlcov/
 
@@ -20,6 +21,7 @@ configuration.yaml
 provider_logs/
 debug/
 tmp/
+storm_tracker_v3_v*_deploy.zip
 
 # Editors and operating systems
 .vscode/
