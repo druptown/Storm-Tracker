@@ -354,3 +354,11 @@
   dashboardkaarten en andere kaartclients.
 - `sensor.stv3_kaart_geojson` publiceert uitsluitend compacte metadata,
   featureaantallen en het endpoint.
+## v0.4.32
+
+- Orden OPERA RadarCell-puntwolken eerst als convex hull; hierdoor verdwijnen
+  de lange blauwe zigzagdiagonalen op de GeoJSON-kaart.
+- Maak de kaartmodule ASCII-veilig zodat keuzelijst, zoomknoppen en metadata
+  niet langer met mojibake worden weergegeven.
+- Cluster targets op vrijwel dezelfde locatie tot een leesbaar label in plaats
+  van acht overlappende namen.

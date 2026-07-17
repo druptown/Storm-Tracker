@@ -176,7 +176,7 @@ def targets_module():
 
 
 @pytest.fixture(scope="session")
-def geojson_module():
+def geojson_module(hull_module):
     _ensure_stub_package(f"{PKG_NAME}.engine")
     return _load_module(
         f"{PKG_NAME}.engine.geojson",
