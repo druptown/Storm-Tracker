@@ -41,6 +41,7 @@ from .engine.targets import build_target_specs, coordinates_from_state
 from .plogger.provider_logger import (
     log_lightning, log_kmi, log_rainviewer, log_knmi, log_netatmo, log_open_meteo
 )
+from .http import StormTrackerGeoJsonView
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -126,6 +127,9 @@ async def _async_setup_runtime(
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN].setdefault("unsubscribers", [])
+    if not hass.data[DOMAIN].get("geojson_http_registered"):
+        hass.http.register_view(StormTrackerGeoJsonView(hass))
+        hass.data[DOMAIN]["geojson_http_registered"] = True
 
     home_lat        = conf["home_lat"]
     home_lon        = conf["home_lon"]
@@ -747,5 +751,5 @@ async def _async_setup_runtime(
     from homeassistant.helpers import discovery
     await discovery.async_load_platform(hass, "sensor", DOMAIN, {}, config)
 
-    _LOGGER.info("Storm Tracker V3 v0.4.30 gestart met multi-target GeoJSON-kaartfeed")
+    _LOGGER.info("Storm Tracker V3 v0.4.31 gestart met recorderveilige GeoJSON-API")
     return True

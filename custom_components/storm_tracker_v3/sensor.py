@@ -961,6 +961,6 @@ class StormMapGeoJsonSensor(StormTrackerBaseSensor):
     def extra_state_attributes(self):
         collection = self._collection()
         return {
-            "geojson": collection,
+            "endpoint": "/api/storm_tracker_v3/geojson",
             **collection["metadata"],
         }
