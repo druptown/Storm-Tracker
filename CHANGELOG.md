@@ -346,3 +346,11 @@
   dat Home Assistant-state-attributen onbeheersbaar groot worden.
 - De kaartfeed heeft een expliciete schemaversie en meldt wanneer cellen zijn
   afgekapt, zodat kaartclients betrouwbaar kunnen degraderen.
+## v0.4.31
+
+- De volledige GeoJSON staat niet langer in een sensorattribuut dat Recorder
+  bij iedere radarupdate zou kunnen opslaan.
+- Nieuwe geauthenticeerde feed op `/api/storm_tracker_v3/geojson` voor
+  dashboardkaarten en andere kaartclients.
+- `sensor.stv3_kaart_geojson` publiceert uitsluitend compacte metadata,
+  featureaantallen en het endpoint.
