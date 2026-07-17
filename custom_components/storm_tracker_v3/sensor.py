@@ -27,6 +27,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
 from .engine.nowcast import build_precipitation_status
+from .engine.geojson import build_feature_collection
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -83,6 +84,7 @@ async def async_setup_platform(
     entities.append(StormDetailSensor(hass))
     entities.append(McsDetectieSensor(hass))
     entities.append(RegionEngineSensor(hass))
+    entities.append(StormMapGeoJsonSensor(hass))
 
     async_add_entities(entities, update_before_add=True)
 
@@ -925,4 +927,40 @@ class RegionEngineSensor(StormTrackerBaseSensor):
                 }
                 for engine in manager.get_all_engines()
             ],
+        }
+
+
+class StormMapGeoJsonSensor(StormTrackerBaseSensor):
+    """Compacte, versieerbare kaartfeed voor multi-target clients."""
+
+    _attr_name = "STV3 Kaart GeoJSON"
+    _attr_unique_id = "stv3_map_geojson"
+    _attr_icon = "mdi:map-marker-path"
+
+    @property
+    def _listen_events(self):
+        return [
+            f"{DOMAIN}_storms_updated",
+            f"{DOMAIN}_targets_updated",
+            f"{DOMAIN}_fictieve_update",
+        ]
+
+    def _collection(self):
+        data = self.hass.data.get(DOMAIN, {})
+        manager = data.get("storm_manager")
+        return build_feature_collection(
+            data.get("targets", {}),
+            manager.get_all_engines() if manager else [],
+        )
+
+    @property
+    def native_value(self):
+        return self._collection()["metadata"]["feature_count"]
+
+    @property
+    def extra_state_attributes(self):
+        collection = self._collection()
+        return {
+            "geojson": collection,
+            **collection["metadata"],
         }

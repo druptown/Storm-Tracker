@@ -32,3 +32,4 @@ def test_open_meteo_gear_sensor_is_registered() -> None:
 
     assert "OpenMeteoGearSensor" in registered_classes
     assert "TargetPrecipitationStatusSensor" in registered_classes
+    assert "StormMapGeoJsonSensor" in registered_classes

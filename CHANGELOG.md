@@ -338,3 +338,11 @@
 - De fictieve tracker is niet langer verplicht of primair, maar een optioneel
   en duidelijk gemarkeerd testtarget.
 - Bestaande YAML-configuraties blijven ondersteund tijdens de migratieperiode.
+## v0.4.30
+
+- Nieuwe compacte GeoJSON-kaartfeed voor targets, RegionEngines,
+  weersystemen, systeemhulls, lokale RadarCells en bewegingsvectoren.
+- Radarcellen zijn begrensd en hulls worden compact bemonsterd om te vermijden
+  dat Home Assistant-state-attributen onbeheersbaar groot worden.
+- De kaartfeed heeft een expliciete schemaversie en meldt wanneer cellen zijn
+  afgekapt, zodat kaartclients betrouwbaar kunnen degraderen.
