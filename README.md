@@ -31,13 +31,19 @@ Kopieer `custom_components/storm_tracker_v3` naar de map
 `/config/custom_components/storm_tracker_v3` van Home Assistant en herstart
 Home Assistant.
 
-Voeg daarna bijvoorbeeld het volgende toe aan `configuration.yaml`:
+Ga in Home Assistant naar **Instellingen > Apparaten & diensten > Integratie
+toevoegen**, kies **Storm Tracker V3** en selecteer de Life360-trackers van de
+personen die je wilt volgen. De thuislocatie en coördinaten worden automatisch
+uit Home Assistant gelezen. Een gewone `device_tracker` kan optioneel als
+fictieve testtracker worden geselecteerd.
+
+Voor bestaande YAML-installaties blijft deze configuratie voorlopig ondersteund:
 
 ```yaml
 storm_tracker_v3:
-  home_lat: !secret home_latitude
+  home_lat: !secret home_latitude       # nieuwe UI-installaties lezen dit uit HA
   home_lon: !secret home_longitude
-  fictieve_tracker_entity: device_tracker.fictieve_tracker
+  fictieve_tracker_entity: device_tracker.fictieve_tracker  # optionele testtracker
   radar_radius_km: 350
   engine_sharing_distance_km: 150
   targets:
@@ -75,4 +81,4 @@ release notes.
 
 ## Versie
 
-De huidige integratieversie is **0.4.28**.
+De huidige integratieversie is **0.4.29**.
