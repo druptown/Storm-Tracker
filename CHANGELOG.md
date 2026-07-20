@@ -1,5 +1,11 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.58
+
+- Herken niet-JSON-antwoorden van Open-Meteo ondanks een HTTP-successtatus.
+- Probeer ItaliaMeteo ICON-2I automatisch opnieuw met alleen neerslag wanneer LPI niet geleverd kan worden.
+- Laat een forecaststoring de officiële Italiaanse radarcatalogus en lifecycle niet langer volledig blokkeren.
+
 # 0.4.57
 
 - Voeg GeoSphere Austria INCA toe als slapende officiële 1 km-nowcastvalidatie.
