@@ -87,7 +87,8 @@ def _storm_has_reliable_motion(storm) -> bool:
 
 
 def build_feature_collection(
-    targets: dict, regions: list, active_radar_source: str | None = None
+    targets: dict, regions: list, active_radar_source: str | None = None,
+    radar_sources_by_engine: dict | None = None,
 ) -> dict:
     """Publiceer targets, regio's, systemen, hulls, cellen en vectoren compact."""
     features = []
@@ -95,13 +96,15 @@ def build_feature_collection(
     radar_cells_total = 0
     historical_radar_cells_excluded = 0
 
+    radar_sources_by_engine = radar_sources_by_engine or {}
     latest_by_region = {}
     for region in regions:
+        region_source = (radar_sources_by_engine.get(region.engine_id) or {}).get("source", active_radar_source)
         timestamps = [
             float(cell.timestamp)
             for storm in region.storm_engine.get_storms()
             for cell in storm.radar_cells.values()
-            if _cell_matches_active_source(cell, active_radar_source)
+            if _cell_matches_active_source(cell, region_source)
         ]
         latest_by_region[region.engine_id] = max(timestamps, default=None)
 
@@ -121,9 +124,13 @@ def build_feature_collection(
             available=bool(target.get("available")),
             radar_covered=bool(target.get("radar_covered")),
             region_engine=target.get("region_engine_id"),
+            radar_source=(radar_sources_by_engine.get(target.get("region_engine_id")) or {}).get("source"),
+            radar_source_reason=(radar_sources_by_engine.get(target.get("region_engine_id")) or {}).get("reason"),
         ))
 
     for region in regions:
+        region_decision = radar_sources_by_engine.get(region.engine_id) or {}
+        region_source = region_decision.get("source", active_radar_source)
         features.append(_feature(
             f"region:{region.engine_id}",
             {"type": "Point", "coordinates": _point(region.center_lon, region.center_lat)},
@@ -131,11 +138,14 @@ def build_feature_collection(
             engine_id=region.engine_id,
             radius_km=round(region.observation_radius_km, 1),
             targets=sorted(region.projection_targets),
+            radar_source=region_source,
+            radar_source_reason=region_decision.get("reason"),
+            radar_age_seconds=region_decision.get("age_seconds"),
         ))
         for storm in region.storm_engine.get_storms():
             all_cells = [
                 cell for cell in storm.radar_cells.values()
-                if _cell_matches_active_source(cell, active_radar_source)
+                if _cell_matches_active_source(cell, region_source)
             ]
             latest_timestamp = latest_by_region.get(region.engine_id)
             cells = sorted(
@@ -153,7 +163,7 @@ def build_feature_collection(
             # Wanneer een operationele bron gekozen is, mag historische
             # StormEngine-state geen verweesde systeemvlakken of vectoren op
             # de actuele kaart achterlaten.
-            if active_radar_source and not cells:
+            if region_source and not cells:
                 continue
 
             storm_id = f"{region.engine_id}:{storm.storm_id}"

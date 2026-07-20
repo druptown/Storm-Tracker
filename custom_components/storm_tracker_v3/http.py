@@ -24,5 +24,6 @@ class StormTrackerGeoJsonView(HomeAssistantView):
             data.get("targets", {}),
             manager.get_all_engines() if manager else [],
             active_radar_source=data.get("active_radar_source"),
+            radar_sources_by_engine=data.get("radar_sources_by_engine"),
         )
         return self.json(collection)

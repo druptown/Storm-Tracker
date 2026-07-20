@@ -38,8 +38,14 @@ def usable_corroborating_observations(observations: Iterable) -> tuple:
     for obs in observations:
         source = getattr(obs, "source", "")
         intensity = getattr(obs, "intensity", None)
-        if source in {"kmi", "knmi", "rainviewer"} and (
-            intensity is not None and intensity >= 2
+        minimum = 2 if source in {"kmi", "knmi", "rainviewer"} else 1
+        if source in {
+            "kmi", "knmi", "rainviewer", "dwd_radolan",
+            "met_office_radar", "meteofrance_radar",
+            "dpc_radar",
+            "aemet_radar",
+        } and (
+            intensity is not None and intensity >= minimum
         ):
             usable.append(obs)
     return tuple(usable)
@@ -47,11 +53,15 @@ def usable_corroborating_observations(observations: Iterable) -> tuple:
 
 def corroboration_source_counts(observations: Iterable) -> dict[str, int]:
     """Tel de werkelijk bruikbare vergelijkingspunten per radarbron."""
-    counts = {"kmi": 0, "knmi": 0, "rainviewer": 0}
+    supported = {
+        "kmi", "knmi", "rainviewer", "dwd_radolan",
+        "met_office_radar", "meteofrance_radar", "dpc_radar", "aemet_radar",
+    }
+    counts: dict[str, int] = {}
     for observation in observations:
         source = getattr(observation, "source", "")
-        if source in counts:
-            counts[source] += 1
+        if source in supported:
+            counts[source] = counts.get(source, 0) + 1
     return counts
 
 

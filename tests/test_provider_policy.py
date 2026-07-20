@@ -11,7 +11,7 @@ POLICY = Path(__file__).resolve().parent.parent / "custom_components" / "storm_t
 def test_policy_is_valid_and_germany_separates_radar_from_lightning():
     policy = json.loads(POLICY.read_text(encoding="utf-8"))
     germany = policy["countries"]["DE"]
-    assert germany["radar"] == ["opera", "dwd_radolan", "rainviewer"]
+    assert germany["radar"] == ["dwd_radolan", "opera", "rainviewer"]
     assert "eumetsat_li" not in germany["radar"]
     assert germany["lightning"] == ["blitzortung", "eumetsat_li"]
 
@@ -23,3 +23,17 @@ def test_every_country_has_core_capability_lists():
         for capability in ("radar", "lightning", "ground_validation"):
             assert isinstance(config[capability], list)
             assert config[capability]
+
+
+def test_italy_uses_dpc_before_composite_fallbacks():
+    policy = json.loads(POLICY.read_text(encoding="utf-8"))
+    assert policy["countries"]["IT"]["radar"] == [
+        "dpc_radar", "opera", "rainviewer"
+    ]
+
+
+def test_spain_uses_aemet_before_composite_fallbacks():
+    policy = json.loads(POLICY.read_text(encoding="utf-8"))
+    assert policy["countries"]["ES"]["radar"] == [
+        "aemet_radar", "opera", "rainviewer"
+    ]

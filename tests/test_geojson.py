@@ -113,6 +113,42 @@ def test_inactive_radar_source_cells_are_not_published(geojson_module):
     assert result["metadata"]["radar_cells_total"] == 1
 
 
+def test_each_region_filters_with_its_own_selected_source(geojson_module):
+    def cell(source, timestamp, lat):
+        return SimpleNamespace(
+            cell_id=f"{source}:{timestamp}:{lat}:4.0", timestamp=timestamp,
+            lat=lat, lon=4.0, footprint_points=(), intensity=3,
+            max_dbz=35.0, area_km2=10.0,
+        )
+
+    italy = _region(_storm({
+        "dpc": cell("dpc_radar", 1_600.0, 42.0),
+        "opera": cell("opera", 1_600.0, 42.1),
+    }))
+    italy.engine_id = "region-it"
+    belgium = _region(_storm({
+        "kmi": cell("kmi", 1_600.0, 51.0),
+        "opera": cell("opera", 1_600.0, 51.1),
+    }))
+    belgium.engine_id = "region-be"
+
+    result = geojson_module.build_feature_collection(
+        {}, [italy, belgium], active_radar_source="per_engine",
+        radar_sources_by_engine={
+            "region-it": {"source": "dpc_radar"},
+            "region-be": {"source": "kmi"},
+        },
+    )
+    cell_ids = {
+        feature["id"] for feature in result["features"]
+        if feature["properties"]["layer"] == "radar_cell"
+    }
+    assert cell_ids == {
+        "cell:region-it:storm-a:dpc_radar:1600.0:42.0:4.0",
+        "cell:region-be:storm-a:kmi:1600.0:51.0:4.0",
+    }
+
+
 def test_storm_and_motion_without_current_active_source_cell_are_hidden(
     geojson_module,
 ):
