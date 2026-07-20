@@ -1014,5 +1014,5 @@ async def _async_setup_runtime(
         hass.async_create_task(_poll_eumetsat_li())
         hass.async_create_task(_poll_goes_glm())
 
-    _LOGGER.info("Storm Tracker V3 v0.4.57 gestart met GeoSphere en ItaliaMeteo")
+    _LOGGER.info("Storm Tracker V3 v0.4.58 gestart met robuuste ItaliaMeteo-fallback")
     return True

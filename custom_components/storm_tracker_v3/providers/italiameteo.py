@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+import json
 
 from .base import Capability, CoverageResult
 
@@ -12,6 +13,14 @@ FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 def latest_bundle(items: list[dict]) -> dict | None:
     candidates = [item for item in items if item.get("filename") and item.get("date")]
     return max(candidates, key=lambda item: item["date"], default=None)
+
+
+def decode_json_response(text: str) -> dict:
+    """Weiger een misleidende HTTP-200 tekst/HTML-respons expliciet."""
+    payload = json.loads(text)
+    if not isinstance(payload, dict):
+        raise ValueError("forecastrespons is geen JSON-object")
+    return payload
 
 
 class ItaliaMeteoRadarProvider:
@@ -40,17 +49,26 @@ class ItaliaMeteoRadarProvider:
         bundle_date = date.fromisoformat(latest["date"]) if latest else None
         age_days = (datetime.now(timezone.utc).date() - bundle_date).days if bundle_date else None
         forecasts = []
+        forecast_errors = []
         for area in self._areas:
-            async with self._session.get(FORECAST_URL, params={
-                "latitude": area.center_lat,
-                "longitude": area.center_lon,
+            base_params = {
+                "latitude": area.center_lat, "longitude": area.center_lon,
                 "models": "italia_meteo_arpae_icon_2i",
-                "hourly": "precipitation,lightning_potential",
-                "forecast_hours": 6,
-                "timezone": "UTC",
-            }) as response:
-                response.raise_for_status()
-                forecast = await response.json()
+                "forecast_hours": 6, "timezone": "UTC",
+            }
+            forecast = None
+            for variables in ("precipitation,lightning_potential", "precipitation"):
+                try:
+                    async with self._session.get(
+                        FORECAST_URL, params={**base_params, "hourly": variables}
+                    ) as response:
+                        response.raise_for_status()
+                        forecast = decode_json_response(await response.text())
+                    break
+                except Exception as exc:
+                    forecast_errors.append(type(exc).__name__)
+            if forecast is None:
+                continue
             hourly = forecast.get("hourly") or {}
             precipitation = [float(value or 0) for value in hourly.get("precipitation", [])]
             lightning = [float(value or 0) for value in hourly.get("lightning_potential", [])]
@@ -70,6 +88,8 @@ class ItaliaMeteoRadarProvider:
             "forecast_areas": len(forecasts),
             "rain_next_6h_mm_max": max((item["rain_next_6h_mm"] for item in forecasts), default=0.0),
             "max_lightning_potential": max((item["max_lightning_potential"] for item in forecasts), default=0.0),
+            "forecast_errors": forecast_errors,
+            "forecast_healthy": bool(forecasts),
             "official_api": CATALOG_URL,
         }
         # De dagelijkse GRIB-bundel wordt bewust niet als actuele radar gevoed.

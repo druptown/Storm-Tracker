@@ -61,3 +61,9 @@ def test_italiameteo_declares_forecast_and_radar(italiameteo_module, base_module
     provider = italiameteo_module.ItaliaMeteoRadarProvider(None)
     assert base_module.Capability.RADAR in provider.capabilities
     assert base_module.Capability.NOWCAST in provider.capabilities
+
+
+def test_italiameteo_rejects_non_json_success_body(italiameteo_module):
+    import pytest
+    with pytest.raises(Exception):
+        italiameteo_module.decode_json_response("upstream temporarily unavailable")
