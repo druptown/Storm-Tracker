@@ -15,6 +15,7 @@ CONF_RADAR_RADIUS = "radar_radius_km"
 CONF_SHARING_DISTANCE = "engine_sharing_distance_km"
 CONF_EUMETSAT_KEY = "eumetsat_consumer_key"
 CONF_EUMETSAT_SECRET = "eumetsat_consumer_secret"
+CONF_METEOFRANCE_TOKEN = "meteofrance_api_token"
 CONF_LIGHTNING_SOURCE_MODE = "lightning_source_mode"
 
 
@@ -43,6 +44,12 @@ def _schema(defaults: dict) -> vol.Schema:
         vol.Optional(
             CONF_EUMETSAT_SECRET,
             default=defaults.get(CONF_EUMETSAT_SECRET, ""),
+        ): selector.TextSelector(selector.TextSelectorConfig(
+            type=selector.TextSelectorType.PASSWORD,
+        )),
+        vol.Optional(
+            CONF_METEOFRANCE_TOKEN,
+            default=defaults.get(CONF_METEOFRANCE_TOKEN, ""),
         ): selector.TextSelector(selector.TextSelectorConfig(
             type=selector.TextSelectorType.PASSWORD,
         )),
