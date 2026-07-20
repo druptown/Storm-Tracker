@@ -117,6 +117,51 @@ def test_confirmed_system_preferred_over_closer_single_echo(nowcast_module, stor
     assert result["active_system_count"] == 2
 
 
+def test_approaching_hit_is_preferred_over_closer_moving_away(nowcast_module, storm_module):
+    moving_away = storm_module.Storm(
+        storm_id="away", centroid_lat=51.0, centroid_lon=4.4,
+        heading_deg=270.0, speed_kmh=50.0, confidence="Hoog",
+    )
+    _add_frame(storm_module, moving_away, "away-one", 1_000.0, lon=4.4)
+    _add_frame(storm_module, moving_away, "away-two", 1_300.0, lon=4.3)
+
+    approaching = storm_module.Storm(
+        storm_id="incoming", centroid_lat=51.0, centroid_lon=4.0,
+        heading_deg=90.0, speed_kmh=60.0, confidence="Hoog",
+    )
+    _add_frame(storm_module, approaching, "in-one", 1_000.0, lon=4.0)
+    _add_frame(storm_module, approaching, "in-two", 1_300.0, lon=4.1)
+
+    result = nowcast_module.build_precipitation_status(
+        [moving_away, approaching], 51.0, 5.0
+    )
+
+    assert result["storm_id"] == "incoming"
+    assert result["selected_reason"] in {"forecast_hit", "forecast_edge"}
+    assert result["status"] == "naderend"
+
+
+def test_current_precipitation_stays_primary_over_future_threat(nowcast_module, storm_module):
+    current = storm_module.Storm(
+        storm_id="current", centroid_lat=51.0, centroid_lon=5.0,
+        heading_deg=270.0, speed_kmh=40.0, confidence="Hoog",
+    )
+    _add_frame(storm_module, current, "cur-one", 1_000.0, lon=5.0)
+    _add_frame(storm_module, current, "cur-two", 1_300.0, lon=4.99)
+
+    future = storm_module.Storm(
+        storm_id="future", centroid_lat=51.0, centroid_lon=4.0,
+        heading_deg=90.0, speed_kmh=60.0, confidence="Hoog",
+    )
+    _add_frame(storm_module, future, "future-one", 1_000.0, lon=4.0)
+    _add_frame(storm_module, future, "future-two", 1_300.0, lon=4.1)
+
+    result = nowcast_module.build_precipitation_status([future, current], 51.0, 5.0)
+
+    assert result["storm_id"] == "current"
+    assert result["selected_reason"] == "current_precipitation"
+
+
 def test_confirmed_reliable_system_reports_away_and_lateral_motion(
     nowcast_module, storm_module,
 ):
