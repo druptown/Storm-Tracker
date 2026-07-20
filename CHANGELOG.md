@@ -1,5 +1,11 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.57
+
+- Voeg GeoSphere Austria INCA toe als slapende officiële 1 km-nowcastvalidatie.
+- Voeg ItaliaMeteo-ARPAE ICON-2I via Open-Meteo toe voor lokale neerslag- en bliksemverwachting, naast de gratis Radar SRI DPC-catalogus.
+- Italiaanse dagbundels worden niet als realtime radar gebruikt wanneer ze achterlopen; OPERA/RainViewer blijft dan operationeel.
+
 # 0.4.56
 
 - Voeg slapende officiële radarproviders toe voor Groot-Brittannië (Met Office) en Frankrijk (Météo-France).

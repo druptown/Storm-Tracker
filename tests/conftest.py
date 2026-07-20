@@ -317,6 +317,22 @@ def meteolux_module(observation_module, base_module):
 
 
 @pytest.fixture(scope="session")
+def geosphere_at_module(observation_module, base_module):
+    return _load_module(
+        f"{PKG_NAME}.providers.geosphere_at",
+        PKG_ROOT / "providers" / "geosphere_at.py",
+    )
+
+
+@pytest.fixture(scope="session")
+def italiameteo_module(observation_module, base_module):
+    return _load_module(
+        f"{PKG_NAME}.providers.italiameteo",
+        PKG_ROOT / "providers" / "italiameteo.py",
+    )
+
+
+@pytest.fixture(scope="session")
 def open_meteo_module():
     """open_meteo.py heeft geen relatieve imports naar engine/observation."""
     _ensure_stub_package(f"{PKG_NAME}.providers")
