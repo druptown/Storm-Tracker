@@ -87,6 +87,35 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 6371.0088 * 2 * math.atan2(math.sqrt(value), math.sqrt(1 - value))
 
 
+def _candidate_rank(point: tuple, storm, motion: dict) -> tuple[tuple, str]:
+    """Rangschik systemen op relevantie voor één target, niet alleen afstand."""
+    distance = float(point[0])
+    confirmed = storm.tracking_status == "bevestigd"
+    if not confirmed:
+        return ((1, 8, distance), "observed")
+    if distance <= 5.0:
+        return ((0, 0, distance), "current_precipitation")
+
+    passage = motion.get("passage_classification")
+    minutes = motion.get("closest_pass_minutes")
+    within_horizon = minutes is not None and 0 <= minutes <= 90
+    if within_horizon and passage == "raak":
+        return ((0, 1, minutes, distance), "forecast_hit")
+    if within_horizon and passage == "rand":
+        return ((0, 2, minutes, distance), "forecast_edge")
+
+    approach = motion.get("approach_speed_kmh")
+    if approach is not None and approach > 1.0:
+        if within_horizon and passage != "mist":
+            return ((0, 3, minutes, distance), "approaching")
+        return ((0, 4, distance), "approaching")
+    if approach is not None and abs(approach) <= 1.0:
+        return ((0, 5, distance), "lateral")
+    if approach is not None and approach < -1.0:
+        return ((0, 6, distance), "moving_away")
+    return ((0, 7, distance), "confirmed")
+
+
 def build_precipitation_status(
     storms: list,
     target_lat: float,
@@ -104,6 +133,14 @@ def build_precipitation_status(
         "pressure_trend": (pressure_trend or {}).get("trend", "onvoldoende_data"),
         "pressure_delta_60m_hpa": (pressure_trend or {}).get("delta_60m_hpa"),
         "rapid_pressure_fall": (pressure_trend or {}).get("rapid_fall", False),
+        "selected_reason": None,
+        "forecast_available": False,
+        "expected_passage_at": None,
+        "forecast_horizon_minutes": None,
+        "forecast_confidence_percent": None,
+        "forecast_intensity_dbz": None,
+        "forecast_intensity_label": None,
+        "intensity_trend_dbz_per_hour": None,
     }
     if not active:
         return base
@@ -117,14 +154,12 @@ def build_precipitation_status(
                 storm.centroid_lat,
                 storm.centroid_lon,
             )
-        candidates.append((point, storm))
+        motion = storm.motion_to_target(target_lat, target_lon, distance_km=point[0])
+        rank, reason = _candidate_rank(point, storm, motion)
+        candidates.append((rank, point, storm, motion, reason))
 
-    # Een bevestigd systeem is operationeel belangrijker dan een toevallige
-    # eenmalige echo. Gebruik een waarneming alleen als er nog niets bevestigd is.
-    confirmed = [item for item in candidates if item[1].tracking_status == "bevestigd"]
-    point, storm = min(confirmed or candidates, key=lambda item: item[0][0])
+    _, point, storm, motion, selected_reason = min(candidates, key=lambda item: item[0])
     distance, impact_lat, impact_lon = point
-    motion = storm.motion_to_target(target_lat, target_lon, distance_km=distance)
     tracking_status = storm.tracking_status
     status = "bevestigd" if tracking_status == "bevestigd" else "waargenomen"
     if tracking_status == "bevestigd" and storm.confidence in {"Matig", "Hoog"}:
@@ -145,6 +180,7 @@ def build_precipitation_status(
         **base,
         "status": status,
         "storm_id": storm.storm_id,
+        "selected_reason": selected_reason,
         "tracking_status": tracking_status,
         "distance_km": round(distance, 1),
         "impact_lat": round(impact_lat, 4),

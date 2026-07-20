@@ -1,5 +1,16 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.55
+
+- Selecteert bij meerdere buien per target de operationeel belangrijkste
+  dreiging in plaats van uitsluitend de dichtstbijzijnde bevestigde echo.
+- Actuele neerslag blijft altijd prioritair; daarna volgen voorspelde rake en
+  randpassages, naderende systemen, zijwaartse passages en wegtrekkende buien.
+- Publiceert `selected_reason` zodat zichtbaar en testbaar is waarom een systeem
+  voor een persoon werd gekozen.
+- Droge statussen publiceren nu ook expliciete lege prognosevelden, zodat het
+  dashboard en automatiseringen een stabiel attribuutcontract houden.
+
 # 0.4.54
 
 - Nieuwe conservatieve passageprognose per target tot 90 minuten vooruit:
