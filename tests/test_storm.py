@@ -98,11 +98,17 @@ def test_motion_to_target_only_returns_eta_when_approaching(storm_module):
     assert east["moving_towards"] is True
     assert east["approach_speed_kmh"] == pytest.approx(60.0, abs=0.1)
     assert east["eta_minutes"] == pytest.approx(60.0, abs=0.1)
+    # Een koers van 90 graden en de grootcirkelkoers naar (51, 5) wijken
+    # licht af; de correcte cross-trackafstand is ongeveer een halve km.
+    assert east["closest_pass_distance_km"] == pytest.approx(0.5, abs=0.1)
+    assert east["closest_pass_minutes"] == pytest.approx(70.0, abs=2.0)
 
     west = storm.motion_to_target(51.0, 3.0, distance_km=60.0)
     assert west["moving_towards"] is False
     assert west["approach_speed_kmh"] == pytest.approx(-60.0, abs=0.1)
     assert west["eta_minutes"] is None
+    assert west["closest_pass_distance_km"] is None
+    assert west["closest_pass_minutes"] is None
 
 
 def test_motion_to_target_suppresses_eta_without_reliable_vector(storm_module):
@@ -117,6 +123,7 @@ def test_motion_to_target_suppresses_eta_without_reliable_vector(storm_module):
     motion = storm.motion_to_target(51.0, 5.0, distance_km=60.0)
     assert motion["moving_towards"] is True
     assert motion["eta_minutes"] is None
+    assert motion["closest_pass_distance_km"] is None
 
 
 def test_motion_to_target_without_vector_returns_nullable_sensor_values(storm_module):
@@ -127,6 +134,16 @@ def test_motion_to_target_without_vector_returns_nullable_sensor_values(storm_mo
     assert motion["approach_speed_kmh"] is None
     assert motion["moving_towards"] is None
     assert motion["eta_minutes"] is None
+    assert motion["closest_pass_distance_km"] is None
+
+
+def test_distance_to_polygon_origin_detects_hit_and_miss(storm_module):
+    assert storm_module._distance_to_polygon_origin([
+        (-2.0, -2.0), (2.0, -2.0), (2.0, 2.0), (-2.0, 2.0)
+    ]) == 0.0
+    assert storm_module._distance_to_polygon_origin([
+        (3.0, -1.0), (5.0, -1.0), (5.0, 1.0), (3.0, 1.0)
+    ]) == pytest.approx(3.0)
 
 
 def test_radar_tracking_status_requires_two_frames(storm_module):

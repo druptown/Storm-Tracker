@@ -59,19 +59,39 @@ def _obs(*, lat=51.0, lon=4.5, timestamp=1_000.0, quality=None,
     )
 
 
-def test_corroboration_filter_rejects_kmi_basemap_and_knmi_white_background(
+def test_corroboration_filter_rejects_intensity_one_basemaps(
     radar_policy_module,
 ):
     observations = [
-        _obs(source="kmi", intensity=4),
+        _obs(source="kmi", intensity=1),
+        _obs(source="kmi", intensity=2),
         _obs(source="knmi", intensity=1),
         _obs(source="knmi", intensity=2),
         _obs(source="rainviewer", intensity=1),
+        _obs(source="rainviewer", intensity=2),
     ]
 
     usable = radar_policy_module.usable_corroborating_observations(observations)
 
-    assert usable == (observations[2], observations[3])
+    assert usable == (observations[1], observations[3], observations[5])
+
+
+def test_corroboration_source_counts_reports_actual_usable_sources(
+    radar_policy_module,
+):
+    observations = [
+        _obs(source="kmi"),
+        _obs(source="kmi"),
+        _obs(source="knmi"),
+        _obs(source="rainviewer"),
+        _obs(source="unknown"),
+    ]
+
+    assert radar_policy_module.corroboration_source_counts(observations) == {
+        "kmi": 2,
+        "knmi": 1,
+        "rainviewer": 1,
+    }
 
 
 def test_opera_high_quality_is_accepted_without_confirmation(radar_policy_module):
@@ -112,6 +132,18 @@ def test_opera_low_quality_is_accepted_near_recent_rainviewer(radar_policy_modul
     assert result.corroborated == 1
 
 
+def test_opera_low_quality_rejects_confirmation_outside_tight_radius(
+    radar_policy_module,
+):
+    opera = _obs(lat=51.0, lon=4.0, timestamp=1_000.0, quality=0.1)
+    rainviewer = _obs(lat=51.16, lon=4.0, timestamp=1_120.0, intensity=2)
+
+    result = radar_policy_module.verify_opera_observations([opera], [rainviewer])
+
+    assert result.accepted == ()
+    assert result.rejected == 1
+
+
 def test_opera_low_quality_rejects_distant_or_stale_confirmation(radar_policy_module):
     opera = _obs(lat=50.68, lon=5.80, timestamp=10_000.0, quality=0.0)
     distant = _obs(lat=52.60, lon=3.39, timestamp=10_000.0)
@@ -123,7 +155,7 @@ def test_opera_low_quality_rejects_distant_or_stale_confirmation(radar_policy_mo
     assert result.rejected == 1
 
 
-def test_opera_strong_structured_echo_is_accepted_despite_low_quality(
+def test_opera_strong_structured_echo_requires_independent_confirmation(
     radar_policy_module,
 ):
     opera = _obs(
@@ -131,6 +163,24 @@ def test_opera_strong_structured_echo_is_accepted_despite_low_quality(
     )
 
     result = radar_policy_module.verify_opera_observations([opera], [])
+
+    assert result.accepted == ()
+    assert result.structured_echo == 0
+    assert result.corroborated == 0
+    assert result.rejected == 1
+
+
+def test_opera_confirmed_structured_echo_is_accepted(
+    radar_policy_module,
+):
+    opera = _obs(
+        quality=0.01, mean_dbz=31.0, max_dbz=52.0, area_km2=250.0
+    )
+    rainviewer = _obs(lat=51.02, lon=4.52, timestamp=1_060.0, intensity=2)
+
+    result = radar_policy_module.verify_opera_observations(
+        [opera], [rainviewer]
+    )
 
     assert result.accepted == (opera,)
     assert result.structured_echo == 1
@@ -156,8 +206,28 @@ def test_opera_uses_actual_footprint_not_only_distant_centroid(radar_policy_modu
     )
     rainviewer = _obs(lat=49.43, lon=-3.10, timestamp=1_060.0)
     result = radar_policy_module.verify_opera_observations([opera], [rainviewer])
-    assert result.accepted == (opera,)
+    assert len(result.accepted) == 1
+    assert result.accepted[0].footprint_points == opera.footprint_points
     assert result.corroborated == 1
+
+
+def test_opera_large_footprint_is_clipped_to_confirmed_area(radar_policy_module):
+    footprint = ((49.0, 2.0), (49.1, 2.1), (50.0, 3.0), (50.1, 3.1))
+    opera = _obs(
+        lat=49.55, lon=2.55, timestamp=1_000.0, quality=0.01,
+        footprint_points=footprint, area_km2=400.0,
+    )
+    rainviewer = _obs(lat=49.05, lon=2.05, timestamp=1_060.0)
+
+    result = radar_policy_module.verify_opera_observations(
+        [opera], [rainviewer], radius_km=12.0
+    )
+
+    clipped = result.accepted[0]
+    assert clipped.footprint_points == footprint[:2]
+    assert clipped.area_km2 == 200.0
+    assert clipped.lat == 49.05
+    assert clipped.lon == 2.05
 
 
 def test_opera_does_not_treat_whole_area_as_a_centroid_circle(radar_policy_module):

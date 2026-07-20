@@ -73,11 +73,17 @@ class Stv3MultiTargetMap extends HTMLElement {
       tiles.appendChild(img);
     }
     svg.setAttribute('viewBox','0 0 '+w+' '+h); svg.setAttribute('width',w); svg.setAttribute('height',h);
-    const ordered=[...this._data.features].sort((a,b)=>({region:0,storm:1,radar_cell:2,motion:3,target:4}[a.properties.layer]-({region:0,storm:1,radar_cell:2,motion:3,target:4}[b.properties.layer])));
+    const selectedEngine=selected.properties.region_engine;
+    const visible=this._data.features.filter(f=>{
+      if(!selectedEngine) return true;
+      if(f.properties.layer==='target') return f.properties.region_engine===selectedEngine;
+      return f.properties.engine_id===selectedEngine;
+    });
+    const ordered=[...visible].sort((a,b)=>({region:0,storm:1,radar_cell:2,motion:3,target:4}[a.properties.layer]-({region:0,storm:1,radar_cell:2,motion:3,target:4}[b.properties.layer])));
     for(const f of ordered) if(f.properties.layer!=='target') this._feature(svg,f,center,w,h);
     this._targetGroups(svg,ordered.filter(f=>f.properties.layer==='target'),center,w,h);
-    const meta=this._data.metadata||{};
-    this.shadowRoot.querySelector('.meta').textContent=(selected.properties.name||selected.properties.target_id)+' | zoom '+this._zoom+' | '+meta.feature_count+' features | '+meta.radar_cells_included+'/'+meta.radar_cells_total+' radarcellen'+(meta.truncated?' (begrensd)':'');
+    const visibleCells=ordered.filter(f=>f.properties.layer==='radar_cell').length;
+    this.shadowRoot.querySelector('.meta').textContent=(selected.properties.name||selected.properties.target_id)+' | '+(selectedEngine||'alle engines')+' | zoom '+this._zoom+' | '+ordered.length+' features | '+visibleCells+' radarcellen';
   }
   _targetGroups(svg,targets,center,w,h) {
     const groups=new Map();

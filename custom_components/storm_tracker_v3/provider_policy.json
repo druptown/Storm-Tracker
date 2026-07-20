@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "default": {
+    "radar": ["rainviewer"],
+    "lightning": ["blitzortung", "satellite_by_longitude"],
+    "ground_validation": ["open_meteo"]
+  },
+  "countries": {
+    "BE": {
+      "radar": ["opera", "kmi", "rainviewer"],
+      "lightning": ["blitzortung", "eumetsat_li"],
+      "ground_validation": ["netatmo", "open_meteo"]
+    },
+    "NL": {
+      "radar": ["opera", "knmi", "rainviewer"],
+      "lightning": ["blitzortung", "eumetsat_li"],
+      "ground_validation": ["netatmo", "open_meteo"]
+    },
+    "DE": {
+      "radar": ["opera", "dwd_radolan", "rainviewer"],
+      "lightning": ["blitzortung", "eumetsat_li"],
+      "ground_validation": ["netatmo", "open_meteo"]
+    },
+    "FR": {
+      "radar": ["opera", "meteofrance", "rainviewer"],
+      "lightning": ["blitzortung", "eumetsat_li"],
+      "ground_validation": ["netatmo", "open_meteo"]
+    },
+    "AT": {
+      "radar": ["opera", "geosphere_at", "rainviewer"],
+      "lightning": ["blitzortung", "eumetsat_li"],
+      "ground_validation": ["netatmo", "open_meteo"]
+    },
+    "IT": {
+      "radar": ["opera", "italiameteo", "rainviewer"],
+      "lightning": ["blitzortung", "eumetsat_li"],
+      "ground_validation": ["netatmo", "open_meteo"]
+    },
+    "LU": {
+      "radar": ["opera", "kmi", "dwd_radolan", "meteofrance", "rainviewer"],
+      "lightning": ["blitzortung", "eumetsat_li"],
+      "ground_validation": ["meteolux", "netatmo", "open_meteo"]
+    },
+    "GB": {
+      "radar": ["opera", "met_office", "rainviewer"],
+      "lightning": ["blitzortung", "eumetsat_li"],
+      "ground_validation": ["open_meteo"]
+    },
+    "US": {
+      "radar": ["noaa_mrms", "rainviewer"],
+      "lightning": ["blitzortung", "noaa_goes_glm"],
+      "ground_validation": ["open_meteo"]
+    },
+    "CA": {
+      "radar": ["msc_geomet", "noaa_mrms", "rainviewer"],
+      "lightning": ["blitzortung", "noaa_goes_glm"],
+      "ground_validation": ["open_meteo"]
+    },
+    "AU": {
+      "radar": ["bom", "rainviewer"],
+      "lightning": ["blitzortung", "satellite_by_longitude"],
+      "ground_validation": ["open_meteo"]
+    },
+    "JP": {
+      "radar": ["jma", "rainviewer"],
+      "lightning": ["blitzortung", "satellite_by_longitude"],
+      "ground_validation": ["open_meteo"]
+    },
+    "TW": {
+      "radar": ["cwa_tw", "rainviewer"],
+      "lightning": ["blitzortung", "cwa_tw"],
+      "ground_validation": ["open_meteo"]
+    },
+    "CO": {
+      "radar": ["ideam", "rainviewer"],
+      "lightning": ["blitzortung", "noaa_goes_glm"],
+      "ground_validation": ["open_meteo"]
+    }
+  }
+}

@@ -2,35 +2,57 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import is_dataclass, replace
+from copy import copy
 import math
 from typing import Iterable, Sequence
 
 
 OPERA_MIN_STANDALONE_QUALITY = 0.5
-OPERA_CORROBORATION_RADIUS_KM = 25.0
+OPERA_CORROBORATION_RADIUS_KM = 12.0
 OPERA_CORROBORATION_MAX_AGE_S = 15 * 60
 OPERA_MIN_STRUCTURED_MEAN_DBZ = 20.0
 OPERA_MIN_STRUCTURED_MAX_DBZ = 30.0
 OPERA_MIN_STRUCTURED_AREA_KM2 = 50.0
 
 
+def _replace_observation(observation, **changes):
+    """Replace production dataclasses while keeping test doubles supported."""
+    if is_dataclass(observation):
+        return replace(observation, **changes)
+    cloned = copy(observation)
+    for key, value in changes.items():
+        setattr(cloned, key, value)
+    return cloned
+
+
 def usable_corroborating_observations(observations: Iterable) -> tuple:
     """Selecteer alleen bronnen/pixels die werkelijk neerslag aantonen.
 
-    KMI's product bevat een ingetekende groene basiskaart die niet betrouwbaar
-    van lichte regen te onderscheiden is. KNMI's opaak-witte WMS-achtergrond
-    wordt als intensiteit 1 gedecodeerd. Geen van beide mag droge OPERA-echo's
-    bevestigen; KNMI blijft wel bruikbaar vanaf een echte radarkleur (>= 2).
+    KMI's product bevat een ingetekende groene basiskaart die als intensiteit 1
+    kan worden gedecodeerd. KNMI's opaak-witte WMS-achtergrond heeft hetzelfde
+    probleem. Vanaf intensiteit 2 tonen beide parsers een echte radarkleur en
+    mogen ze, net als RainViewer, een nabije OPERA-echo bevestigen.
     """
     usable = []
     for obs in observations:
         source = getattr(obs, "source", "")
         intensity = getattr(obs, "intensity", None)
-        if source == "rainviewer" and intensity is not None and intensity >= 1:
-            usable.append(obs)
-        elif source == "knmi" and intensity is not None and intensity >= 2:
+        if source in {"kmi", "knmi", "rainviewer"} and (
+            intensity is not None and intensity >= 2
+        ):
             usable.append(obs)
     return tuple(usable)
+
+
+def corroboration_source_counts(observations: Iterable) -> dict[str, int]:
+    """Tel de werkelijk bruikbare vergelijkingspunten per radarbron."""
+    counts = {"kmi": 0, "knmi": 0, "rainviewer": 0}
+    for observation in observations:
+        source = getattr(observation, "source", "")
+        if source in counts:
+            counts[source] += 1
+    return counts
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,34 +133,59 @@ def verify_opera_observations(
         mean_dbz = getattr(obs, "mean_dbz", None)
         max_dbz = getattr(obs, "max_dbz", None)
         area_km2 = getattr(obs, "area_km2", None)
-        if (
+        structured = (
             mean_dbz is not None
             and max_dbz is not None
             and area_km2 is not None
             and float(mean_dbz) >= OPERA_MIN_STRUCTURED_MEAN_DBZ
             and float(max_dbz) >= OPERA_MIN_STRUCTURED_MAX_DBZ
             and float(area_km2) >= OPERA_MIN_STRUCTURED_AREA_KM2
-        ):
-            accepted.append(obs)
-            structured_echo += 1
-            continue
+        )
 
         # Grote of langgerekte cellen kunnen een centroid hebben dat ver van
         # de werkelijk bevestigde regen ligt. Vergelijk daarom ook met de
         # compacte footprint van werkelijk bezette OPERA-rasterpixels.
         footprint = tuple(getattr(obs, "footprint_points", ()) or ())
-        candidate_points = ((obs.lat, obs.lon), *footprint)
-        confirmed = any(
-            abs(float(obs.timestamp) - float(ref.timestamp)) <= max_age_s
-            and any(
-                _within_radius_km(lat, lon, ref.lat, ref.lon, radius_km)
-                for lat, lon in candidate_points
-            )
-            for ref in references
+        candidate_points = footprint or ((obs.lat, obs.lon),)
+        recent_references = tuple(
+            ref for ref in references
+            if abs(float(obs.timestamp) - float(ref.timestamp)) <= max_age_s
         )
-        if confirmed:
-            accepted.append(obs)
-            corroborated += 1
+        confirmed_points = tuple(
+            (lat, lon) for lat, lon in candidate_points
+            if any(
+                _within_radius_km(lat, lon, ref.lat, ref.lon, radius_km)
+                for ref in recent_references
+            )
+        )
+        if confirmed_points:
+            confirmed_obs = obs
+            if footprint:
+                # Bewaar alleen het deel van een lage-kwaliteit OPERA-cel dat
+                # werkelijk door de onafhankelijke radar wordt gedekt. Eén
+                # echte bui kan zo geen volledige foutieve megacel bevestigen.
+                coverage = len(confirmed_points) / len(footprint)
+                confirmed_obs = _replace_observation(
+                    obs,
+                    lat=sum(point[0] for point in confirmed_points) / len(confirmed_points),
+                    lon=sum(point[1] for point in confirmed_points) / len(confirmed_points),
+                    area_km2=(
+                        float(area_km2) * coverage
+                        if area_km2 is not None else None
+                    ),
+                    footprint_points=confirmed_points,
+                    parent_area_km2=(
+                        float(getattr(obs, "parent_area_km2")) * coverage
+                        if getattr(obs, "parent_area_km2", None) is not None
+                        else None
+                    ),
+                    parent_footprint_points=confirmed_points,
+                )
+            accepted.append(confirmed_obs)
+            if structured:
+                structured_echo += 1
+            else:
+                corroborated += 1
         else:
             rejected += 1
 

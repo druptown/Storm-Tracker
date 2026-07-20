@@ -8,7 +8,10 @@
           "persons": "Life360-personen",
           "test_tracker_entity": "Fictieve tracker (optioneel, alleen voor tests)",
           "radar_radius_km": "Radarbereik",
-          "engine_sharing_distance_km": "Afstand waarop targets dezelfde engine delen"
+          "engine_sharing_distance_km": "Afstand waarop targets dezelfde engine delen",
+          "eumetsat_consumer_key": "EUMETSAT consumer key (optionele Blitzortung-back-up)",
+          "eumetsat_consumer_secret": "EUMETSAT consumer secret",
+          "lightning_source_mode": "Bliksembron"
         }
       }
     },
@@ -25,8 +28,19 @@
           "persons": "Life360-personen",
           "test_tracker_entity": "Fictieve tracker (optioneel, alleen voor tests)",
           "radar_radius_km": "Radarbereik",
-          "engine_sharing_distance_km": "Afstand waarop targets dezelfde engine delen"
+          "engine_sharing_distance_km": "Afstand waarop targets dezelfde engine delen",
+          "eumetsat_consumer_key": "EUMETSAT consumer key (optionele Blitzortung-back-up)",
+          "eumetsat_consumer_secret": "EUMETSAT consumer secret",
+          "lightning_source_mode": "Bliksembron"
         }
+      }
+    }
+  },
+  "selector": {
+    "lightning_source_mode": {
+      "options": {
+        "auto": "Automatisch (Blitzortung met satellietfallback)",
+        "satellite_test": "Satelliet forceren (testmodus)"
       }
     }
   }

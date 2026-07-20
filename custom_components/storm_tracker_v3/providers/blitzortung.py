@@ -112,6 +112,11 @@ class BlitzortungProvider:
     def set_callback(self, on_observation: Callable) -> None:
         self._on_obs = on_observation
 
+    @property
+    def connected(self) -> bool:
+        """Of de publieke MQTT-feed momenteel een geldige verbinding heeft."""
+        return self._connected
+
     def start(self) -> None:
         if self._running:
             return

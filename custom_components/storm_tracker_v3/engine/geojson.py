@@ -7,6 +7,10 @@ from ..geometry.hull import convex_hull
 
 MAX_HULL_POINTS = 48
 MAX_RADAR_CELLS = 150
+CURRENT_FRAME_TOLERANCE_S = 60.0
+MIN_MOTION_SAMPLES = 4
+MIN_MOTION_HISTORY_MINUTES = 10.0
+MIN_MOTION_FIT = 0.60
 
 
 def _point(lon: float, lat: float) -> list[float]:
@@ -52,11 +56,54 @@ def _destination(lat: float, lon: float, heading: float, distance_km: float):
     return math.degrees(lat2), math.degrees(lon2)
 
 
-def build_feature_collection(targets: dict, regions: list) -> dict:
+def _cell_source(cell) -> str | None:
+    cell_id = str(getattr(cell, "cell_id", ""))
+    if ":" not in cell_id:
+        return None
+    return cell_id.split(":", 1)[0]
+
+
+def _cell_matches_active_source(cell, active_radar_source: str | None) -> bool:
+    """Keep stale cells from an inactive radar provider out of the map feed."""
+    if not active_radar_source:
+        return True
+    source = _cell_source(cell)
+    return source is None or source == active_radar_source
+
+
+def _storm_has_reliable_motion(storm) -> bool:
+    """Publiceer alleen een vector die operationeel bruikbaar is."""
+    return (
+        storm.heading_deg is not None
+        and storm.speed_kmh is not None
+        and float(storm.speed_kmh) > 0.0
+        and getattr(storm, "tracking_status", None) == "bevestigd"
+        and getattr(storm, "confidence", "") in {"Matig", "Hoog"}
+        and int(getattr(storm, "motion_sample_count", 0)) >= MIN_MOTION_SAMPLES
+        and float(getattr(storm, "motion_history_minutes", 0.0))
+        >= MIN_MOTION_HISTORY_MINUTES
+        and float(getattr(storm, "motion_fit_quality", 0.0)) >= MIN_MOTION_FIT
+    )
+
+
+def build_feature_collection(
+    targets: dict, regions: list, active_radar_source: str | None = None
+) -> dict:
     """Publiceer targets, regio's, systemen, hulls, cellen en vectoren compact."""
     features = []
     radar_cells_written = 0
     radar_cells_total = 0
+    historical_radar_cells_excluded = 0
+
+    latest_by_region = {}
+    for region in regions:
+        timestamps = [
+            float(cell.timestamp)
+            for storm in region.storm_engine.get_storms()
+            for cell in storm.radar_cells.values()
+            if _cell_matches_active_source(cell, active_radar_source)
+        ]
+        latest_by_region[region.engine_id] = max(timestamps, default=None)
 
     for target_id, target in sorted(targets.items()):
         lat = target.get("latitude")
@@ -86,6 +133,29 @@ def build_feature_collection(targets: dict, regions: list) -> dict:
             targets=sorted(region.projection_targets),
         ))
         for storm in region.storm_engine.get_storms():
+            all_cells = [
+                cell for cell in storm.radar_cells.values()
+                if _cell_matches_active_source(cell, active_radar_source)
+            ]
+            latest_timestamp = latest_by_region.get(region.engine_id)
+            cells = sorted(
+                (
+                    cell for cell in all_cells
+                    if latest_timestamp is None
+                    or float(cell.timestamp) >= latest_timestamp - CURRENT_FRAME_TOLERANCE_S
+                ),
+                key=lambda cell: cell.timestamp,
+                reverse=True,
+            )
+            historical_radar_cells_excluded += len(all_cells) - len(cells)
+            radar_cells_total += len(cells)
+
+            # Wanneer een operationele bron gekozen is, mag historische
+            # StormEngine-state geen verweesde systeemvlakken of vectoren op
+            # de actuele kaart achterlaten.
+            if active_radar_source and not cells:
+                continue
+
             storm_id = f"{region.engine_id}:{storm.storm_id}"
             common = {
                 "engine_id": region.engine_id,
@@ -109,7 +179,7 @@ def build_feature_collection(targets: dict, regions: list) -> dict:
                 f"storm:{storm_id}", geometry, layer="storm", **common
             ))
 
-            if storm.heading_deg is not None and storm.speed_kmh is not None:
+            if _storm_has_reliable_motion(storm):
                 end_lat, end_lon = _destination(
                     storm.centroid_lat,
                     storm.centroid_lon,
@@ -128,12 +198,11 @@ def build_feature_collection(targets: dict, regions: list) -> dict:
                     minutes=60,
                     heading_deg=storm.heading_deg,
                     speed_kmh=storm.speed_kmh,
+                    motion_samples=storm.motion_sample_count,
+                    motion_history_minutes=storm.motion_history_minutes,
+                    motion_fit=storm.motion_fit_quality,
                 ))
 
-            cells = sorted(
-                storm.radar_cells.values(), key=lambda cell: cell.timestamp, reverse=True
-            )
-            radar_cells_total += len(cells)
             for cell in cells:
                 if radar_cells_written >= MAX_RADAR_CELLS:
                     break
@@ -168,5 +237,6 @@ def build_feature_collection(targets: dict, regions: list) -> dict:
             "radar_cells_total": radar_cells_total,
             "radar_cells_included": radar_cells_written,
             "truncated": radar_cells_written < radar_cells_total,
+            "historical_radar_cells_excluded": historical_radar_cells_excluded,
         },
     }

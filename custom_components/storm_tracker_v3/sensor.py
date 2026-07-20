@@ -58,6 +58,8 @@ async def async_setup_platform(
         BlitzortungInslagenSensor(hass),
         OperaObservatieSensor(hass),
         ActiveRadarSourceSensor(hass),
+        ProviderLifecycleSensor(hass),
+        RadarCalibrationSensor(hass),
         FictieveTrackerSensor(hass),
         BlitzortungLaatsteInslag(hass),
         KmiObservatieSensor(hass),
@@ -134,7 +136,10 @@ class BlitzortungInslagenSensor(StormTrackerBaseSensor):
 
     @property
     def _listen_events(self):
-        return [f"{DOMAIN}_lightning_update"]
+        return [
+            f"{DOMAIN}_lightning_update",
+            f"{DOMAIN}_lightning_status_update",
+        ]
 
     @property
     def native_value(self):
@@ -142,14 +147,38 @@ class BlitzortungInslagenSensor(StormTrackerBaseSensor):
 
     @property
     def extra_state_attributes(self):
+        runtime = self.hass.data.get(DOMAIN, {})
         last = self.hass.data.get(DOMAIN, {}).get("last_lightning")
-        if not last:
-            return {}
-        return {
-            "laatste_lat": last.lat,
-            "laatste_lon": last.lon,
-            "laatste_ts": datetime.fromtimestamp(last.timestamp).isoformat(),
+        attributes = {
+            "actieve_bron": runtime.get("lightning_source", "geen"),
+            "blitzortung_verbonden": bool(
+                getattr(runtime.get("blitz_provider"), "connected", False)
+            ),
+            "bronmodus": runtime.get("lightning_source_mode", "auto"),
+            "eumetsat_status": runtime.get("eumetsat_li_status", "niet_geconfigureerd"),
+            "goes18_status": runtime.get("goes18_glm_status", "niet_geconfigureerd"),
+            "goes19_status": runtime.get("goes19_glm_status", "niet_geconfigureerd"),
         }
+        for prefix, diagnostic in (
+            ("eumetsat", runtime.get("eumetsat_poll")),
+            ("goes", runtime.get("goes_poll")),
+        ):
+            if diagnostic:
+                attributes.update({
+                    f"{prefix}_laatste_poll": datetime.fromtimestamp(
+                        diagnostic["timestamp"]
+                    ).isoformat(),
+                    f"{prefix}_opgehaald": diagnostic["fetched"],
+                    f"{prefix}_aanvaard": diagnostic["accepted"],
+                    f"{prefix}_fout": diagnostic["error"],
+                })
+        if last:
+            attributes.update({
+                "laatste_lat": last.lat,
+                "laatste_lon": last.lon,
+                "laatste_ts": datetime.fromtimestamp(last.timestamp).isoformat(),
+            })
+        return attributes
 
 
 class BlitzortungLaatsteInslag(StormTrackerBaseSensor):
@@ -234,6 +263,27 @@ class ActiveRadarSourceSensor(StormTrackerBaseSensor):
     def extra_state_attributes(self):
         data = self.hass.data.get(DOMAIN, {})
         return {"reason": data.get("radar_source_reason", "nog niet geselecteerd")}
+
+
+class RadarCalibrationSensor(StormTrackerBaseSensor):
+    """Passieve overeenkomstscore tussen OPERA en het actuele KMI-beeld."""
+    _attr_name = "STV3 Radar Autokalibratie"
+    _attr_unique_id = "stv3_radar_autokalibratie"
+    _attr_icon = "mdi:tune-variant"
+
+    @property
+    def _listen_events(self):
+        return [f"{DOMAIN}_calibration_update"]
+
+    @property
+    def native_value(self):
+        diagnostics = self.hass.data.get(DOMAIN, {}).get("radar_calibration", {})
+        score = diagnostics.get("mean_f1_score")
+        return round(float(score) * 100) if score is not None else "observeren"
+
+    @property
+    def extra_state_attributes(self):
+        return self.hass.data.get(DOMAIN, {}).get("radar_calibration", {})
 
 
 class KmiObservatieSensor(StormTrackerBaseSensor):
@@ -366,27 +416,63 @@ class OpenMeteoGearSensor(StormTrackerBaseSensor):
 
 
 class FictieveTrackerSensor(StormTrackerBaseSensor):
-    """Legacy entity-id met de actuele primaire thuislocatie."""
-    _attr_name      = "STV3 Thuislocatie"
+    """Legacy entity-id met de actuele geconfigureerde testtrackerlocatie."""
+    _attr_name      = "STV3 Fictieve tracker locatie"
     _attr_unique_id = "stv3_fictieve_tracker"
     _attr_icon      = "mdi:map-marker-account"
 
     @property
-    def _listen_events(self): return [f"{DOMAIN}_fictieve_update"]
+    def _listen_events(self):
+        return [f"{DOMAIN}_fictieve_update", f"{DOMAIN}_targets_updated"]
 
     @property
     def native_value(self):
-        lat = self.hass.data.get(DOMAIN, {}).get("fictieve_lat")
-        lon = self.hass.data.get(DOMAIN, {}).get("fictieve_lon")
-        if lat is None: return "Onbekend"
+        target = self.hass.data.get(DOMAIN, {}).get("targets", {}).get(
+            "test_tracker", {}
+        )
+        lat = target.get("latitude")
+        lon = target.get("longitude")
+        if lat is None or lon is None:
+            return "Onbekend"
         return f"{lat:.4f},{lon:.4f}"
 
     @property
     def extra_state_attributes(self):
+        target = self.hass.data.get(DOMAIN, {}).get("targets", {}).get(
+            "test_tracker", {}
+        )
         return {
-            "latitude":  self.hass.data.get(DOMAIN, {}).get("fictieve_lat"),
-            "longitude": self.hass.data.get(DOMAIN, {}).get("fictieve_lon"),
+            "latitude": target.get("latitude"),
+            "longitude": target.get("longitude"),
+            "entity_id": target.get("entity_id"),
+            "available": bool(target.get("available")),
+            "region_engine_id": target.get("region_engine_id"),
         }
+
+
+class ProviderLifecycleSensor(StormTrackerBaseSensor):
+    _attr_name = "STV3 Provider Lifecycle"
+    _attr_unique_id = "stv3_provider_lifecycle"
+    _attr_icon = "mdi:sleep"
+
+    @property
+    def _listen_events(self):
+        return [f"{DOMAIN}_provider_lifecycle_update"]
+
+    @property
+    def native_value(self):
+        diagnostics = self.hass.data.get(DOMAIN, {}).get(
+            "provider_lifecycle_diagnostics", {}
+        )
+        return sum(
+            1 for item in diagnostics.values() if item.get("status") == "active"
+        )
+
+    @property
+    def extra_state_attributes(self):
+        return self.hass.data.get(DOMAIN, {}).get(
+            "provider_lifecycle_diagnostics", {}
+        )
 
 
 class KnmiIntensiteitSensorNu(StormTrackerBaseSensor):
@@ -584,13 +670,21 @@ class PrecipitationStatusSensor(StormTrackerBaseSensor):
 
     def _summary(self):
         data = self.hass.data.get(DOMAIN, {})
-        return build_precipitation_status(
+        result = build_precipitation_status(
             data.get("storms", []),
             data.get("fictieve_lat", 0.0),
             data.get("fictieve_lon", 0.0),
             radar_source=data.get("active_radar_source"),
             pressure_trend=data.get("netatmo_pressure_trend"),
         )
+        target = data.get("targets", {}).get("home", {})
+        return {
+            **result,
+            "location_place": target.get("location_place", "Thuis"),
+            "location_address": target.get("location_address"),
+            "country_code": target.get("country_code"),
+            "location_accuracy_km": target.get("location_accuracy_km"),
+        }
 
     @property
     def native_value(self):
@@ -653,6 +747,10 @@ class TargetPrecipitationStatusSensor(StormTrackerBaseSensor):
             "longitude": target.get("longitude"),
             "region_engine_id": target.get("region_engine_id"),
             "radar_covered": target.get("radar_covered", False),
+            "location_place": target.get("location_place"),
+            "location_address": target.get("location_address"),
+            "country_code": target.get("country_code"),
+            "location_accuracy_km": target.get("location_accuracy_km"),
         }
 
     @property
@@ -900,7 +998,11 @@ class RegionEngineSensor(StormTrackerBaseSensor):
 
     @property
     def _listen_events(self):
-        return [f"{DOMAIN}_storms_updated", f"{DOMAIN}_fictieve_update"]
+        return [
+            f"{DOMAIN}_storms_updated",
+            f"{DOMAIN}_fictieve_update",
+            f"{DOMAIN}_targets_updated",
+        ]
 
     @property
     def native_value(self):
@@ -951,6 +1053,7 @@ class StormMapGeoJsonSensor(StormTrackerBaseSensor):
         return build_feature_collection(
             data.get("targets", {}),
             manager.get_all_engines() if manager else [],
+            active_radar_source=data.get("active_radar_source"),
         )
 
     @property

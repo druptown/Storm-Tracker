@@ -1,4 +1,5 @@
 """Tests voor de compacte operationele neerslagstatus."""
+from datetime import datetime, timezone
 
 
 def _add_frame(storm_module, storm, key, timestamp, *, lat=51.0, lon=4.0, dbz=35.0):
@@ -59,6 +60,46 @@ def test_confirmed_approaching_system_gets_eta(nowcast_module, storm_module):
     assert result["max_dbz"] == 38.0
 
 
+def test_target_forecast_projects_passage_intensity_and_confidence(nowcast_module, storm_module):
+    storm = storm_module.Storm(
+        storm_id="forecast", centroid_lat=51.0, centroid_lon=4.0,
+        heading_deg=90.0, speed_kmh=80.0, confidence="Hoog",
+    )
+    _add_frame(storm_module, storm, "one", 1_000.0, lon=4.0, dbz=30.0)
+    _add_frame(storm_module, storm, "two", 1_300.0, lon=4.1, dbz=35.0)
+
+    motion = storm.motion_to_target(51.0, 4.8)
+    forecast = nowcast_module._target_forecast(
+        storm, motion, now_utc=datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
+    )
+
+    assert forecast["forecast_available"] is True
+    assert forecast["forecast_horizon_minutes"] <= 90
+    assert forecast["expected_passage_at"].startswith("2026-07-20T12:")
+    assert forecast["forecast_intensity_dbz"] > 35.0
+    assert forecast["forecast_intensity_label"] in {"matig", "zwaar"}
+    assert 25 <= forecast["forecast_confidence_percent"] <= 95
+
+
+def test_target_forecast_refuses_low_confidence_or_long_horizon(nowcast_module, storm_module):
+    storm = storm_module.Storm(
+        storm_id="uncertain", centroid_lat=51.0, centroid_lon=4.0,
+        heading_deg=90.0, speed_kmh=30.0, confidence="Laag",
+    )
+    _add_frame(storm_module, storm, "one", 1_000.0, dbz=35.0)
+    _add_frame(storm_module, storm, "two", 1_300.0, lon=4.1, dbz=36.0)
+
+    forecast = nowcast_module._target_forecast(
+        storm, {
+            "closest_pass_minutes": 30,
+            "passage_classification": "raak",
+        }
+    )
+
+    assert forecast["forecast_available"] is False
+    assert forecast["expected_passage_at"] is None
+
+
 def test_confirmed_system_preferred_over_closer_single_echo(nowcast_module, storm_module):
     close_echo = storm_module.Storm(storm_id="close", centroid_lat=51.0, centroid_lon=4.9)
     _add_frame(storm_module, close_echo, "close-one", 1_000.0, lat=51.0, lon=4.9)
@@ -74,3 +115,41 @@ def test_confirmed_system_preferred_over_closer_single_echo(nowcast_module, stor
     assert result["storm_id"] == "confirmed"
     assert result["status"] == "bevestigd"
     assert result["active_system_count"] == 2
+
+
+def test_confirmed_reliable_system_reports_away_and_lateral_motion(
+    nowcast_module, storm_module,
+):
+    away = storm_module.Storm(
+        storm_id="away", centroid_lat=51.0, centroid_lon=4.0,
+        heading_deg=270.0, speed_kmh=60.0, confidence="Matig",
+    )
+    _add_frame(storm_module, away, "away-one", 1_000.0)
+    _add_frame(storm_module, away, "away-two", 1_300.0, lon=3.9)
+    result = nowcast_module.build_precipitation_status([away], 51.0, 5.0)
+    assert result["status"] == "wegtrekkend"
+    assert result["approach_speed_kmh"] < -1
+    assert result["eta_minutes"] is None
+
+    lateral = storm_module.Storm(
+        storm_id="lateral", centroid_lat=51.0, centroid_lon=4.0,
+        heading_deg=0.0, speed_kmh=60.0, confidence="Hoog",
+    )
+    _add_frame(storm_module, lateral, "side-one", 1_000.0)
+    _add_frame(storm_module, lateral, "side-two", 1_300.0, lat=51.1)
+    result = nowcast_module.build_precipitation_status([lateral], 51.0, 5.0)
+    assert result["status"] == "langs_trekkend"
+    assert abs(result["approach_speed_kmh"]) <= 1
+
+
+def test_low_confidence_vector_keeps_confirmed_status(nowcast_module, storm_module):
+    storm = storm_module.Storm(
+        storm_id="uncertain", centroid_lat=51.0, centroid_lon=4.0,
+        heading_deg=90.0, speed_kmh=60.0, confidence="Laag",
+    )
+    _add_frame(storm_module, storm, "one", 1_000.0)
+    _add_frame(storm_module, storm, "two", 1_300.0, lon=4.1)
+    result = nowcast_module.build_precipitation_status([storm], 51.0, 5.0)
+    assert result["status"] == "bevestigd"
+    assert result["moving_towards"] is True
+    assert result["motion_confidence"] == "Laag"
