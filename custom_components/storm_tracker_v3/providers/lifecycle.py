@@ -130,13 +130,15 @@ class ProviderLifecycleController:
                 runtime.cooldown_started = None
 
     def diagnostics(self) -> dict[str, dict]:
-        return {
-            provider_id: {
+        diagnostics = {}
+        for provider_id, runtime in self._runtimes.items():
+            details = getattr(runtime.plugin, "diagnostics", {})
+            diagnostics[provider_id] = {
                 "status": runtime.status.value,
                 "matching_engines": len(runtime.matching_areas),
                 "last_poll": runtime.last_poll,
                 "fetched": runtime.fetched,
                 "error": runtime.error,
+                **(details if isinstance(details, dict) else {}),
             }
-            for provider_id, runtime in self._runtimes.items()
-        }
+        return diagnostics

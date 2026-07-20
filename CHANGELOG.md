@@ -1,5 +1,11 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.56
+
+- Voeg slapende officiële radarproviders toe voor Groot-Brittannië (Met Office) en Frankrijk (Météo-France).
+- Voeg MeteoLux toe als lokale, publieke nowcast-validatiebron voor Luxemburg.
+- Gebruik nationale radars voorlopig veilig als OPERA-corroboratie en toon hun lifecycle-diagnostiek.
+
 # 0.4.55
 
 - Selecteert bij meerdere buien per target de operationeel belangrijkste

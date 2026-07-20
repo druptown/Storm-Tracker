@@ -11,6 +11,7 @@
           "engine_sharing_distance_km": "Afstand waarop targets dezelfde engine delen",
           "eumetsat_consumer_key": "EUMETSAT consumer key (optionele Blitzortung-back-up)",
           "eumetsat_consumer_secret": "EUMETSAT consumer secret",
+          "meteofrance_api_token": "Météo-France API-token (optioneel)",
           "lightning_source_mode": "Bliksembron"
         }
       }
@@ -31,6 +32,7 @@
           "engine_sharing_distance_km": "Afstand waarop targets dezelfde engine delen",
           "eumetsat_consumer_key": "EUMETSAT consumer key (optionele Blitzortung-back-up)",
           "eumetsat_consumer_secret": "EUMETSAT consumer secret",
+          "meteofrance_api_token": "Météo-France API-token (optioneel)",
           "lightning_source_mode": "Bliksembron"
         }
       }

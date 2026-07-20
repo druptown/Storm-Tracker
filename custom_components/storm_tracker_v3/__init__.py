@@ -93,6 +93,7 @@ CONFIG_SCHEMA = vol.Schema({
         vol.Optional("netatmo_radius_km", default=175): vol.Coerce(float),
         vol.Optional("eumetsat_consumer_key"): cv.string,
         vol.Optional("eumetsat_consumer_secret"): cv.string,
+        vol.Optional("meteofrance_api_token"): cv.string,
         vol.Optional("lightning_source_mode", default="auto"): vol.In({"auto", "satellite_test"}),
     })
 }, extra=vol.ALLOW_EXTRA)
@@ -126,6 +127,7 @@ async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
         "engine_sharing_distance_km": raw.get("engine_sharing_distance_km", 150.0),
         "eumetsat_consumer_key": raw.get("eumetsat_consumer_key"),
         "eumetsat_consumer_secret": raw.get("eumetsat_consumer_secret"),
+        "meteofrance_api_token": raw.get("meteofrance_api_token"),
         "lightning_source_mode": raw.get("lightning_source_mode", "auto"),
     }
     if raw.get("test_tracker_entity"):
@@ -332,19 +334,28 @@ async def _async_setup_runtime(
 
     from .providers.base import CoverageArea, ProviderContext
     from .providers.dwd_radolan import DwdRadolanProvider
+    from .providers.met_office_radar import MetOfficeRadarProvider
+    from .providers.meteolux import MeteoLuxProvider
     from .providers.lifecycle import ProviderLifecycleController
 
     provider_lifecycle = ProviderLifecycleController(cooldown_seconds=300)
-    dwd_radolan = DwdRadolanProvider(http_session)
-    provider_lifecycle.register(
-        dwd_radolan,
-        lambda plugin, areas: ProviderContext(
+    def _national_context(plugin, areas):
+        return ProviderContext(
             hass=hass,
             area=areas[0],
             on_observation=lambda observation: None,
             config={"areas": areas},
-        ),
-    )
+        )
+
+    provider_lifecycle.register(DwdRadolanProvider(http_session), _national_context)
+    provider_lifecycle.register(MetOfficeRadarProvider(http_session), _national_context)
+    provider_lifecycle.register(MeteoLuxProvider(http_session), _national_context)
+    if conf.get("meteofrance_api_token"):
+        from .providers.meteofrance_radar import MeteoFranceRadarProvider
+        provider_lifecycle.register(
+            MeteoFranceRadarProvider(http_session, conf["meteofrance_api_token"]),
+            _national_context,
+        )
     hass.data[DOMAIN]["provider_lifecycle"] = provider_lifecycle
     hass.data[DOMAIN]["provider_lifecycle_diagnostics"] = (
         provider_lifecycle.diagnostics()
@@ -502,6 +513,8 @@ async def _async_setup_runtime(
         raw_references.extend(hass.data[DOMAIN].get("knmi_current", []))
         raw_references.extend(hass.data[DOMAIN].get("last_rv_observations", []))
         raw_references.extend(hass.data[DOMAIN].get("dwd_radolan_observations", []))
+        raw_references.extend(hass.data[DOMAIN].get("met_office_radar_observations", []))
+        raw_references.extend(hass.data[DOMAIN].get("meteofrance_radar_observations", []))
         references = usable_corroborating_observations(raw_references)
         verification = verify_opera_observations(raw_obs, references)
         obs = list(verification.accepted)
@@ -627,6 +640,10 @@ async def _async_setup_runtime(
         results = await provider_lifecycle.async_fetch_active()
         if "dwd_radolan" in results:
             hass.data[DOMAIN]["dwd_radolan_observations"] = results["dwd_radolan"]
+        if "met_office_radar" in results:
+            hass.data[DOMAIN]["met_office_radar_observations"] = results["met_office_radar"]
+        if "meteofrance_radar" in results:
+            hass.data[DOMAIN]["meteofrance_radar_observations"] = results["meteofrance_radar"]
         hass.data[DOMAIN]["provider_lifecycle_diagnostics"] = (
             provider_lifecycle.diagnostics()
         )
@@ -993,5 +1010,5 @@ async def _async_setup_runtime(
         hass.async_create_task(_poll_eumetsat_li())
         hass.async_create_task(_poll_goes_glm())
 
-    _LOGGER.info("Storm Tracker V3 v0.4.55 gestart met targetgerichte dreigingsselectie")
+    _LOGGER.info("Storm Tracker V3 v0.4.56 gestart met slapende radarproviders voor buurlanden")
     return True

@@ -22,7 +22,7 @@
       "ground_validation": ["netatmo", "open_meteo"]
     },
     "FR": {
-      "radar": ["opera", "meteofrance", "rainviewer"],
+      "radar": ["opera", "meteofrance_radar", "rainviewer"],
       "lightning": ["blitzortung", "eumetsat_li"],
       "ground_validation": ["netatmo", "open_meteo"]
     },
@@ -37,12 +37,12 @@
       "ground_validation": ["netatmo", "open_meteo"]
     },
     "LU": {
-      "radar": ["opera", "kmi", "dwd_radolan", "meteofrance", "rainviewer"],
+      "radar": ["opera", "kmi", "dwd_radolan", "meteofrance_radar", "rainviewer"],
       "lightning": ["blitzortung", "eumetsat_li"],
       "ground_validation": ["meteolux", "netatmo", "open_meteo"]
     },
     "GB": {
-      "radar": ["opera", "met_office", "rainviewer"],
+      "radar": ["opera", "met_office_radar", "rainviewer"],
       "lightning": ["blitzortung", "eumetsat_li"],
       "ground_validation": ["open_meteo"]
     },
