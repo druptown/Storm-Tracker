@@ -127,6 +127,14 @@ class StormManager:
                 routed += 1
         return routed
 
+    def route_observation_to_engine(self, engine_id: str, observation) -> bool:
+        """Routeer pull-radardata uitsluitend naar de geselecteerde engine."""
+        engine = self._engines.get(engine_id)
+        if engine is None or not engine.accepts_observation(observation.lat, observation.lon):
+            return False
+        self._schedule(engine.ofe.add_observation(observation))
+        return True
+
     def _find_shareable(self, lat: float, lon: float) -> Optional[RegionEngine]:
         candidates = [
             engine for engine in self._engines.values()

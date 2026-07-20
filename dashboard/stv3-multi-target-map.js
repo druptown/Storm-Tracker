@@ -83,7 +83,9 @@ class Stv3MultiTargetMap extends HTMLElement {
     for(const f of ordered) if(f.properties.layer!=='target') this._feature(svg,f,center,w,h);
     this._targetGroups(svg,ordered.filter(f=>f.properties.layer==='target'),center,w,h);
     const visibleCells=ordered.filter(f=>f.properties.layer==='radar_cell').length;
-    this.shadowRoot.querySelector('.meta').textContent=(selected.properties.name||selected.properties.target_id)+' | '+(selectedEngine||'alle engines')+' | zoom '+this._zoom+' | '+ordered.length+' features | '+visibleCells+' radarcellen';
+    const source=selected.properties.radar_source||'geen';
+    const reason=selected.properties.radar_source_reason||'nog niet geselecteerd';
+    this.shadowRoot.querySelector('.meta').textContent=(selected.properties.name||selected.properties.target_id)+' | '+(selectedEngine||'alle engines')+' | radar: '+source+' | '+reason+' | zoom '+this._zoom+' | '+ordered.length+' features | '+visibleCells+' radarcellen';
   }
   _targetGroups(svg,targets,center,w,h) {
     const groups=new Map();

@@ -1,5 +1,14 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.59
+
+- Selecteer de operationele radarbron afzonderlijk per dynamische RegionEngine.
+- Gebruik voor Italië de actuele, officiële DPC Protezione Civile SRI-radar van 1 km en 5 minuten.
+- Gebruik voor Spanje de publieke officiële AEMET-composietbundel met actuele EPSG:4326-GeoTIFFs, zonder API-key.
+- Val per regio terug op OPERA en daarna RainViewer wanneer de lokale radar ontbreekt, ongezond of verouderd is.
+- Publiceer bron, reden en leeftijd per engine in sensoren, GeoJSON en de multi-targetkaart.
+- Reserveer satelliet-neerslag als latere gap-fallback; EUMETSAT LI wordt nadrukkelijk niet als neerslagradar misbruikt.
+
 # 0.4.58
 
 - Herken niet-JSON-antwoorden van Open-Meteo ondanks een HTTP-successtatus.

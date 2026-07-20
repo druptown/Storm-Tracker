@@ -262,7 +262,10 @@ class ActiveRadarSourceSensor(StormTrackerBaseSensor):
     @property
     def extra_state_attributes(self):
         data = self.hass.data.get(DOMAIN, {})
-        return {"reason": data.get("radar_source_reason", "nog niet geselecteerd")}
+        return {
+            "reason": data.get("radar_source_reason", "nog niet geselecteerd"),
+            "engines": data.get("radar_sources_by_engine", {}),
+        }
 
 
 class RadarCalibrationSensor(StormTrackerBaseSensor):
@@ -713,8 +716,8 @@ class TargetPrecipitationStatusSensor(StormTrackerBaseSensor):
     def _listen_events(self):
         return [
             f"{DOMAIN}_targets_updated",
-            f"{DOMAIN}_storms_updated",
             f"{DOMAIN}_radar_source_update",
+            f"{DOMAIN}_storms_updated",
             f"{DOMAIN}_netatmo_update",
         ]
 
@@ -1002,6 +1005,7 @@ class RegionEngineSensor(StormTrackerBaseSensor):
             f"{DOMAIN}_storms_updated",
             f"{DOMAIN}_fictieve_update",
             f"{DOMAIN}_targets_updated",
+            f"{DOMAIN}_radar_source_update",
         ]
 
     @property
@@ -1026,6 +1030,9 @@ class RegionEngineSensor(StormTrackerBaseSensor):
                     "observatieradius_km": engine.observation_radius_km,
                     "targets": sorted(engine.projection_targets),
                     "weather_systemen": len(engine.storm_engine.get_storms()),
+                    "radar": self.hass.data.get(DOMAIN, {}).get(
+                        "radar_sources_by_engine", {}
+                    ).get(engine.engine_id, {}),
                 }
                 for engine in manager.get_all_engines()
             ],
@@ -1045,6 +1052,7 @@ class StormMapGeoJsonSensor(StormTrackerBaseSensor):
             f"{DOMAIN}_storms_updated",
             f"{DOMAIN}_targets_updated",
             f"{DOMAIN}_fictieve_update",
+            f"{DOMAIN}_radar_source_update",
         ]
 
     def _collection(self):
@@ -1054,6 +1062,7 @@ class StormMapGeoJsonSensor(StormTrackerBaseSensor):
             data.get("targets", {}),
             manager.get_all_engines() if manager else [],
             active_radar_source=data.get("active_radar_source"),
+            radar_sources_by_engine=data.get("radar_sources_by_engine"),
         )
 
     @property

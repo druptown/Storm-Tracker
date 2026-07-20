@@ -333,6 +333,31 @@ def italiameteo_module(observation_module, base_module):
 
 
 @pytest.fixture(scope="session")
+def dpc_radar_module(observation_module, base_module, odim_hdf5_module):
+    return _load_module(
+        f"{PKG_NAME}.providers.dpc_radar",
+        PKG_ROOT / "providers" / "dpc_radar.py",
+    )
+
+
+@pytest.fixture(scope="session")
+def aemet_radar_module(observation_module, base_module):
+    return _load_module(
+        f"{PKG_NAME}.providers.aemet_radar",
+        PKG_ROOT / "providers" / "aemet_radar.py",
+    )
+
+
+@pytest.fixture(scope="session")
+def engine_radar_policy_module():
+    _ensure_stub_package(f"{PKG_NAME}.providers")
+    return _load_module(
+        f"{PKG_NAME}.providers.engine_radar_policy",
+        PKG_ROOT / "providers" / "engine_radar_policy.py",
+    )
+
+
+@pytest.fixture(scope="session")
 def open_meteo_module():
     """open_meteo.py heeft geen relatieve imports naar engine/observation."""
     _ensure_stub_package(f"{PKG_NAME}.providers")

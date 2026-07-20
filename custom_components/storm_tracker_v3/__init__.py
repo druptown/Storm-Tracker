@@ -338,6 +338,8 @@ async def _async_setup_runtime(
     from .providers.meteolux import MeteoLuxProvider
     from .providers.geosphere_at import GeoSphereAustriaProvider
     from .providers.italiameteo import ItaliaMeteoRadarProvider
+    from .providers.dpc_radar import DpcRadarProvider
+    from .providers.aemet_radar import AemetRadarProvider
     from .providers.lifecycle import ProviderLifecycleController
 
     provider_lifecycle = ProviderLifecycleController(cooldown_seconds=300)
@@ -354,6 +356,8 @@ async def _async_setup_runtime(
     provider_lifecycle.register(MeteoLuxProvider(http_session), _national_context)
     provider_lifecycle.register(GeoSphereAustriaProvider(http_session), _national_context)
     provider_lifecycle.register(ItaliaMeteoRadarProvider(http_session), _national_context)
+    provider_lifecycle.register(DpcRadarProvider(http_session), _national_context)
+    provider_lifecycle.register(AemetRadarProvider(http_session), _national_context)
     if conf.get("meteofrance_api_token"):
         from .providers.meteofrance_radar import MeteoFranceRadarProvider
         provider_lifecycle.register(
@@ -364,6 +368,99 @@ async def _async_setup_runtime(
     hass.data[DOMAIN]["provider_lifecycle_diagnostics"] = (
         provider_lifecycle.diagnostics()
     )
+    hass.data[DOMAIN]["radar_sources_by_engine"] = {}
+
+    def _engine_country_codes(region) -> tuple[str, ...]:
+        return tuple(sorted({
+            str(target.get("country_code")).upper()
+            for target in hass.data[DOMAIN].get("targets", {}).values()
+            if target.get("region_engine_id") == region.engine_id
+            and target.get("country_code")
+        }))
+
+    def _radar_source_states(now_ts: float):
+        from .providers.engine_radar_policy import SourceState
+        lifecycle = provider_lifecycle.diagnostics()
+        states = {}
+        for provider_id in ("dwd_radolan", "met_office_radar", "meteofrance_radar", "dpc_radar", "aemet_radar"):
+            details = lifecycle.get(provider_id, {})
+            last_poll = details.get("last_poll")
+            states[provider_id] = SourceState(
+                configured=provider_id in lifecycle,
+                healthy=bool(
+                    details.get("status") == "active"
+                    and details.get("error") is None
+                    and last_poll is not None
+                    and now_ts - float(last_poll) <= 20 * 60
+                ),
+                last_success=float(last_poll) if last_poll is not None else None,
+            )
+        kmi = hass.data[DOMAIN].get("kmi_provider")
+        kmi_timestamp = hass.data[DOMAIN].get("kmi_frame_timestamp")
+        states["kmi"] = SourceState(
+            configured=kmi is not None,
+            healthy=bool(kmi_timestamp and now_ts - float(kmi_timestamp) <= 20 * 60),
+            last_success=float(kmi_timestamp) if kmi_timestamp else None,
+        )
+        knmi = hass.data[DOMAIN].get("knmi_provider")
+        knmi_current = hass.data[DOMAIN].get("knmi_current", [])
+        knmi_timestamp = max((float(item.timestamp) for item in knmi_current), default=None)
+        states["knmi"] = SourceState(
+            configured=knmi is not None,
+            healthy=bool(knmi_timestamp and now_ts - knmi_timestamp <= 20 * 60),
+            last_success=knmi_timestamp,
+        )
+        opera = hass.data[DOMAIN].get("opera_provider")
+        opera_success = getattr(opera, "_last_success_ts", None) if opera else None
+        states["opera"] = SourceState(
+            configured=opera is not None,
+            healthy=bool(opera and opera.healthy),
+            last_success=opera_success,
+        )
+        rainviewer = hass.data[DOMAIN].get("rv_provider")
+        rv_success = getattr(rainviewer, "_last_success_ts", None) if rainviewer else None
+        states["rainviewer"] = SourceState(
+            configured=rainviewer is not None,
+            healthy=bool(rainviewer and rainviewer.healthy),
+            last_success=rv_success,
+        )
+        return states
+
+    def _refresh_engine_radar_decisions():
+        from .providers.engine_radar_policy import select_engine_radar_source
+        now_ts = time.time()
+        states = _radar_source_states(now_ts)
+        decisions = {}
+        for region in storm_manager.get_all_engines():
+            decision = select_engine_radar_source(
+                _engine_country_codes(region), states, now=now_ts
+            )
+            decisions[region.engine_id] = {
+                "source": decision.source,
+                "reason": decision.reason,
+                "country_codes": list(decision.country_codes),
+                "age_seconds": round(decision.age_seconds, 1) if decision.age_seconds is not None else None,
+            }
+        hass.data[DOMAIN]["radar_sources_by_engine"] = decisions
+        unique = {item["source"] for item in decisions.values() if item["source"]}
+        hass.data[DOMAIN]["active_radar_source"] = next(iter(unique)) if len(unique) == 1 else "per_engine"
+        hass.data[DOMAIN]["radar_source_reason"] = (
+            "afzonderlijke bronkeuze per RegionEngine" if len(unique) > 1
+            else next(iter(decisions.values()), {}).get("reason", "geen actieve engine")
+        )
+        return decisions
+
+    def _route_selected_radar(observations, source: str) -> int:
+        decisions = hass.data[DOMAIN].get("radar_sources_by_engine", {})
+        routed = 0
+        for region in storm_manager.get_all_engines():
+            if (decisions.get(region.engine_id) or {}).get("source") != source:
+                continue
+            for observation in observations:
+                routed += int(storm_manager.route_observation_to_engine(
+                    region.engine_id, observation
+                ))
+        return routed
     from .engine.radar_calibration import RadarCalibrationObserver
     hass.data[DOMAIN]["radar_calibration_observer"] = RadarCalibrationObserver(
         evaluation_center=(home_lat, home_lon),
@@ -449,7 +546,7 @@ async def _async_setup_runtime(
         lat = hass.data[DOMAIN].get("fictieve_lat", home_lat)
         lon = hass.data[DOMAIN].get("fictieve_lon", home_lon)
         log_kmi(hass, obs, lat, lon)
-        # Comparison-only: KMI must not create duplicate operational radar systems.
+        # De router beslist per engine of KMI operationeel of vergelijking is.
 
     async def _poll_rv(now=None, operational: bool = False):
         p = hass.data[DOMAIN].get("rv_provider")
@@ -496,8 +593,7 @@ async def _async_setup_runtime(
                  hass.data[DOMAIN]["knmi_intensity_60min"],
                  hass.data[DOMAIN]["knmi_intensity_120min"],
                  lat, lon)
-        # Comparison-only: KNMI current/forecast remain visible in sensors,
-        # but do not influence operational WeatherSystems.
+        # Alleen actuele KNMI-observaties kunnen operationeel worden gerouteerd.
 
     async def _poll_opera(now=None):
         p = hass.data[DOMAIN].get("opera_provider")
@@ -519,6 +615,8 @@ async def _async_setup_runtime(
         raw_references.extend(hass.data[DOMAIN].get("dwd_radolan_observations", []))
         raw_references.extend(hass.data[DOMAIN].get("met_office_radar_observations", []))
         raw_references.extend(hass.data[DOMAIN].get("meteofrance_radar_observations", []))
+        raw_references.extend(hass.data[DOMAIN].get("dpc_radar_observations", []))
+        raw_references.extend(hass.data[DOMAIN].get("aemet_radar_observations", []))
         references = usable_corroborating_observations(raw_references)
         verification = verify_opera_observations(raw_obs, references)
         obs = list(verification.accepted)
@@ -579,8 +677,6 @@ async def _async_setup_runtime(
             verification.structured_echo, verification.corroborated,
             verification.rejected,
         )
-        for o in obs:
-            storm_manager.route_observation(o)
         return obs
 
     async def _poll_radar(now=None):
@@ -601,27 +697,17 @@ async def _async_setup_runtime(
         opera = hass.data[DOMAIN].get("opera_provider")
         rainviewer = hass.data[DOMAIN].get("rv_provider")
         rainviewer_obs = await _poll_rv(operational=False) if rainviewer else []
-        if opera:
-            await _poll_opera()
-
-        decision = select_radar_source(
-            opera_configured=opera is not None,
-            opera_healthy=bool(opera and opera.healthy),
-            rainviewer_configured=rainviewer is not None,
-            rainviewer_healthy=bool(rainviewer and rainviewer.healthy),
-        )
-        hass.data[DOMAIN]["active_radar_source"] = decision.source
-        hass.data[DOMAIN]["radar_source_reason"] = decision.reason
-
-        if decision.source == "rainviewer":
-            for observation in rainviewer_obs:
-                storm_manager.route_observation(observation)
-        elif decision.source is None:
-            _LOGGER.warning("Geen operationele radarbron: %s", decision.reason)
+        opera_obs = await _poll_opera() if opera else []
+        decisions = _refresh_engine_radar_decisions()
+        _route_selected_radar(opera_obs, "opera")
+        _route_selected_radar(rainviewer_obs, "rainviewer")
+        _route_selected_radar(hass.data[DOMAIN].get("last_kmi_observations", []), "kmi")
+        _route_selected_radar(hass.data[DOMAIN].get("knmi_current", []), "knmi")
 
         hass.bus.async_fire(f"{DOMAIN}_radar_source_update", {
-            "source": decision.source,
-            "reason": decision.reason,
+            "source": hass.data[DOMAIN].get("active_radar_source"),
+            "reason": hass.data[DOMAIN].get("radar_source_reason"),
+            "engines": decisions,
         })
 
     async def _poll_radar_comparison(now=None):
@@ -648,10 +734,19 @@ async def _async_setup_runtime(
             hass.data[DOMAIN]["met_office_radar_observations"] = results["met_office_radar"]
         if "meteofrance_radar" in results:
             hass.data[DOMAIN]["meteofrance_radar_observations"] = results["meteofrance_radar"]
+        if "dpc_radar" in results:
+            hass.data[DOMAIN]["dpc_radar_observations"] = results["dpc_radar"]
+        if "aemet_radar" in results:
+            hass.data[DOMAIN]["aemet_radar_observations"] = results["aemet_radar"]
+        decisions = _refresh_engine_radar_decisions()
+        for provider_id in ("dwd_radolan", "met_office_radar", "meteofrance_radar", "dpc_radar", "aemet_radar"):
+            if provider_id in results:
+                _route_selected_radar(results[provider_id], provider_id)
         hass.data[DOMAIN]["provider_lifecycle_diagnostics"] = (
             provider_lifecycle.diagnostics()
         )
         hass.bus.async_fire(f"{DOMAIN}_provider_lifecycle_update")
+        hass.bus.async_fire(f"{DOMAIN}_radar_source_update", {"engines": decisions})
 
     async def _poll_netatmo(now=None):
         p = hass.data[DOMAIN].get("netatmo_provider")
@@ -1014,5 +1109,5 @@ async def _async_setup_runtime(
         hass.async_create_task(_poll_eumetsat_li())
         hass.async_create_task(_poll_goes_glm())
 
-    _LOGGER.info("Storm Tracker V3 v0.4.58 gestart met robuuste ItaliaMeteo-fallback")
+    _LOGGER.info("Storm Tracker V3 v0.4.59 gestart met radarroutering per RegionEngine")
     return True
