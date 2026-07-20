@@ -1,5 +1,154 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.54
+
+- Nieuwe conservatieve passageprognose per target tot 90 minuten vooruit:
+  verwacht tijdstip, kleinste contourafstand, verwachte intensiteit en een
+  numerieke zekerheidsscore.
+- Intensiteit wordt uit de recente dBZ-trend geëxtrapoleerd en begrensd tot
+  maximaal 10 dBZ verandering om uitschieters te vermijden.
+- Prognoses verschijnen alleen bij bevestigde Matige/Hoge bewegingsvectoren;
+  onbetrouwbare of te verre projecties blijven expliciet onbeschikbaar.
+
+# 0.4.53
+
+- Persoons- en targetstatussen publiceren nu de actuele plaats, het adres en
+  de ISO-landcode voor weergave op de dashboardtegels.
+- Plaats en land worden privacyvriendelijk lokaal bepaald via
+  `/homeassistant/www/places.json`; targetcoördinaten verlaten Home Assistant niet.
+- Een Life360-plaatsnaam (zoals `Thuis`) krijgt voorrang als label, terwijl de
+  lokale plaatsendatabase de landcode aanvult.
+
+# 0.4.52
+
+- Bevestigde systemen krijgen bij een Matige of Hoge bewegingsvector een
+  expliciete hoofdstatus: `naderend`, `wegtrekkend` of `langs_trekkend`.
+- `bevestigd` betekent voortaan dat de bui echt is, maar de bewegingsvector
+  nog onvoldoende betrouwbaar is voor een richtingstatus.
+- ETA en waarschuwingen blijven uitsluitend gekoppeld aan `naderend`.
+
+# 0.4.51
+
+- Eerste veilige fase van radar-autokalibratie: ruwe OPERA-cellen worden op
+  een gemeenschappelijk geografisch rooster vergeleken met het actuele
+  visuele KMI-radarbeeld.
+- OPERA- en KMI-frames worden maximaal drie uur apart in historiek gehouden;
+  vergelijking gebeurt uitsluitend bij exact dezelfde nominale radarminuut,
+  ongeacht welke bron als eerste binnenkomt.
+- Nieuwe `sensor.stv3_radar_autokalibratie` toont overlap, precisie, recall,
+  F1-score, vermoedelijke valse OPERA-cellen en gemiste KMI-neerslag.
+- De kalibratie is strikt observerend en wijzigt geen operationele filtering.
+- Een ongewijzigd KMI-frame wist niet langer de laatst geldige observaties;
+  ook een vers droog frame blijft bruikbaar als negatieve referentie.
+
+# 0.4.50
+
+- De actuele radarcontour wordt langs de betrouwbare bewegingsvector
+  geprojecteerd en classificeert de passage per target als raak, rand of mist.
+- Publiceert afstand tot de voorspelde contour en een conservatieve
+  onzekerheidsmarge voor waarschuwingen.
+
+# 0.4.49
+
+- Per target worden de minimale afstand tot de voorspelde centrumlijn en het
+  tijdstip van dichtste passage berekend bij een Matige of Hoge bewegingsvector.
+
+# 0.4.48
+
+- EUMETSAT LI probeert bij een tijdelijke 404 automatisch oudere recente
+  catalogusproducten in plaats van de volledige fallbackcyclus te verliezen.
+- NOAA GOES-18/19 blijft in slaapstand zolang geen actieve RegionEngine binnen
+  de respectieve satellietdekking ligt.
+
+# 0.4.47
+
+- Machineleesbare landen-/datatypebronmatrix toegevoegd met afzonderlijke
+  keuzes voor radar, bliksem en grondvalidatie.
+- Aggregator-first beleid vastgelegd: lokale providers worden alleen gebouwd
+  wanneer zij aantoonbare meerwaarde boven de continentale bron leveren.
+- Wereldwijde catalogus uitgebreid met verzamelproviders en verificatiewachtrij.
+
+# 0.4.46
+
+- DWD RADOLAN/RADVOR RV toegevoegd als eerste lifecycle-provider: publieke
+  1 km HDF5-radar, vijfminutenactualiteit en automatische slaapstand.
+- DWD-data wordt als nationale vergelijkingsbron gebruikt om OPERA-echo's te
+  bevestigen en niet rechtstreeks als tweede operationele stormbron ingevoerd.
+- Nieuwe lifecycle-sensor toont status, relevante engines, polltijd, aantallen
+  en fouten per locatiegebonden provider.
+
+# 0.4.45
+
+- Generieke lifecyclecontroller toegevoegd voor locatiegebonden providers met
+  gedeelde activatie, slaapstand, cooldown, poll-lock en diagnostiek.
+- Meerdere RegionEngines die dezelfde bron nodig hebben delen één provider en
+  één fetch; terugkerende engines tijdens cooldown veroorzaken geen herstart.
+
+# 0.4.44
+
+- Satellietpolls publiceren nu altijd diagnostiek naar de bliksemsensor, ook
+  wanneer geen enkele flash binnen een actieve RegionEngine valt.
+- De sensor toont per satellietprovider laatste poll, opgehaalde en aanvaarde
+  flashes en een eventuele fout; testmodus pollt meteen na het opstarten.
+
+# 0.4.43
+
+- Configuratieoptie toegevoegd om satellietbliksem tijdelijk te forceren,
+  zodat EUMETSAT en NOAA GOES end-to-end getest kunnen worden terwijl
+  Blitzortung verbonden blijft.
+- In satelliettestmodus worden binnenkomende Blitzortung-observaties genegeerd;
+  de normale automatische modus blijft standaard en ongewijzigd.
+
+# 0.4.42
+
+- `STV3 Fictieve tracker locatie` en `STV3 Region Engines` verversen nu ook
+  bij verplaatsing van een secundair target naar een nieuwe RegionEngine.
+- Verhelpt stale Luxemburg-coördinaten in de UI nadat de testtracker naar
+  Miami werd verplaatst; de onderliggende engine-routing was al correct.
+
+# 0.4.41
+
+- NOAA GOES-18 en GOES-19 GLM toegevoegd als gratis, sleutelvrije
+  bliksemfallback voor Amerika en de Stille Oceaan.
+- De provider verwerkt anonieme NOAA S3-NetCDF-bestanden van twintig seconden,
+  dedupliceert bestanden en haalt bij activering maximaal vier minuten in.
+- EUMETSAT, GOES-19 en GOES-18 hebben vaste overlappingsgrenzen zodat dezelfde
+  optische flash niet door meerdere satellieten dubbel wordt verwerkt.
+- Azië tussen 80°O en 145°O blijft bewust vrij voor een latere FY-4-provider.
+
+# 0.4.40
+
+- EUMETSAT MTG Lightning Imager toegevoegd als gratis fallback wanneer de
+  Blitzortung MQTT-broker niet verbonden is.
+- Tijdelijke EUMETSAT-tokens worden automatisch aangemaakt en vernieuwd;
+  consumer key en secret zijn via de configuratie-opties instelbaar.
+- Alleen de kleine NetCDF BODY-entry wordt gedownload, met een harde limiet van
+  10 MiB, productdeduplicatie en weigering van data ouder dan 30 minuten.
+- Zodra Blitzortung opnieuw verbindt, stopt de satellietfallback automatisch.
+
+# 0.4.39
+
+- De multi-targetkaart toont per geselecteerd target alleen diens gekoppelde RegionEngine, radarcellen, systemen, vectoren en targets; overlappende engines worden niet langer door elkaar getekend.
+- Bewegingsvectoren verschijnen alleen bij een bevestigd systeem met minstens vier meetpunten, tien minuten historie, een fit van 0,60 en minimaal matige betrouwbaarheid.
+
+# 0.4.38
+
+- De OPERA-diagnostiek telt bruikbare KMI-, KNMI- en RainViewer-referenties nu uit de werkelijke verificatieset; KMI staat niet langer foutief hard op nul.
+- De legacy fictieve-trackerlocatiesensor toont de actuele geconfigureerde testtracker, inclusief beschikbaarheid en toegewezen RegionEngine, in plaats van de HA-thuislocatie.
+
+# 0.4.36
+
+- De GeoJSON-kaart publiceert alleen radarcellen van de actieve operationele
+  radarbron. Oude RainViewer-fallbackcellen blijven intern kort beschikbaar
+  voor lifecyclebeheer, maar verschijnen niet meer op de kaart zolang OPERA de
+  actieve bron is.
+- RainViewer gebruikt fijnere pixelsampling en een realistischere
+  pixeloppervlakte, zodat fallbackcellen minder grof wegen in clustering en
+  visualisatie.
+- Lage OPERA-quality wordt alleen nog door compacte RainViewer-echo's vanaf
+  intensiteit 2 binnen 12 km bevestigd; lichte of ruimtelijk losse pixels mogen
+  geen volledige OPERA-cel meer valideren.
+
 ## v0.4.28
 
 - Eerste backwards-compatible multi-targetlaag: naast de bestaande fictieve
@@ -362,3 +511,21 @@
   niet langer met mojibake worden weergegeven.
 - Cluster targets op vrijwel dezelfde locatie tot een leesbaar label in plaats
   van acht overlappende namen.
+# 0.4.35
+
+- Publiceert in de kaartlaag alleen radarcellen uit het nieuwste radarframe; historische detecties blijven intern beschikbaar voor beweging en opvolging.
+- Knipt lage-kwaliteit OPERA-footprints terug tot de punten die ruimtelijk door RainViewer worden bevestigd, zodat een kleine echte bui geen volledige foutieve megacel meer aanvaardt.
+
+# 0.4.34
+
+- Herstelt het RainViewer v2-tegelpad door de verplichte afbeeldingsgrootte toe te voegen.
+- Decodeert Universal Blue-radarpixels op transparantie en kleur in plaats van algemene helderheid; grijze antwoordpixels kunnen OPERA niet langer foutief bevestigen.
+
+# 0.4.33
+
+- Vereist onafhankelijke radarcorroboratie voor OPERA-cellen met lage kwaliteit, ook wanneer hun reflectiviteit en oppervlakte meteorologisch plausibel lijken.
+- Verwijdert daardoor sterke maar onbevestigde OPERA-clutter, zoals de foutieve cellen boven Noord-Nederland en Noord-Frankrijk.
+# 0.4.37
+
+- KMI-radarpunten vanaf intensiteit 2 kunnen OPERA opnieuw onafhankelijk bevestigen; basiskaartartefacten met intensiteit 1 blijven uitgesloten.
+- Stormvlakken en bewegingsvectoren zonder radarcel uit het actuele frame van de actieve bron verdwijnen uit de GeoJSON-kaart.

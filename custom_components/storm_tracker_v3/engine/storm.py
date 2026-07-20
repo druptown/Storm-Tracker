@@ -512,6 +512,11 @@ class Storm:
                 "approach_speed_kmh": None,
                 "moving_towards": None,
                 "eta_minutes": None,
+                "closest_pass_distance_km": None,
+                "closest_pass_minutes": None,
+                "footprint_pass_distance_km": None,
+                "passage_classification": None,
+                "passage_uncertainty_km": None,
             }
 
         angle = abs((self.heading_deg - bearing + 180.0) % 360.0 - 180.0)
@@ -520,12 +525,85 @@ class Storm:
         eta_minutes = None
         if moving_towards and self.confidence != "Onvoldoende data":
             eta_minutes = distance / approach_speed * 60.0
+        centroid_distance = _haversine_km(
+            self.centroid_lat, self.centroid_lon, target_lat, target_lon
+        )
+        closest_pass_distance = None
+        closest_pass_minutes = None
+        footprint_pass_distance = None
+        passage_classification = None
+        passage_uncertainty = None
+        if moving_towards and self.confidence in {"Matig", "Hoog"}:
+            closest_pass_distance = centroid_distance * abs(
+                math.sin(math.radians(angle))
+            )
+            along_track = centroid_distance * math.cos(math.radians(angle))
+            closest_pass_minutes = along_track / self.speed_kmh * 60.0
+            travel_km = self.speed_kmh * closest_pass_minutes / 60.0
+            footprint_pass_distance = self._projected_footprint_distance(
+                target_lat, target_lon, travel_km
+            )
+            passage_uncertainty = max(
+                5.0 if self.confidence == "Hoog" else 12.0,
+                travel_km * (0.12 if self.confidence == "Hoog" else 0.25),
+            )
+            if footprint_pass_distance is not None:
+                if footprint_pass_distance <= 0.1:
+                    passage_classification = "raak"
+                elif footprint_pass_distance <= passage_uncertainty:
+                    passage_classification = "rand"
+                else:
+                    passage_classification = "mist"
         return {
             "bearing_to_target_deg": round(bearing, 1),
             "approach_speed_kmh": round(approach_speed, 1),
             "moving_towards": moving_towards,
             "eta_minutes": round(eta_minutes, 0) if eta_minutes is not None else None,
+            "closest_pass_distance_km": (
+                round(closest_pass_distance, 1)
+                if closest_pass_distance is not None else None
+            ),
+            "closest_pass_minutes": (
+                round(closest_pass_minutes, 0)
+                if closest_pass_minutes is not None else None
+            ),
+            "footprint_pass_distance_km": (
+                round(footprint_pass_distance, 1)
+                if footprint_pass_distance is not None else None
+            ),
+            "passage_classification": passage_classification,
+            "passage_uncertainty_km": (
+                round(passage_uncertainty, 1)
+                if passage_uncertainty is not None else None
+            ),
         }
+
+    def _projected_footprint_distance(
+        self, target_lat: float, target_lon: float, travel_km: float
+    ) -> Optional[float]:
+        """Afstand van target tot de verschoven actuele radarcontour."""
+        if not self.radar_cells or self.heading_deg is None:
+            return None
+        latest = max(cell.timestamp for cell in self.radar_cells.values())
+        cells = [
+            cell for cell in self.radar_cells.values()
+            if latest - cell.timestamp <= 60.0
+        ]
+        east_km = travel_km * math.sin(math.radians(self.heading_deg))
+        north_km = travel_km * math.cos(math.radians(self.heading_deg))
+        best: Optional[float] = None
+        for cell in cells:
+            points = cell.footprint_points or ((cell.lat, cell.lon),)
+            polygon = [
+                _latlon_to_local_km(lat, lon, target_lat, target_lon)
+                for lat, lon in points
+            ]
+            shifted = _convex_hull([
+                (x + east_km, y + north_km) for x, y in polygon
+            ])
+            distance = _distance_to_polygon_origin(shifted)
+            best = distance if best is None else min(best, distance)
+        return best
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -540,6 +618,65 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         * math.sin(dlon / 2) ** 2
     )
     return 6371.0088 * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _latlon_to_local_km(
+    lat: float, lon: float, origin_lat: float, origin_lon: float
+) -> tuple[float, float]:
+    """Kleine-afstandprojectie naar oost/noord ten opzichte van target."""
+    x = (lon - origin_lon) * 111.32 * math.cos(math.radians(origin_lat))
+    y = (lat - origin_lat) * 110.574
+    return x, y
+
+
+def _distance_to_polygon_origin(points: list[tuple[float, float]]) -> float:
+    """Minimale afstand van (0,0) tot punt, lijn of gesloten polygoon."""
+    if not points:
+        return math.inf
+    if len(points) == 1:
+        return math.hypot(*points[0])
+    inside = False
+    minimum = math.inf
+    for index, (x1, y1) in enumerate(points):
+        x2, y2 = points[(index + 1) % len(points)]
+        if (y1 > 0) != (y2 > 0):
+            crossing_x = x1 + (x2 - x1) * (-y1) / (y2 - y1)
+            if crossing_x > 0:
+                inside = not inside
+        dx, dy = x2 - x1, y2 - y1
+        length_sq = dx * dx + dy * dy
+        if length_sq == 0:
+            distance = math.hypot(x1, y1)
+        else:
+            fraction = max(0.0, min(1.0, -(x1 * dx + y1 * dy) / length_sq))
+            distance = math.hypot(x1 + fraction * dx, y1 + fraction * dy)
+        minimum = min(minimum, distance)
+    return 0.0 if inside else minimum
+
+
+def _convex_hull(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Orden ongeordende radarpunten als conservatieve convexe buitenrand."""
+    unique = sorted(set(points))
+    if len(unique) <= 2:
+        return unique
+
+    def cross(origin, first, second):
+        return (
+            (first[0] - origin[0]) * (second[1] - origin[1])
+            - (first[1] - origin[1]) * (second[0] - origin[0])
+        )
+
+    lower = []
+    for point in unique:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0:
+            lower.pop()
+        lower.append(point)
+    upper = []
+    for point in reversed(unique):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0:
+            upper.pop()
+        upper.append(point)
+    return lower[:-1] + upper[:-1]
 
 
 def _bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

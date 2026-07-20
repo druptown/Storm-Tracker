@@ -24,6 +24,7 @@ import asyncio
 import logging
 import math
 import time
+from pathlib import Path
 
 from homeassistant.core import HomeAssistant, callback, CoreState
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, EVENT_HOMEASSISTANT_STOP
@@ -42,10 +43,16 @@ from .plogger.provider_logger import (
     log_lightning, log_kmi, log_rainviewer, log_knmi, log_netatmo, log_open_meteo
 )
 from .http import StormTrackerGeoJsonView
+from .geometry.location_resolver import load_places_json, resolve_location
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = ["sensor"]
+
+
+def _use_satellite_lightning(blitz_connected: bool, source_mode: str) -> bool:
+    """Bepaal of satellietbliksem actief moet pollen."""
+    return source_mode == "satellite_test" or not blitz_connected
 
 
 def _distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -84,6 +91,9 @@ CONFIG_SCHEMA = vol.Schema({
         vol.Optional("netatmo_client_secret"): cv.string,
         vol.Optional("netatmo_refresh_token"): cv.string,
         vol.Optional("netatmo_radius_km", default=175): vol.Coerce(float),
+        vol.Optional("eumetsat_consumer_key"): cv.string,
+        vol.Optional("eumetsat_consumer_secret"): cv.string,
+        vol.Optional("lightning_source_mode", default="auto"): vol.In({"auto", "satellite_test"}),
     })
 }, extra=vol.ALLOW_EXTRA)
 
@@ -114,6 +124,9 @@ async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
         "targets": targets,
         "radar_radius_km": raw.get("radar_radius_km", 300.0),
         "engine_sharing_distance_km": raw.get("engine_sharing_distance_km", 150.0),
+        "eumetsat_consumer_key": raw.get("eumetsat_consumer_key"),
+        "eumetsat_consumer_secret": raw.get("eumetsat_consumer_secret"),
+        "lightning_source_mode": raw.get("lightning_source_mode", "auto"),
     }
     if raw.get("test_tracker_entity"):
         conf["fictieve_tracker_entity"] = raw["test_tracker_entity"]
@@ -139,6 +152,9 @@ async def _async_setup_runtime(
     netatmo_radius  = conf.get("netatmo_radius_km", 175.0)
     radar_radius    = conf.get("radar_radius_km", 200.0)
     sharing_distance = conf.get("engine_sharing_distance_km", 150.0)
+    lightning_source_mode = conf.get("lightning_source_mode", "auto")
+    satellite_test_mode = lightning_source_mode == "satellite_test"
+    hass.data[DOMAIN]["lightning_source_mode"] = lightning_source_mode
     target_specs = build_target_specs(
         home_lat,
         home_lon,
@@ -147,6 +163,14 @@ async def _async_setup_runtime(
     )
     from homeassistant.helpers.aiohttp_client import async_get_clientsession
     http_session = async_get_clientsession(hass)
+    places_path = Path(hass.config.path("www", "places.json"))
+    try:
+        location_places = await hass.async_add_executor_job(load_places_json, places_path)
+    except (OSError, ValueError) as err:
+        _LOGGER.warning("Lokale plaatsendatabase %s kon niet worden geladen: %s", places_path, err)
+        location_places = ()
+    hass.data[DOMAIN]["location_places_count"] = len(location_places)
+    home_location = resolve_location(home_lat, home_lon, location_places, preferred_place="Thuis")
 
     hass.data[DOMAIN]["fictieve_entity"] = fictieve_entity
     hass.data[DOMAIN]["fictieve_lat"]    = home_lat
@@ -163,6 +187,10 @@ async def _async_setup_runtime(
             "primary": spec.primary,
             "radar_covered": spec.primary,
             "region_engine_id": None,
+            "location_place": "Thuis" if spec.primary else None,
+            "location_address": None,
+            "country_code": home_location.country_code if spec.primary else None,
+            "location_accuracy_km": home_location.distance_km if spec.primary else None,
         }
         for spec in target_specs
     }
@@ -256,8 +284,11 @@ async def _async_setup_runtime(
 
     # ── Blitzortung (wereldwijd, locatie-onafhankelijk) ───────────────────
     def _on_blitz(obs):
+        if satellite_test_mode:
+            return
         if storm_manager.route_observation(obs) == 0:
             return
+        hass.data[DOMAIN]["lightning_source"] = "blitzortung"
         hass.data[DOMAIN]["last_lightning"] = obs
         hass.data[DOMAIN].setdefault("lightning_count", 0)
         hass.data[DOMAIN]["lightning_count"] += 1
@@ -275,6 +306,57 @@ async def _async_setup_runtime(
     blitz = BlitzortungProvider(on_observation=_on_blitz, regions=_blitz_regions())
     blitz.start()
     hass.data[DOMAIN]["blitz_provider"] = blitz
+
+    eumetsat = None
+    if conf.get("eumetsat_consumer_key") and conf.get("eumetsat_consumer_secret"):
+        from .providers.eumetsat_li import EumetsatLightningProvider
+        eumetsat = EumetsatLightningProvider(
+            http_session,
+            conf["eumetsat_consumer_key"],
+            conf["eumetsat_consumer_secret"],
+        )
+        hass.data[DOMAIN]["eumetsat_li_provider"] = eumetsat
+        hass.data[DOMAIN]["eumetsat_li_status"] = "standby"
+        _LOGGER.info("EUMETSAT LI geconfigureerd als Blitzortung-fallback")
+
+    from .providers.noaa_goes_glm import (
+        NoaaGoesGlmProvider,
+        preferred_source_for_longitude,
+        satellites_for_regions,
+    )
+    goes_glm = NoaaGoesGlmProvider(http_session)
+    hass.data[DOMAIN]["goes_glm_provider"] = goes_glm
+    hass.data[DOMAIN]["goes18_glm_status"] = "standby"
+    hass.data[DOMAIN]["goes19_glm_status"] = "standby"
+    _LOGGER.info("NOAA GOES-18/19 GLM geconfigureerd als wereldwijde fallback")
+
+    from .providers.base import CoverageArea, ProviderContext
+    from .providers.dwd_radolan import DwdRadolanProvider
+    from .providers.lifecycle import ProviderLifecycleController
+
+    provider_lifecycle = ProviderLifecycleController(cooldown_seconds=300)
+    dwd_radolan = DwdRadolanProvider(http_session)
+    provider_lifecycle.register(
+        dwd_radolan,
+        lambda plugin, areas: ProviderContext(
+            hass=hass,
+            area=areas[0],
+            on_observation=lambda observation: None,
+            config={"areas": areas},
+        ),
+    )
+    hass.data[DOMAIN]["provider_lifecycle"] = provider_lifecycle
+    hass.data[DOMAIN]["provider_lifecycle_diagnostics"] = (
+        provider_lifecycle.diagnostics()
+    )
+    from .engine.radar_calibration import RadarCalibrationObserver
+    hass.data[DOMAIN]["radar_calibration_observer"] = RadarCalibrationObserver(
+        evaluation_center=(home_lat, home_lon),
+        evaluation_radius_km=radar_radius,
+    )
+    hass.data[DOMAIN]["radar_calibration"] = (
+        hass.data[DOMAIN]["radar_calibration_observer"].diagnostics()
+    )
 
     # ── Locatie-afhankelijke providers initialiseren ──────────────────────
     async def _init_location_providers(lat: float, lon: float) -> None:
@@ -332,8 +414,22 @@ async def _async_setup_runtime(
         p = hass.data[DOMAIN].get("kmi_provider")
         if not p: return
         obs = await p.fetch_observations()
+        if not p.last_fetch_updated:
+            return
         hass.data[DOMAIN]["last_kmi_observations"] = obs
+        hass.data[DOMAIN]["kmi_frame_timestamp"] = p.last_frame_timestamp
         hass.data[DOMAIN]["kmi_count"] = len(obs)
+        calibration_observer = hass.data[DOMAIN]["radar_calibration_observer"]
+        calibration_observer.record_reference_frame(
+            [observation for observation in obs if (observation.intensity or 0) >= 2],
+            source="kmi_image",
+            timestamp=p.last_frame_timestamp,
+        )
+        hass.data[DOMAIN]["radar_calibration"] = calibration_observer.diagnostics()
+        hass.bus.async_fire(
+            f"{DOMAIN}_calibration_update",
+            {"samples": hass.data[DOMAIN]["radar_calibration"]["samples"]},
+        )
         hass.bus.async_fire(f"{DOMAIN}_radar_update", {"source": "kmi", "count": len(obs)})
         lat = hass.data[DOMAIN].get("fictieve_lat", home_lat)
         lon = hass.data[DOMAIN].get("fictieve_lon", home_lon)
@@ -398,15 +494,32 @@ async def _async_setup_runtime(
         # unconfirmed low-quality echoes must not create phantom systems.
         from .providers.radar_policy import (
             OPERA_MIN_STANDALONE_QUALITY,
+            corroboration_source_counts,
             usable_corroborating_observations,
             verify_opera_observations,
         )
         raw_references = list(hass.data[DOMAIN].get("last_kmi_observations", []))
         raw_references.extend(hass.data[DOMAIN].get("knmi_current", []))
         raw_references.extend(hass.data[DOMAIN].get("last_rv_observations", []))
+        raw_references.extend(hass.data[DOMAIN].get("dwd_radolan_observations", []))
         references = usable_corroborating_observations(raw_references)
         verification = verify_opera_observations(raw_obs, references)
         obs = list(verification.accepted)
+
+        # Bewaar elk OPERA-frame. Alleen een KMI-beeld met exact dezelfde
+        # nominale radarminuut wordt vergeleken, ongeacht aankomstvolgorde.
+        calibration_observer = hass.data[DOMAIN]["radar_calibration_observer"]
+        opera_frame_timestamp = (
+            float(raw_obs[0].timestamp)
+            if raw_obs else getattr(p, "_last_product_ts", None)
+        )
+        if opera_frame_timestamp is not None:
+            calibration_observer.record_primary_frame(raw_obs, opera_frame_timestamp)
+        hass.data[DOMAIN]["radar_calibration"] = calibration_observer.diagnostics()
+        hass.bus.async_fire(
+            f"{DOMAIN}_calibration_update",
+            {"samples": hass.data[DOMAIN]["radar_calibration"]["samples"]},
+        )
 
         diagnostics = p.diagnostics
         accepted_locations = {
@@ -436,13 +549,7 @@ async def _async_setup_runtime(
             "accepted_structured_echo": verification.structured_echo,
             "accepted_corroborated": verification.corroborated,
             "rejected_unconfirmed": verification.rejected,
-            "corroboration_sources": {
-                "kmi": 0,
-                "knmi": sum(1 for ref in references if ref.source == "knmi"),
-                "rainviewer": sum(
-                    1 for ref in references if ref.source == "rainviewer"
-                ),
-            },
+            "corroboration_sources": corroboration_source_counts(references),
             "corroboration_references_raw": len(raw_references),
             "corroboration_references_usable": len(references),
         })
@@ -505,6 +612,26 @@ async def _async_setup_runtime(
         await _poll_kmi()
         await _poll_knmi()
 
+    def _provider_areas():
+        return tuple(
+            CoverageArea(
+                region.center_lat,
+                region.center_lon,
+                region.observation_radius_km,
+            )
+            for region in storm_manager.get_all_engines()
+        )
+
+    async def _poll_national_providers(now=None):
+        await provider_lifecycle.async_reconcile(_provider_areas())
+        results = await provider_lifecycle.async_fetch_active()
+        if "dwd_radolan" in results:
+            hass.data[DOMAIN]["dwd_radolan_observations"] = results["dwd_radolan"]
+        hass.data[DOMAIN]["provider_lifecycle_diagnostics"] = (
+            provider_lifecycle.diagnostics()
+        )
+        hass.bus.async_fire(f"{DOMAIN}_provider_lifecycle_update")
+
     async def _poll_netatmo(now=None):
         p = hass.data[DOMAIN].get("netatmo_provider")
         if not p: return
@@ -557,6 +684,96 @@ async def _async_setup_runtime(
             )
             storm_manager.route_observation(obs)
 
+    async def _poll_eumetsat_li(now=None):
+        """Gebruik satellietflashes uitsluitend zolang Blitzortung offline is."""
+        if eumetsat is None:
+            return
+        if not _use_satellite_lightning(blitz.connected, lightning_source_mode):
+            hass.data[DOMAIN]["lightning_source"] = "blitzortung"
+            return
+        try:
+            observations = await eumetsat.fetch_observations()
+        except Exception:
+            _LOGGER.exception("EUMETSAT LI fallback ophalen mislukt")
+            hass.data[DOMAIN]["eumetsat_li_status"] = "error"
+            hass.data[DOMAIN]["eumetsat_poll"] = {
+                "timestamp": time.time(), "fetched": 0, "accepted": 0,
+                "error": "fetch_failed",
+            }
+            hass.bus.async_fire(f"{DOMAIN}_lightning_status_update")
+            return
+        hass.data[DOMAIN]["eumetsat_li_status"] = "active"
+        hass.data[DOMAIN]["lightning_source"] = "eumetsat_li"
+        accepted = 0
+        for observation in observations:
+            if preferred_source_for_longitude(observation.lon) != observation.source:
+                continue
+            if storm_manager.route_observation(observation) == 0:
+                continue
+            accepted += 1
+            hass.data[DOMAIN]["last_lightning"] = observation
+            hass.data[DOMAIN].setdefault("lightning_count", 0)
+            hass.data[DOMAIN]["lightning_count"] += 1
+            hass.bus.async_fire(f"{DOMAIN}_lightning_update", {
+                "lat": observation.lat,
+                "lon": observation.lon,
+                "timestamp": observation.timestamp,
+                "source": observation.source,
+            })
+        if observations:
+            _LOGGER.info(
+                "EUMETSAT LI fallback: %d/%d flashes binnen actieve regio's",
+                accepted, len(observations),
+            )
+        hass.data[DOMAIN]["eumetsat_poll"] = {
+            "timestamp": time.time(), "fetched": len(observations),
+            "accepted": accepted, "error": None,
+        }
+        hass.bus.async_fire(f"{DOMAIN}_lightning_status_update")
+
+    async def _poll_goes_glm(now=None):
+        """Gebruik NOAA GLM voor Amerika en de Pacific bij Blitz-uitval."""
+        if not _use_satellite_lightning(blitz.connected, lightning_source_mode):
+            hass.data[DOMAIN]["goes18_glm_status"] = "standby"
+            hass.data[DOMAIN]["goes19_glm_status"] = "standby"
+            return
+        observations = await goes_glm.fetch_observations(
+            satellites_for_regions(_blitz_regions())
+        )
+        hass.data[DOMAIN]["goes18_glm_status"] = goes_glm.status[18]
+        hass.data[DOMAIN]["goes19_glm_status"] = goes_glm.status[19]
+        accepted = 0
+        for observation in observations:
+            if preferred_source_for_longitude(observation.lon) != observation.source:
+                continue
+            if storm_manager.route_observation(observation) == 0:
+                continue
+            accepted += 1
+            hass.data[DOMAIN]["lightning_source"] = observation.source
+            hass.data[DOMAIN]["last_lightning"] = observation
+            hass.data[DOMAIN].setdefault("lightning_count", 0)
+            hass.data[DOMAIN]["lightning_count"] += 1
+            hass.bus.async_fire(f"{DOMAIN}_lightning_update", {
+                "lat": observation.lat,
+                "lon": observation.lon,
+                "timestamp": observation.timestamp,
+                "source": observation.source,
+            })
+        if observations:
+            _LOGGER.info(
+                "NOAA GOES GLM fallback: %d/%d flashes binnen actieve regio's",
+                accepted, len(observations),
+            )
+        failed = [
+            f"goes{satellite}" for satellite in (18, 19)
+            if goes_glm.status[satellite] == "error"
+        ]
+        hass.data[DOMAIN]["goes_poll"] = {
+            "timestamp": time.time(), "fetched": len(observations),
+            "accepted": accepted, "error": ",".join(failed) or None,
+        }
+        hass.bus.async_fire(f"{DOMAIN}_lightning_status_update")
+
     async def _poll_all(now=None):
         """Initial coordinated poll."""
         # Establish national-radar evidence before the first OPERA validation.
@@ -574,6 +791,9 @@ async def _async_setup_runtime(
         async_track_time_interval(hass, _poll_radar_comparison, timedelta(minutes=5)),
         async_track_time_interval(hass, _poll_netatmo, timedelta(minutes=5)),
         async_track_time_interval(hass, _poll_open_meteo, timedelta(minutes=10)),
+        async_track_time_interval(hass, _poll_eumetsat_li, timedelta(minutes=2)),
+        async_track_time_interval(hass, _poll_goes_glm, timedelta(minutes=1)),
+        async_track_time_interval(hass, _poll_national_providers, timedelta(minutes=5)),
     ])
 
     # ── Fictieve tracker locatie volgen ───────────────────────────────────
@@ -665,6 +885,17 @@ async def _async_setup_runtime(
             return
 
         lat, lon = coordinates
+        attributes = state.attributes if state is not None else {}
+        preferred_place = attributes.get("place") or attributes.get("stad")
+        resolved_location = resolve_location(
+            lat, lon, location_places, preferred_place=preferred_place
+        )
+        target_data.update({
+            "location_place": resolved_location.place,
+            "location_address": attributes.get("address"),
+            "country_code": resolved_location.country_code,
+            "location_accuracy_km": resolved_location.distance_km,
+        })
         old_lat = target_data.get("latitude")
         old_lon = target_data.get("longitude")
         movement = (
@@ -673,6 +904,9 @@ async def _async_setup_runtime(
         )
         current = storm_manager.get_engine_for_target(spec.entity_id)
         if movement < 1.0 and current is not None and not initial:
+            hass.bus.async_fire(
+                f"{DOMAIN}_targets_updated", {"targets": [spec.target_id]}
+            )
             return
         if current is not None and movement >= 1.0:
             await mcs_store.async_save_engine(current.storage_key, current.storm_engine)
@@ -725,6 +959,7 @@ async def _async_setup_runtime(
         if not hass.data[DOMAIN].get("providers_initialized"):
             await _init_location_providers(home_lat, home_lon)
             hass.data[DOMAIN]["providers_initialized"] = True
+        await _poll_national_providers()
 
     if hass.state == CoreState.running:
         await _do_initial_setup()
@@ -737,6 +972,7 @@ async def _async_setup_runtime(
     @callback
     def _on_ha_stop(event):
         blitz.stop()
+        hass.async_create_task(provider_lifecycle.async_stop_all())
         for region in storm_manager.get_all_engines():
             hass.async_create_task(
                 mcs_store.async_save_engine(region.storage_key, region.storm_engine)
@@ -751,5 +987,11 @@ async def _async_setup_runtime(
     from homeassistant.helpers import discovery
     await discovery.async_load_platform(hass, "sensor", DOMAIN, {}, config)
 
-    _LOGGER.info("Storm Tracker V3 v0.4.31 gestart met recorderveilige GeoJSON-API")
+    if satellite_test_mode:
+        # Diagnostische modus moet meteen bewijs leveren en niet eerst wachten
+        # op de eerste intervalcallback.
+        hass.async_create_task(_poll_eumetsat_li())
+        hass.async_create_task(_poll_goes_glm())
+
+    _LOGGER.info("Storm Tracker V3 v0.4.54 gestart met targetpassageprognoses")
     return True

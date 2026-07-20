@@ -13,6 +13,9 @@ CONF_PERSONS = "persons"
 CONF_TEST_TRACKER = "test_tracker_entity"
 CONF_RADAR_RADIUS = "radar_radius_km"
 CONF_SHARING_DISTANCE = "engine_sharing_distance_km"
+CONF_EUMETSAT_KEY = "eumetsat_consumer_key"
+CONF_EUMETSAT_SECRET = "eumetsat_consumer_secret"
+CONF_LIGHTNING_SOURCE_MODE = "lightning_source_mode"
 
 
 def _schema(defaults: dict) -> vol.Schema:
@@ -32,6 +35,24 @@ def _schema(defaults: dict) -> vol.Schema:
         ): selector.NumberSelector(selector.NumberSelectorConfig(
             min=25, max=500, step=25, mode=selector.NumberSelectorMode.BOX,
             unit_of_measurement="km",
+        )),
+        vol.Optional(
+            CONF_EUMETSAT_KEY,
+            default=defaults.get(CONF_EUMETSAT_KEY, ""),
+        ): selector.TextSelector(),
+        vol.Optional(
+            CONF_EUMETSAT_SECRET,
+            default=defaults.get(CONF_EUMETSAT_SECRET, ""),
+        ): selector.TextSelector(selector.TextSelectorConfig(
+            type=selector.TextSelectorType.PASSWORD,
+        )),
+        vol.Optional(
+            CONF_LIGHTNING_SOURCE_MODE,
+            default=defaults.get(CONF_LIGHTNING_SOURCE_MODE, "auto"),
+        ): selector.SelectSelector(selector.SelectSelectorConfig(
+            options=["auto", "satellite_test"],
+            mode=selector.SelectSelectorMode.DROPDOWN,
+            translation_key="lightning_source_mode",
         )),
     }
     test_selector = selector.EntitySelector(selector.EntitySelectorConfig(

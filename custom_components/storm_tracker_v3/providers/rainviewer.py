@@ -40,6 +40,33 @@ RAINVIEWER_TIMEOUT = 15
 RAINVIEWER_MAX_FRAME_AGE_S = 20 * 60
 TILE_ZOOM          = 5   # zoom-level 5 = ~300km per tile
 TILE_GRID          = 2   # 2x2 grid = ~600km x ~600km rond het centrum
+TILE_SIZE          = 256
+RAINVIEWER_MIN_DBZ_ALPHA = 130  # Universal Blue: circa 8 dBZ
+RAINVIEWER_PIXEL_STRIDE = 4
+
+
+def _tile_url(path: str, tx: int, ty: int) -> str:
+    """Build a current RainViewer v2 tile URL without interpolation."""
+    return f"{path}/{TILE_SIZE}/{TILE_ZOOM}/{tx}/{ty}/2/0_0.png"
+
+
+def _universal_blue_intensity(r: int, g: int, b: int, a: int) -> int:
+    """Decode only plausible wet pixels from RainViewer Universal Blue.
+
+    Below 15 dBZ this palette encodes reflectivity primarily through alpha.
+    From 15 dBZ onward it is opaque and strongly coloured (or white at the
+    extreme end). Grey opaque pixels are not radar and must never corroborate
+    OPERA.
+    """
+    if a < RAINVIEWER_MIN_DBZ_ALPHA:
+        return 0
+    if a < 255:
+        estimated_dbz = 8 + round((a - RAINVIEWER_MIN_DBZ_ALPHA) * 6 / 60)
+        return max(1, min(2, 1 + max(0, estimated_dbz - 8) // 6))
+    saturation = max(r, g, b) - min(r, g, b)
+    if saturation < 40 and min(r, g, b) < 240:
+        return 0
+    return 3 if max(r, g, b) < 250 else 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,7 +253,7 @@ class RainViewerProvider:
             for dx in range(-TILE_GRID // 2, TILE_GRID // 2 + 1):
                 for dy in range(-TILE_GRID // 2, TILE_GRID // 2 + 1):
                     tx, ty = cx + dx, cy + dy
-                    url    = f"{path}/{TILE_ZOOM}/{tx}/{ty}/2/1_0.png"
+                    url    = _tile_url(path, tx, ty)
                     try:
                         async with session.get(url) as resp:
                             if resp.status != 200:
@@ -250,28 +277,31 @@ class RainViewerProvider:
             from PIL import Image
             import io
 
-            tile_size  = 256
+            tile_size  = TILE_SIZE
             img        = Image.open(io.BytesIO(image_data)).convert("RGBA")
             pixels     = img.load()
             lat_t, lat_b, lon_l, lon_r = _tile_bounds(tx, ty, TILE_ZOOM)
             observation_ts = frame_timestamp if frame_timestamp is not None else time.time()
             obs        = []
 
-            stride = 8   # elke 8e pixel (~3.5km op zoom-5)
+            stride = RAINVIEWER_PIXEL_STRIDE
             for py in range(0, tile_size, stride):
                 for px in range(0, tile_size, stride):
                     r, g, b, a = pixels[px, py]
-                    if a < 64 or (r + g + b) < 10:
-                        continue   # transparant of zwart = droog
-
-                    # Ruwe intensiteit schatten op basis van helderheid
-                    intensity = min(8, max(1, int((r + g + b) / 96)))
+                    intensity = _universal_blue_intensity(r, g, b, a)
+                    if intensity < 1:
+                        continue
 
                     lat, lon = _pixel_to_latlon_tile(
                         px + stride // 2, py + stride // 2, tile_size,
                         lat_t, lat_b, lon_l, lon_r
                     )
-                    area_km2 = (stride * (lon_r - lon_l) / tile_size * 111.32) ** 2
+                    lat_km = stride * abs(lat_t - lat_b) / tile_size * 110.574
+                    lon_km = (
+                        stride * abs(lon_r - lon_l) / tile_size * 111.320
+                        * max(0.1, abs(math.cos(math.radians(lat))))
+                    )
+                    area_km2 = lat_km * lon_km
 
                     obs.append(Observation(
                         obs_type  = ObservationType.RADAR,

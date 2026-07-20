@@ -136,6 +136,14 @@ def geocode_module():
     )
 
 
+@pytest.fixture
+def location_resolver_module():
+    return _load_module(
+        f"{PKG_NAME}.geometry.location_resolver",
+        PKG_ROOT / "geometry" / "location_resolver.py",
+    )
+
+
 # ── Engine-modules ─────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="session")
@@ -249,6 +257,33 @@ def blitzortung_module(observation_module):
 
 
 @pytest.fixture(scope="session")
+def eumetsat_li_module(observation_module):
+    _ensure_stub_package(f"{PKG_NAME}.providers")
+    return _load_module(
+        f"{PKG_NAME}.providers.eumetsat_li",
+        PKG_ROOT / "providers" / "eumetsat_li.py",
+    )
+
+
+@pytest.fixture(scope="session")
+def noaa_goes_glm_module(observation_module):
+    _ensure_stub_package(f"{PKG_NAME}.providers")
+    return _load_module(
+        f"{PKG_NAME}.providers.noaa_goes_glm",
+        PKG_ROOT / "providers" / "noaa_goes_glm.py",
+    )
+
+
+@pytest.fixture(scope="session")
+def dwd_radolan_module(observation_module, base_module):
+    _ensure_stub_package(f"{PKG_NAME}.providers")
+    return _load_module(
+        f"{PKG_NAME}.providers.dwd_radolan",
+        PKG_ROOT / "providers" / "dwd_radolan.py",
+    )
+
+
+@pytest.fixture(scope="session")
 def open_meteo_module():
     """open_meteo.py heeft geen relatieve imports naar engine/observation."""
     _ensure_stub_package(f"{PKG_NAME}.providers")
@@ -261,4 +296,13 @@ def radar_policy_module():
     return _load_module(
         f"{PKG_NAME}.providers.radar_policy",
         PKG_ROOT / "providers" / "radar_policy.py",
+    )
+
+
+@pytest.fixture
+def radar_calibration_module():
+    """Laadt de passieve radar-autokalibratie zonder Home Assistant."""
+    return _load_module(
+        f"{PKG_NAME}.engine.radar_calibration",
+        PKG_ROOT / "engine" / "radar_calibration.py",
     )

@@ -56,7 +56,7 @@ def test_extract_observations_from_synthetic_tile(rainviewer_module):
     img = Image.new("RGBA", (256, 256), (0, 0, 0, 0))  # droog
     for x in range(100, 120):
         for y in range(100, 120):
-            img.putpixel((x, y), (200, 200, 200, 255))  # helder = nat/intens
+            img.putpixel((x, y), (182, 169, 126, 130))  # Universal Blue, 8 dBZ
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -67,6 +67,19 @@ def test_extract_observations_from_synthetic_tile(rainviewer_module):
     assert obs, "verwachtte minstens één RADAR-observatie uit het heldere blok"
     assert all(o.source == "rainviewer" for o in obs)
     assert all(o.intensity >= 1 for o in obs)
+    assert len(obs) >= 16
+
+
+def test_opaque_grey_pixels_do_not_count_as_rain(rainviewer_module):
+    assert rainviewer_module._universal_blue_intensity(200, 200, 200, 255) == 0
+
+
+def test_current_tile_url_contains_required_size_and_unsmoothed_palette(
+    rainviewer_module,
+):
+    assert rainviewer_module._tile_url("https://tiles/frame", 16, 10) == (
+        "https://tiles/frame/256/5/16/10/2/0_0.png"
+    )
 
 
 def test_extract_observations_all_dry_gives_empty_list(rainviewer_module):

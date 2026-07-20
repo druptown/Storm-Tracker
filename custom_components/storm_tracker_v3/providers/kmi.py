@@ -93,8 +93,11 @@ class KmiProvider:
         self._last_ww:   int              = 0
         self._last_ww_ts: str             = ""
         self._last_temp: Optional[float]  = None
+        self.last_frame_timestamp: Optional[float] = None
+        self.last_fetch_updated = False
 
     async def fetch_observations(self) -> list[Observation]:
+        self.last_fetch_updated = False
         try:
             # Stap 1: haal animatiesequentie op voor locatie
             url = (
@@ -138,6 +141,7 @@ class KmiProvider:
             if not uri or uri == self._last_uri:
                 return []
             self._last_uri = uri
+            self.last_frame_timestamp = datetime.fromisoformat(latest["time"]).timestamp()
 
             # Stap 3: volledig radarplaatje downloaden en parsen
             async with aiohttp.ClientSession(
@@ -149,10 +153,11 @@ class KmiProvider:
                         return []
                     image_data = await resp.read()
 
-            return self._extract_observations(
-                image_data,
-                datetime.fromisoformat(latest["time"]).timestamp()
+            observations = self._extract_observations(
+                image_data, self.last_frame_timestamp
             )
+            self.last_fetch_updated = True
+            return observations
 
         except Exception:
             _LOGGER.exception("KmiProvider: fout")

@@ -33,3 +33,14 @@ def test_open_meteo_gear_sensor_is_registered() -> None:
     assert "OpenMeteoGearSensor" in registered_classes
     assert "TargetPrecipitationStatusSensor" in registered_classes
     assert "StormMapGeoJsonSensor" in registered_classes
+
+
+def test_dynamic_region_sensors_listen_for_target_moves() -> None:
+    """Een secundair target mag niet stale blijven na een enginewissel."""
+    tree = ast.parse(SENSOR_MODULE.read_text(encoding="utf-8"))
+    classes = {
+        node.name: node for node in tree.body if isinstance(node, ast.ClassDef)
+    }
+    for class_name in ("FictieveTrackerSensor", "RegionEngineSensor"):
+        rendered = ast.unparse(classes[class_name])
+        assert "_targets_updated" in rendered
