@@ -128,6 +128,7 @@ class BlitzortungProvider:
 
     def stop(self) -> None:
         self._running = False
+        self._connected = False
         if self._task and not self._task.done():
             self._task.cancel()
         _LOGGER.info("BlitzortungProvider gestopt")

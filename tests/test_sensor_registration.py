@@ -44,3 +44,14 @@ def test_dynamic_region_sensors_listen_for_target_moves() -> None:
     for class_name in ("FictieveTrackerSensor", "RegionEngineSensor"):
         rendered = ast.unparse(classes[class_name])
         assert "_targets_updated" in rendered
+
+
+def test_target_status_distinguishes_lightning_only_from_dry() -> None:
+    tree = ast.parse(SENSOR_MODULE.read_text(encoding="utf-8"))
+    classes = {
+        node.name: node for node in tree.body if isinstance(node, ast.ClassDef)
+    }
+    rendered = ast.unparse(classes["TargetPrecipitationStatusSensor"])
+    assert "_lightning_only_summary" in rendered
+    assert "_lightning_update" in rendered
+    assert "_lightning_status_update" in rendered

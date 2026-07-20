@@ -1,9 +1,10 @@
 
 class Stv3MultiTargetMap extends HTMLElement {
   setConfig(config) {
-    this.config = { height: 560, zoom: 7, ...config };
+    this.config = { height: 560, zoom: 7, show_lightning: true, distance_rings: [50,100,150,250], ...config };
     if (!this.shadowRoot) this.attachShadow({mode:'open'});
     this._zoom = this.config.zoom;
+    this._showLightning = this.config.show_lightning !== false;
   }
   set hass(hass) {
     this._hass = hass;
@@ -44,9 +45,9 @@ class Stv3MultiTargetMap extends HTMLElement {
     this.shadowRoot.innerHTML =
       '<style>'+
       ':host{display:block} ha-card{overflow:hidden} .top{display:flex;gap:8px;align-items:center;padding:12px 14px;background:var(--ha-card-background,var(--card-background-color));flex-wrap:wrap}'+
-      '.title{font-weight:700;font-size:18px;flex:1;min-width:180px}.controls{display:flex;gap:6px;align-items:center} select,button{font:inherit;color:var(--primary-text-color);background:var(--secondary-background-color);border:1px solid var(--divider-color);border-radius:8px;padding:7px 9px}button{width:36px;font-weight:700;cursor:pointer}'+
+      '.title{font-weight:700;font-size:18px;flex:1;min-width:180px}.controls{display:flex;gap:6px;align-items:center} select,button{font:inherit;color:var(--primary-text-color);background:var(--secondary-background-color);border:1px solid var(--divider-color);border-radius:8px;padding:7px 9px}button{width:36px;font-weight:700;cursor:pointer}.lightning-toggle{width:auto;font-size:13px}.lightning-toggle.active{background:#5d4037;color:#fff;border-color:#ffca28}'+
       '.map{position:relative;overflow:hidden;background:#cfe7f5;height:'+Number(this.config.height)+'px}.tiles,.overlay{position:absolute;inset:0}.tiles img{position:absolute;width:256px;height:256px}.overlay{pointer-events:none}.legend{position:absolute;left:10px;bottom:10px;background:rgba(20,25,30,.82);color:#fff;border-radius:8px;padding:7px 10px;font-size:12px;line-height:1.6}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}.meta{padding:8px 14px;font-size:12px;color:var(--secondary-text-color)}.error{padding:18px;color:var(--error-color)}'+
-      '</style><ha-card><div class="top"><div class="title">Neerslag en targets</div><div class="controls"><select aria-label="Target"></select><button class="minus" title="Uitzoomen">-</button><button class="plus" title="Inzoomen">+</button></div></div><div class="map"><div class="tiles"></div><svg class="overlay"></svg><div class="legend"><span class="dot" style="background:#00e676"></span>target &nbsp; <span class="dot" style="background:#ff9800"></span>weersysteem<br><span class="dot" style="background:#2196f3"></span>radarcel &nbsp; <span class="dot" style="background:#ab47bc"></span>RegionEngine</div></div><div class="meta"></div></ha-card>';
+      '</style><ha-card><div class="top"><div class="title">Neerslag, bliksem en targets</div><div class="controls"><select aria-label="Target"></select><button class="lightning-toggle'+(this._showLightning?' active':'')+'" title="Bliksemlaag aan- of uitzetten">&#9889; bliksem</button><button class="minus" title="Uitzoomen">-</button><button class="plus" title="Inzoomen">+</button></div></div><div class="map"><div class="tiles"></div><svg class="overlay"></svg><div class="legend"><span class="dot" style="background:#00e676"></span>target &nbsp; <span class="dot" style="background:#ff9800"></span>weersysteem<br><span class="dot" style="background:#2196f3"></span>radarcel &nbsp; <span class="dot" style="background:#ab47bc"></span>RegionEngine<br><span style="display:inline-block;width:12px;border-top:1px dashed #455a64;vertical-align:middle"></span> afstandsringen<br><span style="color:#ffeb3b;font-size:15px">&#9889;</span> bliksem &lt;2 min &nbsp; <span style="color:#ff9800;font-size:15px">&#9889;</span> 2-5 min &nbsp; <span style="color:#9e9e9e;font-size:15px">&#9889;</span> ouder</div></div><div class="meta"></div></ha-card>';
     const select=this.shadowRoot.querySelector('select');
     for(const target of targets){
       const option=document.createElement('option');
@@ -56,6 +57,7 @@ class Stv3MultiTargetMap extends HTMLElement {
       select.appendChild(option);
     }
     select.addEventListener('change',e=>{this._selected=e.target.value;this._render();});
+    this.shadowRoot.querySelector('.lightning-toggle').addEventListener('click',()=>{this._showLightning=!this._showLightning;this._render();});
     this.shadowRoot.querySelector('.minus').addEventListener('click',()=>{this._zoom=Math.max(4,this._zoom-1);this._render();});
     this.shadowRoot.querySelector('.plus').addEventListener('click',()=>{this._zoom=Math.min(11,this._zoom+1);this._render();});
     requestAnimationFrame(()=>this._draw(selected));
@@ -79,13 +81,35 @@ class Stv3MultiTargetMap extends HTMLElement {
       if(f.properties.layer==='target') return f.properties.region_engine===selectedEngine;
       return f.properties.engine_id===selectedEngine;
     });
-    const ordered=[...visible].sort((a,b)=>({region:0,storm:1,radar_cell:2,motion:3,target:4}[a.properties.layer]-({region:0,storm:1,radar_cell:2,motion:3,target:4}[b.properties.layer])));
+    const filtered=visible.filter(f=>this._showLightning||f.properties.layer!=='lightning');
+    const order={region:0,storm:1,radar_cell:2,motion:3,lightning:4,target:5};
+    const ordered=[...filtered].sort((a,b)=>(order[a.properties.layer]??9)-(order[b.properties.layer]??9));
+    this._distanceRings(svg,selected,center,w,h);
     for(const f of ordered) if(f.properties.layer!=='target') this._feature(svg,f,center,w,h);
     this._targetGroups(svg,ordered.filter(f=>f.properties.layer==='target'),center,w,h);
     const visibleCells=ordered.filter(f=>f.properties.layer==='radar_cell').length;
+    const visibleLightning=ordered.filter(f=>f.properties.layer==='lightning').length;
     const source=selected.properties.radar_source||'geen';
     const reason=selected.properties.radar_source_reason||'nog niet geselecteerd';
-    this.shadowRoot.querySelector('.meta').textContent=(selected.properties.name||selected.properties.target_id)+' | '+(selectedEngine||'alle engines')+' | radar: '+source+' | '+reason+' | zoom '+this._zoom+' | '+ordered.length+' features | '+visibleCells+' radarcellen';
+    this.shadowRoot.querySelector('.meta').textContent=(selected.properties.name||selected.properties.target_id)+' | '+(selectedEngine||'alle engines')+' | radar: '+source+' | '+reason+' | zoom '+this._zoom+' | '+visibleCells+' radarcellen | '+visibleLightning+' bliksems (15 min)';
+  }
+  _distanceRings(svg,selected,center,w,h) {
+    const ns='http://www.w3.org/2000/svg';
+    const coord=selected.geometry.coordinates,origin=this._screen(coord,center,w,h);
+    const lat=Number(coord[1]);
+    const kmPerLonDegree=Math.max(1,111.32*Math.cos(lat*Math.PI/180));
+    const rings=Array.isArray(this.config.distance_rings)?this.config.distance_rings:[50,100,150,250];
+    for(const rawDistance of rings){
+      const distance=Number(rawDistance);
+      if(!Number.isFinite(distance)||distance<=0) continue;
+      const edge=this._screen([Number(coord[0])+distance/kmPerLonDegree,lat],center,w,h);
+      const radius=Math.abs(edge[0]-origin[0]);
+      const circle=document.createElementNS(ns,'circle');
+      circle.setAttribute('cx',origin[0]);circle.setAttribute('cy',origin[1]);circle.setAttribute('r',radius);
+      circle.setAttribute('fill','none');circle.setAttribute('stroke','#455a64');circle.setAttribute('stroke-width','1');circle.setAttribute('stroke-dasharray','5 4');circle.setAttribute('stroke-opacity','.72');svg.appendChild(circle);
+      const label=document.createElementNS(ns,'text');
+      label.setAttribute('x',origin[0]+4);label.setAttribute('y',origin[1]-radius+13);label.setAttribute('fill','#263238');label.setAttribute('stroke','#fff');label.setAttribute('stroke-width','3');label.setAttribute('paint-order','stroke');label.setAttribute('font-size','11');label.textContent=distance+' km';svg.appendChild(label);
+    }
   }
   _targetGroups(svg,targets,center,w,h) {
     const groups=new Map();
@@ -106,9 +130,16 @@ class Stv3MultiTargetMap extends HTMLElement {
   }
   _feature(svg,f,center,w,h) {
     const ns='http://www.w3.org/2000/svg',layer=f.properties.layer,type=f.geometry.type;
-    const color={target:'#00e676',region:'#ab47bc',storm:'#ff9800',radar_cell:'#2196f3',motion:'#ef5350'}[layer]||'#fff';
+    const age=Number(f.properties.age_seconds||0),lightningColor=age<120?'#ffeb3b':age<300?'#ff9800':'#9e9e9e';
+    const color={target:'#00e676',region:'#ab47bc',storm:'#ff9800',radar_cell:'#2196f3',motion:'#ef5350',lightning:lightningColor}[layer]||'#fff';
     if(type==='Point'){
-      const p=this._screen(f.geometry.coordinates,center,w,h),c=document.createElementNS(ns,'circle');
+      const p=this._screen(f.geometry.coordinates,center,w,h);
+      if(layer==='lightning'){
+        const bolt=document.createElementNS(ns,'path'),x=p[0],y=p[1];
+        bolt.setAttribute('d','M'+(x-2)+' '+(y-8)+' L'+(x+4)+' '+(y-8)+' L'+(x+1)+' '+(y-2)+' L'+(x+6)+' '+(y-2)+' L'+(x-4)+' '+(y+9)+' L'+(x-1)+' '+(y+1)+' L'+(x-6)+' '+(y+1)+' Z');bolt.setAttribute('fill',color);bolt.setAttribute('stroke','#5d4037');bolt.setAttribute('stroke-width','1');
+        const title=document.createElementNS(ns,'title');title.textContent=(f.properties.source||'bliksem')+' | '+Math.round(age/60)+' min oud';bolt.appendChild(title);svg.appendChild(bolt);return;
+      }
+      const c=document.createElementNS(ns,'circle');
       c.setAttribute('cx',p[0]);c.setAttribute('cy',p[1]);c.setAttribute('r',layer==='target'?(f.properties.target_id===this._selected?8:5):layer==='region'?7:4);
       c.setAttribute('fill',color);c.setAttribute('fill-opacity',layer==='region'?.75:.95);c.setAttribute('stroke','#fff');c.setAttribute('stroke-width','2');svg.appendChild(c);
       if(layer==='target'){

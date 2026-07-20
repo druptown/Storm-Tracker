@@ -28,6 +28,40 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 
+def test_boundary_ring_preserves_pixel_area_and_moves_with_cell(opera_module):
+    import numpy as np
+    from pyproj import Transformer
+
+    grid = opera_module.Grid(
+        projdef="EPSG:3857", xsize=100, ysize=100,
+        xscale=1000.0, yscale=1000.0,
+    )
+    inverse = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
+    pixels = np.asarray(((0, 0), (0, 1), (1, 0), (1, 1)), dtype=np.int32)
+    first = opera_module._boundary_ring(pixels, (10, 20, 10, 20), grid, inverse)
+    moved = opera_module._boundary_ring(pixels, (10, 20, 15, 25), grid, inverse)
+
+    assert len(first) == 9
+    assert first[0] == first[-1]
+    assert moved[0] == moved[-1]
+    assert min(lon for _, lon in moved) > max(lon for _, lon in first)
+
+
+def test_boundary_ring_rejects_ambiguous_diagonal_pixels(opera_module):
+    import numpy as np
+    from pyproj import Transformer
+
+    grid = opera_module.Grid(
+        projdef="EPSG:3857", xsize=100, ysize=100,
+        xscale=1000.0, yscale=1000.0,
+    )
+    inverse = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
+    pixels = np.asarray(((0, 0), (1, 1)), dtype=np.int32)
+    assert opera_module._boundary_ring(
+        pixels, (10, 20, 10, 20), grid, inverse
+    ) == ()
+
+
 # ── 1. Bbox-crop ──────────────────────────────────────────────────────────
 
 def test_crop_window_matches_full_grid(opera_module, opera_fixture_file):
@@ -107,7 +141,8 @@ def test_valid_storm_cell_detected_with_gain_offset_applied(opera_module, opera_
     storm_cells = [c for c in cells if abs(c.max_dbz - 35.0) < 0.5]
     assert storm_cells, f"verwachtte een cel met max_dbz~35.0, kreeg: {[c.max_dbz for c in cells]}"
     assert storm_cells[0].footprint_points
-    assert len(storm_cells[0].footprint_points) <= storm_cells[0].pixelcount
+    assert storm_cells[0].footprint_points[0] == storm_cells[0].footprint_points[-1]
+    assert len(storm_cells[0].footprint_points) <= 4 * storm_cells[0].pixelcount + 1
     assert timestamp == f"{meta['date']}T{meta['time']}Z"
 
 

@@ -1,5 +1,67 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.65
+
+- Kies radarbronnen per RegionEngine in vaste volgorde: operationele lokale
+  bron, gevalideerde OPERA-observaties en daarna RainViewer.
+- Laat afgekeurde ruwe OPERA-cellen de RainViewer-fallback niet langer
+  blokkeren; bronkeuze en diagnose gebruiken nu aanvaarde cellen per engine.
+- Gebruik dezelfde bronbeslissing voor routering, kaart en targetstatussen.
+- Meld `alleen_bliksem` wanneer actuele bliksem aanwezig is zonder een
+  bevestigde neerslagcel, in plaats van dit als `droog` weer te geven.
+- Normaliseer gelokaliseerde landnamen en landcodes voor deterministische
+  selectie van nationale providers.
+
+# 0.4.64
+
+- Bouw OPERA-celpolygonen uit de werkelijke buitenranden van de onderliggende
+  1 km-rasterpixels in plaats van grof bemonsterde footprint-punten.
+- Valideer de polygonoppervlakte tegen het aantal bronpixels en val bij
+  ambigue of meervoudige topologie veilig terug op een punt.
+- Vernieuw vorm en geografische positie bij ieder radarframe, zodat groei,
+  krimp en verplaatsing op de kaart de waarnemingen volgen.
+
+# 0.4.63
+
+- Schakel een RegionEngine gericht naar RainViewer wanneer de lokale OPERA-
+  uitsnede nul echo's bevat maar RainViewer binnen dezelfde radius actuele
+  neerslag waarneemt.
+- Bewaar aantallen radarobservaties per engine en gebruik die als operationeel
+  dekkingsbewijs, zonder werkelijk droge OPERA-regio's onnodig te vervangen.
+
+# 0.4.62
+
+- Maak OPERA- en RainViewer-verwerking werkelijk geografisch onafhankelijk per
+  actieve RegionEngine, zodat verre Life360- en testtargets tegelijk radardata
+  krijgen.
+- Deel de grote OPERA-downloadcache tussen de regionale uitsneden en ruim
+  providers van verdwenen engines automatisch op.
+- Bepaal providergezondheid, bronkeuze, diagnose en `radar_covered` per engine
+  in plaats van vanuit de Belgische thuisprovider.
+
+# 0.4.61
+
+- Pas wijzigingen van de bliksembronmodus live toe via de Options Flow, zonder
+  Home Assistant opnieuw te starten.
+- Stop de Blitzortung MQTT-provider daadwerkelijk in `satellite_test` en start
+  EUMETSAT LI/GOES GLM onmiddellijk voor diagnostische verificatie.
+- Start Blitzortung en zet satellietproviders terug in stand-by wanneer opnieuw
+  naar `auto` wordt geschakeld.
+
+# 0.4.60
+
+- Publiceer per WeatherSystem gestructureerde MCS-diagnostiek met afzonderlijke
+  vorm-, intensiteits-, duur- en continuïteitscriteria.
+- Log en publiceer iedere MCS-statusovergang via
+  `storm_tracker_v3_mcs_transition`, inclusief de reden voor bevestiging of
+  afwijzing en de gemeten waarden.
+- Evalueer MCS-systemen over alle dynamische RegionEngines in plaats van alleen
+  de actieve legacy-engine.
+- Bewaar maximaal vijftien minuten aan recente Blitzortung-, EUMETSAT LI- en
+  GOES GLM-observaties in een compacte, afzonderlijke GeoJSON-laag.
+- Toon bliksem als schakelbare sterrenlaag met ouderdomskleuren en brontooltip,
+  visueel gescheiden van neerslagcellen en WeatherSystem-polygonen.
+
 # 0.4.59
 
 - Selecteer de operationele radarbron afzonderlijk per dynamische RegionEngine.

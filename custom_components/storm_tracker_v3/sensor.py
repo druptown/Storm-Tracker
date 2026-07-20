@@ -19,6 +19,8 @@ Sensoren:
 from __future__ import annotations
 
 import logging
+import math
+import time
 from datetime import datetime, timezone
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
@@ -30,6 +32,37 @@ from .engine.nowcast import build_precipitation_status
 from .engine.geojson import build_feature_collection
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _lightning_only_summary(data, engine_id, target_lat, target_lon):
+    """Vat recente bliksem samen wanneer geen neerslagsysteem beschikbaar is."""
+    cutoff = time.time() - 15 * 60
+    events = [
+        item for item in data.get("recent_lightning", [])
+        if float(item.get("timestamp", 0)) >= cutoff
+        and engine_id in item.get("engine_ids", [])
+    ]
+    if not events:
+        return None
+
+    def distance(item):
+        lat1, lon1 = math.radians(target_lat), math.radians(target_lon)
+        lat2, lon2 = math.radians(float(item["lat"])), math.radians(float(item["lon"]))
+        dlat, dlon = lat2 - lat1, lon2 - lon1
+        value = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+        return 6371.0088 * 2 * math.atan2(math.sqrt(value), math.sqrt(1 - value))
+
+    closest = min(events, key=distance)
+    return {
+        "status": "alleen_bliksem",
+        "selected_reason": "lightning_only",
+        "tracking_status": "alleen_bliksem",
+        "distance_km": round(distance(closest), 1),
+        "impact_lat": round(float(closest["lat"]), 4),
+        "impact_lon": round(float(closest["lon"]), 4),
+        "lightning_events_15m": len(events),
+        "last_lightning_source": closest.get("source"),
+    }
 
 
 def _timestamp_iso(value):
@@ -669,18 +702,35 @@ class PrecipitationStatusSensor(StormTrackerBaseSensor):
             f"{DOMAIN}_storms_updated",
             f"{DOMAIN}_radar_source_update",
             f"{DOMAIN}_netatmo_update",
+            f"{DOMAIN}_lightning_update",
+            f"{DOMAIN}_lightning_status_update",
         ]
 
     def _summary(self):
         data = self.hass.data.get(DOMAIN, {})
+        home_target = data.get("targets", {}).get("home", {})
+        engine_id = home_target.get("region_engine_id")
+        radar_source = (
+            (data.get("radar_sources_by_engine", {}).get(engine_id) or {}).get("source")
+            if engine_id else data.get("active_radar_source")
+        )
         result = build_precipitation_status(
             data.get("storms", []),
             data.get("fictieve_lat", 0.0),
             data.get("fictieve_lon", 0.0),
-            radar_source=data.get("active_radar_source"),
+            radar_source=radar_source,
             pressure_trend=data.get("netatmo_pressure_trend"),
         )
-        target = data.get("targets", {}).get("home", {})
+        if result.get("status") == "droog" and engine_id:
+            lightning = _lightning_only_summary(
+                data,
+                engine_id,
+                float(home_target.get("latitude", data.get("fictieve_lat", 0.0))),
+                float(home_target.get("longitude", data.get("fictieve_lon", 0.0))),
+            )
+            if lightning is not None:
+                result.update(lightning)
+        target = home_target
         return {
             **result,
             "location_place": target.get("location_place", "Thuis"),
@@ -719,6 +769,8 @@ class TargetPrecipitationStatusSensor(StormTrackerBaseSensor):
             f"{DOMAIN}_radar_source_update",
             f"{DOMAIN}_storms_updated",
             f"{DOMAIN}_netatmo_update",
+            f"{DOMAIN}_lightning_update",
+            f"{DOMAIN}_lightning_status_update",
         ]
 
     def _target_data(self):
@@ -732,15 +784,28 @@ class TargetPrecipitationStatusSensor(StormTrackerBaseSensor):
         manager = domain_data.get("storm_manager")
         region = manager.get_engine_for_target(self._spec.entity_id) if manager else None
         storms = region.storm_engine.get_active_storms() if region else []
+        radar_source = (
+            (domain_data.get("radar_sources_by_engine", {}).get(region.engine_id) or {}).get("source")
+            if region else domain_data.get("active_radar_source")
+        )
         result = build_precipitation_status(
             storms,
             target.get("latitude", 0.0),
             target.get("longitude", 0.0),
-            radar_source=domain_data.get("active_radar_source"),
+            radar_source=radar_source,
             pressure_trend=domain_data.get("netatmo_pressure_trend"),
         )
         if not target.get("radar_covered", False):
             result["status"] = "onvoldoende_data"
+        elif result.get("status") == "droog" and region is not None:
+            lightning = _lightning_only_summary(
+                domain_data,
+                region.engine_id,
+                float(target.get("latitude", 0.0)),
+                float(target.get("longitude", 0.0)),
+            )
+            if lightning is not None:
+                result.update(lightning)
         return {
             **result,
             "target_id": self._spec.target_id,
@@ -946,42 +1011,56 @@ class McsDetectieSensor(StormTrackerBaseSensor):
 
     @property
     def _listen_events(self):
-        return [f"{DOMAIN}_storms_updated"]
+        return [f"{DOMAIN}_storms_updated", f"{DOMAIN}_mcs_transition"]
+
+    def _storms(self):
+        manager = self.hass.data.get(DOMAIN, {}).get("storm_manager")
+        if not manager:
+            return [
+                (None, storm)
+                for storm in self.hass.data.get(DOMAIN, {}).get("storms", [])
+            ]
+        return [
+            (engine.engine_id, storm)
+            for engine in manager.get_all_engines()
+            for storm in engine.storm_engine.get_storms()
+        ]
 
     @property
     def native_value(self):
-        storms = self.hass.data.get(DOMAIN, {}).get("storms", [])
+        storms = self._storms()
         return sum(
-            1 for storm in storms
+            1 for _, storm in storms
             if getattr(storm, "mcs_status", None) == "confirmed"
         )
 
     @property
     def extra_state_attributes(self):
-        storms = self.hass.data.get(DOMAIN, {}).get("storms", [])
+        storms = self._storms()
         relevant = [
-            storm for storm in storms
+            (engine_id, storm) for engine_id, storm in storms
             if getattr(storm, "mcs_status", None) in {"candidate", "confirmed"}
         ]
         return {
             "kandidaten": sum(
-                1 for storm in relevant if storm.mcs_status == "candidate"
+                1 for _, storm in relevant if storm.mcs_status == "candidate"
             ),
             "bevestigd": sum(
-                1 for storm in relevant if storm.mcs_status == "confirmed"
+                1 for _, storm in relevant if storm.mcs_status == "confirmed"
             ),
             "systemen": [
                 {
-                    "id": storm.storm_id,
-                    "status": storm.mcs_status,
-                    "duur_min": storm.mcs_duration_minutes,
-                    "convectieve_span_km": storm.mcs_convective_span_km,
-                    "neerslag_span_km": storm.mcs_precipitation_span_km,
-                    "convectieve_cellen": storm.mcs_convective_cells,
-                    "intense_cellen": storm.mcs_intense_cells,
-                    "oppervlakte_km2": storm.mcs_parent_area_km2,
+                    "region_engine": engine_id,
+                    **storm.mcs_diagnostics(),
                 }
-                for storm in relevant
+                for engine_id, storm in relevant
+            ],
+            "evaluaties": [
+                {
+                    "region_engine": engine_id,
+                    **storm.mcs_diagnostics(),
+                }
+                for engine_id, storm in storms[:25]
             ],
             "criteria": {
                 "min_convectieve_span_km": 100,
@@ -1053,6 +1132,7 @@ class StormMapGeoJsonSensor(StormTrackerBaseSensor):
             f"{DOMAIN}_targets_updated",
             f"{DOMAIN}_fictieve_update",
             f"{DOMAIN}_radar_source_update",
+            f"{DOMAIN}_lightning_update",
         ]
 
     def _collection(self):
@@ -1063,6 +1143,7 @@ class StormMapGeoJsonSensor(StormTrackerBaseSensor):
             manager.get_all_engines() if manager else [],
             active_radar_source=data.get("active_radar_source"),
             radar_sources_by_engine=data.get("radar_sources_by_engine"),
+            lightning_events=data.get("recent_lightning"),
         )
 
     @property

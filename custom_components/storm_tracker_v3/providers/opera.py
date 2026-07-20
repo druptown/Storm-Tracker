@@ -69,7 +69,6 @@ MIN_QUALITY  = 0.0
 MIN_PIXELS   = 5
 CONNECTIVITY = 8
 MAX_DIAGNOSTIC_CELLS = 40
-FOOTPRINT_SAMPLE_SIZE_M = 8_000.0
 MAX_UNSPLIT_CELL_PIXELS = 3_000
 SPLIT_CORE_THRESHOLDS_DBZ = (12.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0)
 SPLIT_GROWTH_PIXELS = 5
@@ -315,6 +314,69 @@ def _segment_components(mask, radar, min_pixels: int) -> list:
     ]
 
 
+def _boundary_ring(pixels, window, grid, inverse) -> tuple[tuple[float, float], ...]:
+    """Bouw een gevalideerde buitenrand uit de echte OPERA-rasterpixels."""
+    row0, _, col0, _ = window
+    edges = set()
+    for local_row, local_col in pixels:
+        row, col = int(local_row), int(local_col)
+        for edge in (
+            ((row, col), (row, col + 1)),
+            ((row, col + 1), (row + 1, col + 1)),
+            ((row + 1, col + 1), (row + 1, col)),
+            ((row + 1, col), (row, col)),
+        ):
+            reverse = (edge[1], edge[0])
+            if reverse in edges:
+                edges.remove(reverse)
+            else:
+                edges.add(edge)
+    if not edges:
+        return ()
+
+    unused = set(edges)
+    loops = []
+    while unused:
+        first = min(unused)
+        unused.remove(first)
+        ring = [first[0], first[1]]
+        while ring[-1] != ring[0]:
+            candidates = sorted(edge for edge in unused if edge[0] == ring[-1])
+            if not candidates:
+                ring = []
+                break
+            edge = candidates[0]
+            unused.remove(edge)
+            ring.append(edge[1])
+            if len(ring) > len(edges) + 1:
+                ring = []
+                break
+        if len(ring) >= 4:
+            loops.append(ring)
+    if len(loops) != 1:
+        return ()
+
+    ring = loops[0]
+    projected = [
+        ((col0 + col) * grid.xscale, -(row0 + row) * grid.yscale)
+        for row, col in ring
+    ]
+    area = abs(sum(
+        x1 * y2 - x2 * y1
+        for (x1, y1), (x2, y2) in zip(projected, projected[1:])
+    )) / 2.0
+    expected = len(pixels) * grid.xscale * grid.yscale
+    if expected <= 0 or not 0.98 <= area / expected <= 1.02:
+        return ()
+
+    xs, ys = zip(*projected)
+    lons, lats = inverse.transform(xs, ys)
+    return tuple(
+        (round(float(lat), 5), round(float(lon), 5))
+        for lat, lon in zip(lats, lons)
+    )
+
+
 def _analyze_components(
     components, radar, quality, window, grid, component_metadata=None
 ) -> list[OperaCell]:
@@ -340,25 +402,7 @@ def _analyze_components(
 
         # Kies één echte celpixel per ongeveer 8x8 km rasterblok. Dit volgt
         # ook onregelmatige cellen veel beter dan een centroid of bounding box.
-        row_block = max(1, int(round(FOOTPRINT_SAMPLE_SIZE_M / grid.yscale)))
-        col_block = max(1, int(round(FOOTPRINT_SAMPLE_SIZE_M / grid.xscale)))
-        absolute_rows = row0 + rows
-        absolute_cols = col0 + cols
-        bucket_cols = max(1, math.ceil(grid.xsize / col_block))
-        bucket_keys = (
-            (absolute_rows // row_block) * bucket_cols
-            + (absolute_cols // col_block)
-        )
-        _, sample_indices = np.unique(bucket_keys, return_index=True)
-        sample_rows = absolute_rows[sample_indices].astype(float)
-        sample_cols = absolute_cols[sample_indices].astype(float)
-        sample_x = (sample_cols + 0.5) * grid.xscale
-        sample_y = -(sample_rows + 0.5) * grid.yscale
-        sample_lons, sample_lats = inverse.transform(sample_x, sample_y)
-        footprint_points = tuple(
-            (round(float(sample_lat), 5), round(float(sample_lon), 5))
-            for sample_lat, sample_lon in zip(sample_lats, sample_lons)
-        )
+        footprint_points = _boundary_ring(pixels, window, grid, inverse)
 
         metadata = (
             component_metadata[component_index]

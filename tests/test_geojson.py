@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import time
 
 
 def _storm(
@@ -208,3 +209,53 @@ def test_unordered_radar_footprint_is_published_as_convex_ring(geojson_module):
     assert len(ring) == 5
     assert [4.0, 51.0] not in ring
     assert ring[0] == ring[-1]
+
+
+def test_lightning_is_a_separate_recent_point_layer(geojson_module):
+    now = time.time()
+    result = geojson_module.build_feature_collection(
+        {}, [_region(_storm())],
+        lightning_events=[{
+            "lat": 51.05,
+            "lon": 4.05,
+            "timestamp": now - 90,
+            "source": "eumetsat_li",
+            "engine_ids": ["region-1"],
+        }],
+    )
+
+    lightning = next(
+        feature for feature in result["features"]
+        if feature["properties"]["layer"] == "lightning"
+    )
+    assert lightning["geometry"] == {
+        "type": "Point", "coordinates": [4.05, 51.05]
+    }
+    assert lightning["properties"]["source"] == "eumetsat_li"
+    assert lightning["properties"]["engine_id"] == "region-1"
+    assert 80 <= lightning["properties"]["age_seconds"] <= 100
+    assert result["metadata"]["lightning_events_included"] == 1
+
+
+def test_old_or_unrelated_lightning_is_not_published(geojson_module):
+    now = time.time()
+    result = geojson_module.build_feature_collection(
+        {}, [_region(_storm())],
+        lightning_events=[
+            {
+                "lat": 51.0, "lon": 4.0,
+                "timestamp": now - geojson_module.LIGHTNING_MAX_AGE_S - 1,
+                "source": "blitzortung", "engine_ids": ["region-1"],
+            },
+            {
+                "lat": 51.0, "lon": 4.0, "timestamp": now,
+                "source": "blitzortung", "engine_ids": ["removed-region"],
+            },
+        ],
+    )
+
+    assert not any(
+        feature["properties"]["layer"] == "lightning"
+        for feature in result["features"]
+    )
+    assert result["metadata"]["lightning_events_included"] == 0

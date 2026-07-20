@@ -56,3 +56,71 @@ def test_spain_prefers_aemet(engine_radar_policy_module):
         now=1_000.0,
     )
     assert decision.source == "aemet_radar"
+
+
+def test_localized_country_name_still_prefers_local_radar(engine_radar_policy_module):
+    module = engine_radar_policy_module
+    decision = module.select_engine_radar_source(
+        {"BELGIE"},
+        {"kmi": _state(module), "opera": _state(module)},
+        now=1_000.0,
+    )
+    assert decision.source == "kmi"
+    assert decision.country_codes == ("BE",)
+
+
+def test_luxembourg_prefers_meteolux(engine_radar_policy_module):
+    module = engine_radar_policy_module
+    decision = module.select_engine_radar_source(
+        {"LUXEMBURG"},
+        {"meteolux": _state(module), "opera": _state(module)},
+        now=1_000.0,
+    )
+    assert decision.source == "meteolux"
+
+
+def test_empty_local_opera_uses_rainviewer_echo(engine_radar_policy_module):
+    module = engine_radar_policy_module
+    states = {
+        "opera": _state(module),
+        "rainviewer": _state(module, last_success=950.0),
+    }
+    decision = module.select_engine_radar_source({"GR"}, states, now=1_000.0)
+    decision = module.apply_echo_availability(
+        decision,
+        states,
+        opera_observations=0,
+        rainviewer_observations=12,
+        now=1_000.0,
+    )
+    assert decision.source == "rainviewer"
+    assert decision.age_seconds == 50.0
+    assert "OPERA zonder lokale echo" in decision.reason
+
+
+def test_dry_region_keeps_opera_when_both_sources_are_empty(engine_radar_policy_module):
+    module = engine_radar_policy_module
+    states = {"opera": _state(module), "rainviewer": _state(module)}
+    decision = module.select_engine_radar_source({"GR"}, states, now=1_000.0)
+    decision = module.apply_echo_availability(
+        decision,
+        states,
+        opera_observations=0,
+        rainviewer_observations=0,
+        now=1_000.0,
+    )
+    assert decision.source == "opera"
+
+
+def test_opera_echo_remains_preferred(engine_radar_policy_module):
+    module = engine_radar_policy_module
+    states = {"opera": _state(module), "rainviewer": _state(module)}
+    decision = module.select_engine_radar_source({"GR"}, states, now=1_000.0)
+    decision = module.apply_echo_availability(
+        decision,
+        states,
+        opera_observations=2,
+        rainviewer_observations=12,
+        now=1_000.0,
+    )
+    assert decision.source == "opera"

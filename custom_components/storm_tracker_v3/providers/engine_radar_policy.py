@@ -11,6 +11,19 @@ LOCAL_RADAR_BY_COUNTRY = {
     "GB": "met_office_radar",
     "IT": "dpc_radar",
     "ES": "aemet_radar",
+    "LU": "meteolux",
+}
+
+COUNTRY_CODE_ALIASES = {
+    "BELGIE": "BE", "BELGIUM": "BE",
+    "NEDERLAND": "NL", "NETHERLANDS": "NL",
+    "DUITSLAND": "DE", "GERMANY": "DE",
+    "FRANKRIJK": "FR", "FRANCE": "FR",
+    "GROOT-BRITTANNIE": "GB", "UNITED KINGDOM": "GB",
+    "ITALIE": "IT", "ITALY": "IT",
+    "SPANJE": "ES", "SPAIN": "ES",
+    "LUXEMBURG": "LU", "LUXEMBOURG": "LU",
+    "GRIEKENLAND": "GR", "GREECE": "GR",
 }
 
 
@@ -32,7 +45,10 @@ class EngineRadarDecision:
 def select_engine_radar_source(
     country_codes, states: dict[str, SourceState], *, now: float
 ) -> EngineRadarDecision:
-    countries = tuple(sorted({str(code).upper() for code in country_codes if code}))
+    countries = tuple(sorted({
+        COUNTRY_CODE_ALIASES.get(str(code).upper(), str(code).upper())
+        for code in country_codes if code
+    }))
     local_sources = {LOCAL_RADAR_BY_COUNTRY[code] for code in countries if code in LOCAL_RADAR_BY_COUNTRY}
     if len(local_sources) == 1:
         source = next(iter(local_sources))
@@ -55,3 +71,33 @@ def select_engine_radar_source(
         age = now - rainviewer.last_success if rainviewer.last_success is not None else None
         return EngineRadarDecision("rainviewer", f"{local_reason}; OPERA niet beschikbaar", countries, age)
     return EngineRadarDecision(None, f"{local_reason}; geen gezonde fallback", countries, None)
+
+
+def apply_echo_availability(
+    decision: EngineRadarDecision,
+    states: dict[str, SourceState],
+    *,
+    opera_observations: int,
+    rainviewer_observations: int,
+    now: float,
+) -> EngineRadarDecision:
+    """Gebruik RainViewer wanneer OPERA lokaal leeg is maar radarregen bestaat."""
+    rainviewer = states.get("rainviewer", SourceState(False, False))
+    if (
+        decision.source == "opera"
+        and opera_observations == 0
+        and rainviewer_observations > 0
+        and rainviewer.configured
+        and rainviewer.healthy
+    ):
+        age = (
+            now - rainviewer.last_success
+            if rainviewer.last_success is not None else None
+        )
+        return EngineRadarDecision(
+            "rainviewer",
+            "OPERA zonder lokale echo; RainViewer toont neerslag",
+            decision.country_codes,
+            age,
+        )
+    return decision

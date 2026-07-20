@@ -201,6 +201,15 @@ def test_single_mcs_shaped_frame_is_only_candidate(
     assert storm.mcs_duration_minutes == 0.0
     assert storm.mcs_convective_span_km >= 100.0
     assert storm.mcs_intense_cells == 1
+    diagnostics = storm.mcs_diagnostics()
+    assert diagnostics["reason"] == "duration_pending"
+    assert diagnostics["sequence_frames"] == 1
+    assert diagnostics["checks"] == {
+        "convective_cells": True,
+        "convective_span": True,
+        "intense_cells": True,
+        "duration": False,
+    }
 
 
 def test_three_hours_of_qualifying_frames_confirms_mcs(
@@ -221,6 +230,10 @@ def test_three_hours_of_qualifying_frames_confirms_mcs(
     assert storm.mcs_status == "confirmed"
     assert storm.system_type == "mcs"
     assert storm.mcs_duration_minutes == pytest.approx(180.0)
+    diagnostics = storm.mcs_diagnostics()
+    assert diagnostics["reason"] == "duration_confirmed"
+    assert diagnostics["sequence_frames"] == 37
+    assert all(diagnostics["checks"].values())
 
 
 def test_mcs_history_survives_engine_restart(
@@ -318,6 +331,10 @@ def test_large_rain_area_without_intense_convection_is_not_mcs(
     assert storm.mcs_status == "not_mcs"
     assert storm.system_type == "convective_cluster"
     assert storm.mcs_parent_area_km2 == 46_627.0
+    diagnostics = storm.mcs_diagnostics()
+    assert diagnostics["reason"] == "no_intense_cell"
+    assert diagnostics["checks"]["intense_cells"] is False
+    assert diagnostics["thresholds"]["min_intense_cells"] == 1
 
 
 # ── RAIN: verifieert, creëert NOOIT een nieuwe storm ────────────────────────

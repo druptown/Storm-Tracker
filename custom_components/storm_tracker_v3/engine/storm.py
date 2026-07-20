@@ -164,6 +164,9 @@ class Storm:
     mcs_convective_cells: int = 0
     mcs_intense_cells: int = 0
     mcs_parent_area_km2: float = 0.0
+    mcs_sequence_frames: int = 0
+    mcs_latest_frame_timestamp: Optional[float] = None
+    mcs_evaluation_reason: str = "no_radar_history"
 
     # Netatmo-verificatie
     # Tellers worden per poll-cyclus bijgehouden; de Coordinator kan
@@ -371,6 +374,11 @@ class Storm:
         if not self.radar_system_frames:
             self.system_type = "unknown"
             self.mcs_status = "not_evaluated"
+            self.mcs_candidate_since = None
+            self.mcs_duration_minutes = 0.0
+            self.mcs_sequence_frames = 0
+            self.mcs_latest_frame_timestamp = None
+            self.mcs_evaluation_reason = "no_radar_history"
             return
 
         # Eén storm kan door merge meerdere parents op hetzelfde tijdstip
@@ -399,15 +407,25 @@ class Storm:
         self.mcs_convective_cells = latest.convective_cell_count
         self.mcs_intense_cells = latest.intense_cell_count
         self.mcs_parent_area_km2 = latest.area_km2
+        self.mcs_latest_frame_timestamp = latest.timestamp
 
         if not latest.meets_mcs_shape:
             self.mcs_candidate_since = None
             self.mcs_duration_minutes = 0.0
+            self.mcs_sequence_frames = 0
             self.mcs_status = "not_mcs"
             self.system_type = (
                 "convective_cluster"
                 if latest.convective_cell_count else "rain_area"
             )
+            failed = []
+            if latest.convective_cell_count < MCS_MIN_CONVECTIVE_CELLS:
+                failed.append("insufficient_convective_cells")
+            if latest.convective_span_km < MCS_MIN_SPAN_KM:
+                failed.append("insufficient_convective_span")
+            if latest.intense_cell_count < 1:
+                failed.append("no_intense_cell")
+            self.mcs_evaluation_reason = ",".join(failed) or "shape_rejected"
             return
 
         sequence = [latest]
@@ -423,12 +441,49 @@ class Storm:
         duration = max(0.0, (latest.timestamp - first.timestamp) / 60.0)
         self.mcs_candidate_since = first.timestamp
         self.mcs_duration_minutes = round(duration, 1)
+        self.mcs_sequence_frames = len(sequence)
         if duration >= MCS_MIN_DURATION_MINUTES:
             self.mcs_status = "confirmed"
             self.system_type = "mcs"
+            self.mcs_evaluation_reason = "duration_confirmed"
         else:
             self.mcs_status = "candidate"
             self.system_type = "mcs_candidate"
+            self.mcs_evaluation_reason = "duration_pending"
+
+    def mcs_diagnostics(self) -> dict:
+        """Geef een JSON-veilige verklaring van de laatste MCS-evaluatie."""
+        checks = {
+            "convective_cells": self.mcs_convective_cells >= MCS_MIN_CONVECTIVE_CELLS,
+            "convective_span": self.mcs_convective_span_km >= MCS_MIN_SPAN_KM,
+            "intense_cells": self.mcs_intense_cells >= 1,
+            "duration": self.mcs_duration_minutes >= MCS_MIN_DURATION_MINUTES,
+        }
+        return {
+            "storm_id": self.storm_id,
+            "status": self.mcs_status,
+            "system_type": self.system_type,
+            "reason": self.mcs_evaluation_reason,
+            "candidate_since": self.mcs_candidate_since,
+            "latest_frame_timestamp": self.mcs_latest_frame_timestamp,
+            "duration_minutes": self.mcs_duration_minutes,
+            "sequence_frames": self.mcs_sequence_frames,
+            "convective_span_km": self.mcs_convective_span_km,
+            "precipitation_span_km": self.mcs_precipitation_span_km,
+            "convective_cells": self.mcs_convective_cells,
+            "intense_cells": self.mcs_intense_cells,
+            "parent_area_km2": self.mcs_parent_area_km2,
+            "checks": checks,
+            "thresholds": {
+                "convective_dbz": MCS_CONVECTIVE_DBZ,
+                "intense_dbz": MCS_INTENSE_DBZ,
+                "min_convective_cells": MCS_MIN_CONVECTIVE_CELLS,
+                "min_convective_span_km": MCS_MIN_SPAN_KM,
+                "min_intense_cells": 1,
+                "min_duration_minutes": MCS_MIN_DURATION_MINUTES,
+                "max_frame_gap_minutes": MCS_MAX_FRAME_GAP_MINUTES,
+            },
+        }
 
     @property
     def radar_frame_timestamps(self) -> tuple[float, ...]:

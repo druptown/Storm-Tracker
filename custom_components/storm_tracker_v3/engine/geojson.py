@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import math
+import time
 
 from ..geometry.hull import convex_hull
 
 MAX_HULL_POINTS = 48
 MAX_RADAR_CELLS = 150
+MAX_LIGHTNING_EVENTS = 300
+LIGHTNING_MAX_AGE_S = 15 * 60
 CURRENT_FRAME_TOLERANCE_S = 60.0
 MIN_MOTION_SAMPLES = 4
 MIN_MOTION_HISTORY_MINUTES = 10.0
@@ -89,6 +92,7 @@ def _storm_has_reliable_motion(storm) -> bool:
 def build_feature_collection(
     targets: dict, regions: list, active_radar_source: str | None = None,
     radar_sources_by_engine: dict | None = None,
+    lightning_events: list | None = None,
 ) -> dict:
     """Publiceer targets, regio's, systemen, hulls, cellen en vectoren compact."""
     features = []
@@ -97,6 +101,7 @@ def build_feature_collection(
     historical_radar_cells_excluded = 0
 
     radar_sources_by_engine = radar_sources_by_engine or {}
+    lightning_events = lightning_events or []
     latest_by_region = {}
     for region in regions:
         region_source = (radar_sources_by_engine.get(region.engine_id) or {}).get("source", active_radar_source)
@@ -219,7 +224,8 @@ def build_feature_collection(
                 # OPERA-footprints zijn puntwolken/scanlijnen, geen gegarandeerd
                 # geordende polygonring. Eerst hullen voorkomt zigzagdiagonalen.
                 cell_ring = _sample_ring(
-                    cell.footprint_points, order_as_hull=True
+                    cell.footprint_points,
+                    order_as_hull=_cell_source(cell) != "opera",
                 )
                 cell_geometry = (
                     {"type": "Polygon", "coordinates": [cell_ring]}
@@ -238,6 +244,35 @@ def build_feature_collection(
                 ))
                 radar_cells_written += 1
 
+    lightning_written = 0
+    lightning_cutoff = time.time() - LIGHTNING_MAX_AGE_S
+    valid_engine_ids = {region.engine_id for region in regions}
+    recent_lightning = sorted(
+        (
+            item for item in lightning_events
+            if float(item.get("timestamp", 0)) >= lightning_cutoff
+        ),
+        key=lambda item: float(item.get("timestamp", 0)),
+        reverse=True,
+    )[:MAX_LIGHTNING_EVENTS]
+    for index, event in enumerate(recent_lightning):
+        engine_ids = [
+            engine_id for engine_id in event.get("engine_ids", [])
+            if engine_id in valid_engine_ids
+        ]
+        for engine_id in engine_ids:
+            timestamp = float(event["timestamp"])
+            features.append(_feature(
+                f"lightning:{engine_id}:{timestamp:.3f}:{index}",
+                {"type": "Point", "coordinates": _point(event["lon"], event["lat"])},
+                layer="lightning",
+                engine_id=engine_id,
+                source=event.get("source", "unknown"),
+                timestamp=timestamp,
+                age_seconds=max(0, round(time.time() - timestamp)),
+            ))
+            lightning_written += 1
+
     return {
         "type": "FeatureCollection",
         "features": features,
@@ -248,5 +283,7 @@ def build_feature_collection(
             "radar_cells_included": radar_cells_written,
             "truncated": radar_cells_written < radar_cells_total,
             "historical_radar_cells_excluded": historical_radar_cells_excluded,
+            "lightning_events_included": lightning_written,
+            "lightning_max_age_minutes": LIGHTNING_MAX_AGE_S // 60,
         },
     }
