@@ -336,6 +336,8 @@ async def _async_setup_runtime(
     from .providers.dwd_radolan import DwdRadolanProvider
     from .providers.met_office_radar import MetOfficeRadarProvider
     from .providers.meteolux import MeteoLuxProvider
+    from .providers.geosphere_at import GeoSphereAustriaProvider
+    from .providers.italiameteo import ItaliaMeteoRadarProvider
     from .providers.lifecycle import ProviderLifecycleController
 
     provider_lifecycle = ProviderLifecycleController(cooldown_seconds=300)
@@ -350,6 +352,8 @@ async def _async_setup_runtime(
     provider_lifecycle.register(DwdRadolanProvider(http_session), _national_context)
     provider_lifecycle.register(MetOfficeRadarProvider(http_session), _national_context)
     provider_lifecycle.register(MeteoLuxProvider(http_session), _national_context)
+    provider_lifecycle.register(GeoSphereAustriaProvider(http_session), _national_context)
+    provider_lifecycle.register(ItaliaMeteoRadarProvider(http_session), _national_context)
     if conf.get("meteofrance_api_token"):
         from .providers.meteofrance_radar import MeteoFranceRadarProvider
         provider_lifecycle.register(
@@ -1010,5 +1014,5 @@ async def _async_setup_runtime(
         hass.async_create_task(_poll_eumetsat_li())
         hass.async_create_task(_poll_goes_glm())
 
-    _LOGGER.info("Storm Tracker V3 v0.4.56 gestart met slapende radarproviders voor buurlanden")
+    _LOGGER.info("Storm Tracker V3 v0.4.57 gestart met GeoSphere en ItaliaMeteo")
     return True

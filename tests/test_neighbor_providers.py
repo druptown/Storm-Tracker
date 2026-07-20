@@ -29,3 +29,35 @@ def test_policy_uses_real_neighbor_provider_ids():
     assert "meteofrance_radar" in policy["countries"]["FR"]["radar"]
     assert "met_office_radar" in policy["countries"]["GB"]["radar"]
     assert "meteolux" in policy["countries"]["LU"]["ground_validation"]
+
+
+def test_austria_nowcast_summary(geosphere_at_module):
+    payload = {"reference_time": "2026-07-20T17:15+00:00", "features": [{"properties": {"parameters": {"rr": {"data": [0, 0.2, 1.3, None]}}}}]}
+    summary = geosphere_at_module.summarize_nowcast(payload)
+    assert summary["forecast_steps"] == 3
+    assert summary["rain_next_3h_mm"] == 1.5
+    assert summary["max_15min_mm"] == 1.3
+
+
+def test_austria_and_italy_coverage(base_module, geosphere_at_module, italiameteo_module):
+    vienna = base_module.CoverageArea(48.21, 16.37, 250)
+    rome = base_module.CoverageArea(41.90, 12.50, 250)
+    miami = base_module.CoverageArea(25.76, -80.19, 250)
+    assert geosphere_at_module.GeoSphereAustriaProvider(None).supports(vienna).supported
+    assert italiameteo_module.ItaliaMeteoRadarProvider(None).supports(rome).supported
+    assert not geosphere_at_module.GeoSphereAustriaProvider(None).supports(miami).supported
+    assert not italiameteo_module.ItaliaMeteoRadarProvider(None).supports(miami).supported
+
+
+def test_italiameteo_selects_latest_bundle(italiameteo_module):
+    latest = italiameteo_module.latest_bundle([
+        {"date": "2026-07-18", "filename": "old.grib"},
+        {"date": "2026-07-19", "filename": "new.grib"},
+    ])
+    assert latest["filename"] == "new.grib"
+
+
+def test_italiameteo_declares_forecast_and_radar(italiameteo_module, base_module):
+    provider = italiameteo_module.ItaliaMeteoRadarProvider(None)
+    assert base_module.Capability.RADAR in provider.capabilities
+    assert base_module.Capability.NOWCAST in provider.capabilities
