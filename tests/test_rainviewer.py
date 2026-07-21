@@ -67,7 +67,9 @@ def test_extract_observations_from_synthetic_tile(rainviewer_module):
     assert obs, "verwachtte minstens één RADAR-observatie uit het heldere blok"
     assert all(o.source == "rainviewer" for o in obs)
     assert all(o.intensity >= 1 for o in obs)
-    assert len(obs) >= 16
+    assert len(obs) == 1
+    assert obs[0].footprint_points[0] == obs[0].footprint_points[-1]
+    assert obs[0].radar_cell_id.startswith("rainviewer:")
 
 
 def test_opaque_grey_pixels_do_not_count_as_rain(rainviewer_module):

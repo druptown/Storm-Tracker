@@ -9,6 +9,7 @@ import numpy as np
 from pyproj import CRS, Transformer
 
 from ..engine.observation import Observation, ObservationType
+from .raster_components import extract_components
 
 
 def _text(value) -> str:
@@ -35,7 +36,7 @@ def parse_odim_rainfall(
     accumulation_minutes: float | None = None,
     now: float | None = None,
 ) -> list[Observation]:
-    """Decodeer het eerste ODIM-raster naar dun bemonsterde radarobservaties."""
+    """Decodeer het eerste ODIM-raster naar echte neerslagcomponenten."""
     with h5py.File(io.BytesIO(payload), "r") as dataset:
         data = np.asarray(dataset["dataset1/data1/data"])
         data_what = dataset["dataset1/data1/what"].attrs
@@ -49,16 +50,15 @@ def parse_odim_rainfall(
         if reference_now - timestamp > max_age_seconds:
             raise ValueError(f"{source}-frame is te oud")
 
-        sampled = data[::sample_stride, ::sample_stride].astype(np.float64)
-        decoded = sampled * float(data_what["gain"]) + float(data_what["offset"])
+        raw = data.astype(np.float64)
+        decoded = raw * float(data_what["gain"]) + float(data_what["offset"])
         rate = decoded if accumulation_minutes is None else decoded * (60 / accumulation_minutes)
         valid = (
-            (sampled != float(data_what["nodata"]))
-            & (sampled != float(data_what["undetect"]))
+            (raw != float(data_what["nodata"]))
+            & (raw != float(data_what["undetect"]))
             & (rate >= 0.1)
         )
-        rows, columns = np.nonzero(valid)
-        if not len(rows):
+        if not np.any(valid):
             return []
 
         transformer = Transformer.from_crs(
@@ -71,18 +71,43 @@ def parse_odim_rainfall(
             ul_x, ul_y = inverse.transform(float(where["UL_lon"]), float(where["UL_lat"]))
         else:
             ul_x, ul_y = 0.0, int(where["ysize"]) * float(where["yscale"])
-        x = ul_x + (columns * sample_stride + 0.5) * float(where["xscale"])
-        y = ul_y - (rows * sample_stride + 0.5) * float(where["yscale"])
-        longitudes, latitudes = transformer.transform(x, y)
+        xscale, yscale = float(where["xscale"]), float(where["yscale"])
+        intensity_grid = np.zeros(data.shape, dtype=np.uint8)
+        for row, column in np.argwhere(valid):
+            intensity_grid[row, column] = rain_rate_to_intensity(
+                float(rate[row, column])
+            )
+
+        def corner_to_latlon(row, column):
+            lon, lat = transformer.transform(
+                ul_x + column * xscale,
+                ul_y - row * yscale,
+            )
+            return round(float(lat), 5), round(float(lon), 5)
+
+        components = extract_components(intensity_grid, corner_to_latlon)
 
     observations = []
-    for lat, lon, rain_rate in zip(latitudes, longitudes, rate[rows, columns]):
+    frame_id = f"{source}:{timestamp:.0f}"
+    pixel_area_km2 = xscale * yscale / 1_000_000.0
+    for component in components:
+        lon, lat = transformer.transform(
+            ul_x + component.centroid_col * xscale,
+            ul_y - component.centroid_row * yscale,
+        )
         if areas and not any(area.contains(float(lat), float(lon)) for area in areas):
             continue
+        area_km2 = len(component.pixels) * pixel_area_km2
+        component_id = f"{frame_id}:c{component.index}"
         observations.append(Observation(
             obs_type=ObservationType.RADAR,
             lat=float(lat), lon=float(lon), timestamp=timestamp,
-            intensity=rain_rate_to_intensity(float(rain_rate)),
-            area_km2=float(sample_stride ** 2), quality=quality, source=source,
+            intensity=component.max_intensity,
+            area_km2=area_km2, quality=quality,
+            footprint_points=component.boundary,
+            radar_cell_id=component_id, parent_system_id=component_id,
+            parent_area_km2=area_km2,
+            parent_footprint_points=component.boundary,
+            source=source,
         ))
     return observations

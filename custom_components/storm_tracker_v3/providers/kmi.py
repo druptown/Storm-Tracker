@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 from datetime import datetime
 from typing import Optional
 
 import aiohttp
 
 from ..engine.observation import Observation, ObservationType
+from .raster_components import extract_components
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -171,27 +173,51 @@ class KmiProvider:
             img    = Image.open(io.BytesIO(image_data)).convert("RGBA")
             width, height = img.size
             pixels = img.load()
-            obs    = []
-            stride = 4   # elke 4e pixel (~5km op KMI-schaal)
-
-            for py in range(0, height, stride):
-                for px in range(0, width, stride):
+            import numpy as np
+            intensity_grid = np.zeros((height, width), dtype=np.uint8)
+            for py in range(height):
+                for px in range(width):
                     r, g, b, a  = pixels[px, py]
                     intensity   = _color_to_intensity(r, g, b, a)
-                    if intensity < 1:
-                        continue
-                    lat, lon = pixel_to_latlon(px + stride // 2, py + stride // 2, width, height)
-                    obs.append(Observation(
-                        obs_type  = ObservationType.RADAR,
-                        lat       = lat,
-                        lon       = lon,
-                        timestamp = timestamp,
-                        intensity = intensity,
-                        area_km2  = (stride * 1.3) ** 2,
-                        source    = "kmi",
-                    ))
+                    intensity_grid[py, px] = intensity
 
-            _LOGGER.debug("KmiProvider: %d RADAR-observaties", len(obs))
+            components = extract_components(
+                intensity_grid,
+                lambda row, col: pixel_to_latlon(col, row, width, height),
+            )
+            obs = []
+            frame_id = f"kmi:{timestamp:.0f}"
+            for component in components:
+                lat, lon = pixel_to_latlon(
+                    component.centroid_col,
+                    component.centroid_row,
+                    width,
+                    height,
+                )
+                lat_km = (KMI_LAT_TOP - KMI_LAT_BOTTOM) / height * 110.574
+                lon_km = (
+                    (KMI_LON_RIGHT - KMI_LON_LEFT) / width * 111.320
+                    * max(0.1, abs(math.cos(math.radians(lat))))
+                )
+                component_id = f"{frame_id}:c{component.index}"
+                area_km2 = len(component.pixels) * lat_km * lon_km
+                obs.append(Observation(
+                    obs_type=ObservationType.RADAR,
+                    lat=lat,
+                    lon=lon,
+                    timestamp=timestamp,
+                    intensity=component.max_intensity,
+                    area_km2=area_km2,
+                    quality=0.95,
+                    footprint_points=component.boundary,
+                    radar_cell_id=component_id,
+                    parent_system_id=component_id,
+                    parent_area_km2=area_km2,
+                    parent_footprint_points=component.boundary,
+                    source="kmi",
+                ))
+
+            _LOGGER.debug("KmiProvider: %d neerslagclusters", len(obs))
             return obs
 
         except ImportError:

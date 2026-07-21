@@ -326,19 +326,27 @@ class StormEngine:
 
     @staticmethod
     def _distance_to_storm(obs, storm: Storm) -> float:
-        """Match tegen lokale radarcellen, niet enkel de systeemcentroid."""
-        distances = [
-            _haversine(
-                obs.lat,
-                obs.lon,
-                storm.centroid_lat,
-                storm.centroid_lon,
-            )
-        ]
-        distances.extend(
-            _haversine(obs.lat, obs.lon, cell.lat, cell.lon)
-            for cell in storm.radar_cells.values()
+        """Match tegen echte bronfootprints, niet enkel rastercentroids."""
+        def compact(points, limit=24):
+            values = tuple(points or ())
+            if len(values) <= limit:
+                return values
+            step = max(1, len(values) // limit)
+            return values[::step][:limit]
+
+        observation_points = (
+            (obs.lat, obs.lon),
+            *compact(getattr(obs, "footprint_points", ())),
         )
+        storm_points = [(storm.centroid_lat, storm.centroid_lon)]
+        for cell in storm.radar_cells.values():
+            storm_points.append((cell.lat, cell.lon))
+            storm_points.extend(compact(cell.footprint_points))
+        distances = [
+            _haversine(obs_lat, obs_lon, storm_lat, storm_lon)
+            for obs_lat, obs_lon in observation_points
+            for storm_lat, storm_lon in storm_points
+        ]
         return min(distances)
 
     def _apply_observation_to_storm(self, storm: Storm, obs) -> None:
@@ -595,11 +603,11 @@ class StormEngine:
         points = [
             (lat, lon)
             for ts, lat, lon in storm.strikes_in_window(HULL_WINDOW_MINUTES)
-        ] + [
-            (lat, lon)
-            for ts, lat, lon, intens in storm._radar_observations
-            if ts >= cutoff
         ]
+        for cell in storm.radar_cells.values():
+            if cell.timestamp < cutoff:
+                continue
+            points.extend(cell.footprint_points or ((cell.lat, cell.lon),))
 
         new_box = compute_bounding_box(points)
 

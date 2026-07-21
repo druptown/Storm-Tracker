@@ -32,6 +32,7 @@ from typing import Optional
 import aiohttp
 
 from ..engine.observation import Observation, ObservationType
+from .raster_components import extract_components
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -42,7 +43,6 @@ TILE_ZOOM          = 5   # zoom-level 5 = ~300km per tile
 TILE_GRID          = 2   # 2x2 grid = ~600km x ~600km rond het centrum
 TILE_SIZE          = 256
 RAINVIEWER_MIN_DBZ_ALPHA = 130  # Universal Blue: circa 8 dBZ
-RAINVIEWER_PIXEL_STRIDE = 4
 
 
 def _tile_url(path: str, tx: int, ty: int) -> str:
@@ -282,38 +282,48 @@ class RainViewerProvider:
             pixels     = img.load()
             lat_t, lat_b, lon_l, lon_r = _tile_bounds(tx, ty, TILE_ZOOM)
             observation_ts = frame_timestamp if frame_timestamp is not None else time.time()
-            obs        = []
-
-            stride = RAINVIEWER_PIXEL_STRIDE
-            for py in range(0, tile_size, stride):
-                for px in range(0, tile_size, stride):
+            import numpy as np
+            intensity_grid = np.zeros((tile_size, tile_size), dtype=np.uint8)
+            for py in range(tile_size):
+                for px in range(tile_size):
                     r, g, b, a = pixels[px, py]
                     intensity = _universal_blue_intensity(r, g, b, a)
-                    if intensity < 1:
-                        continue
+                    intensity_grid[py, px] = intensity
 
-                    lat, lon = _pixel_to_latlon_tile(
-                        px + stride // 2, py + stride // 2, tile_size,
-                        lat_t, lat_b, lon_l, lon_r
-                    )
-                    lat_km = stride * abs(lat_t - lat_b) / tile_size * 110.574
-                    lon_km = (
-                        stride * abs(lon_r - lon_l) / tile_size * 111.320
-                        * max(0.1, abs(math.cos(math.radians(lat))))
-                    )
-                    area_km2 = lat_km * lon_km
+            components = extract_components(
+                intensity_grid,
+                lambda row, col: _pixel_to_latlon_tile(
+                    col, row, tile_size, lat_t, lat_b, lon_l, lon_r
+                ),
+            )
+            obs = []
+            frame_id = f"rainviewer:{observation_ts:.0f}:t{tx}_{ty}"
+            for component in components:
+                lat, lon = _pixel_to_latlon_tile(
+                    component.centroid_col, component.centroid_row, tile_size,
+                    lat_t, lat_b, lon_l, lon_r,
+                )
+                lat_km = abs(lat_t - lat_b) / tile_size * 110.574
+                lon_km = (
+                    abs(lon_r - lon_l) / tile_size * 111.320
+                    * max(0.1, abs(math.cos(math.radians(lat))))
+                )
+                area_km2 = len(component.pixels) * lat_km * lon_km
+                component_id = f"{frame_id}:c{component.index}"
+                obs.append(Observation(
+                    obs_type=ObservationType.RADAR,
+                    lat=lat, lon=lon, timestamp=observation_ts,
+                    intensity=component.max_intensity,
+                    area_km2=area_km2, quality=0.70,
+                    footprint_points=component.boundary,
+                    radar_cell_id=component_id,
+                    parent_system_id=component_id,
+                    parent_area_km2=area_km2,
+                    parent_footprint_points=component.boundary,
+                    source="rainviewer",
+                ))
 
-                    obs.append(Observation(
-                        obs_type  = ObservationType.RADAR,
-                        lat       = lat,
-                        lon       = lon,
-                        timestamp = observation_ts,
-                        intensity = intensity,
-                        area_km2  = area_km2,
-                        source    = "rainviewer",
-                    ))
-
-            _LOGGER.debug("RainViewerProvider: %d RADAR-observaties gegenereerd", len(obs))
+            _LOGGER.debug("RainViewerProvider: %d neerslagclusters gegenereerd", len(obs))
             return obs
 
         except ImportError:

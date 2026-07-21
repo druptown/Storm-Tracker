@@ -13,6 +13,7 @@ from pyproj import CRS, Transformer
 
 from ..engine.observation import Observation, ObservationType
 from .base import Capability, CoverageArea, CoverageResult
+from .raster_components import extract_components
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -22,7 +23,6 @@ RV_LATEST_URL = (
 )
 MAX_ARCHIVE_BYTES = 8 * 1024 * 1024
 MAX_FRAME_AGE_SECONDS = 15 * 60
-SAMPLE_STRIDE = 4
 
 
 def _text(value) -> str:
@@ -72,43 +72,63 @@ def parse_rv_archive(
         offset = float(data_what["offset"])
         nodata = float(data_what["nodata"])
         undetect = float(data_what["undetect"])
-        stride_data = data[::SAMPLE_STRIDE, ::SAMPLE_STRIDE]
-        decoded = stride_data.astype(np.float64) * gain + offset
+        raw = data.astype(np.float64)
+        decoded = raw * gain + offset
         rain_rate = decoded * 12.0  # ACRR is vijfminutenaccumulatie -> mm/u
         valid = (
-            (stride_data.astype(np.float64) != nodata)
-            & (stride_data.astype(np.float64) != undetect)
+            (raw != nodata)
+            & (raw != undetect)
             & (rain_rate >= 0.1)
         )
-        rows, columns = np.nonzero(valid)
-        if not len(rows):
+        if not np.any(valid):
             return []
-        full_rows = rows * SAMPLE_STRIDE
-        full_columns = columns * SAMPLE_STRIDE
         xscale = float(where["xscale"])
         yscale = float(where["yscale"])
         ysize = int(where["ysize"])
-        x = (full_columns + 0.5) * xscale
-        y = (ysize - full_rows - 0.5) * yscale
         transformer = Transformer.from_crs(
             CRS.from_user_input(_text(where["projdef"])), "EPSG:4326",
             always_xy=True,
         )
-        longitudes, latitudes = transformer.transform(x, y)
+        intensity_grid = np.zeros(data.shape, dtype=np.uint8)
+        for row, column in np.argwhere(valid):
+            intensity_grid[row, column] = _intensity(
+                float(rain_rate[row, column])
+            )
+
+        def corner_to_latlon(row, column):
+            lon, lat = transformer.transform(
+                column * xscale,
+                (ysize - row) * yscale,
+            )
+            return round(float(lat), 5), round(float(lon), 5)
+
+        components = extract_components(intensity_grid, corner_to_latlon)
 
     observations = []
-    rates = rain_rate[rows, columns]
-    for lat, lon, rate in zip(latitudes, longitudes, rates):
+    frame_id = f"dwd_radolan:{timestamp:.0f}"
+    pixel_area_km2 = xscale * yscale / 1_000_000.0
+    for component in components:
+        lon, lat = transformer.transform(
+            component.centroid_col * xscale,
+            (ysize - component.centroid_row) * yscale,
+        )
         if areas and not any(area.contains(float(lat), float(lon)) for area in areas):
             continue
+        area_km2 = len(component.pixels) * pixel_area_km2
+        component_id = f"{frame_id}:c{component.index}"
         observations.append(Observation(
             obs_type=ObservationType.RADAR,
             lat=float(lat),
             lon=float(lon),
             timestamp=timestamp,
-            intensity=_intensity(float(rate)),
-            area_km2=float(SAMPLE_STRIDE ** 2),
+            intensity=component.max_intensity,
+            area_km2=area_km2,
             quality=0.98,
+            footprint_points=component.boundary,
+            radar_cell_id=component_id,
+            parent_system_id=component_id,
+            parent_area_km2=area_km2,
+            parent_footprint_points=component.boundary,
             source="dwd_radolan",
         ))
     return observations

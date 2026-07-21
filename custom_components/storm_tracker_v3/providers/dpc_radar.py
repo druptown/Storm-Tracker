@@ -12,13 +12,13 @@ from pyproj import Transformer
 from ..engine.observation import Observation, ObservationType
 from .base import Capability, CoverageResult
 from .odim_hdf5 import rain_rate_to_intensity
+from .raster_components import extract_components
 
 _LOGGER = logging.getLogger(__name__)
 API_URL = "https://radar-api.protezionecivile.it"
 ORIGIN = "https://radar.protezionecivile.it"
 MAX_FILE_BYTES = 25 * 1024 * 1024
 MAX_FRAME_AGE_SECONDS = 20 * 60
-SAMPLE_STRIDE = 4
 DPC_CRS = "+proj=lcc +lat_0=42 +lon_0=12.5 +lat_1=42 +lat_2=42 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
 
 
@@ -34,24 +34,47 @@ def parse_sri_geotiff(payload: bytes, areas: tuple, *, timestamp: float, now: fl
         scale = image.tag_v2.get(33550)
     if not tie or not scale:
         raise ValueError("DPC GeoTIFF mist georeferentie")
-    sampled = data[::SAMPLE_STRIDE, ::SAMPLE_STRIDE]
-    rows, columns = np.nonzero((sampled >= 0.1) & (sampled < 500.0))
+    rows, columns = np.nonzero((data >= 0.1) & (data < 500.0))
     if not len(rows):
         return []
     x0, y0 = float(tie[3]), float(tie[4])
-    x = x0 + (columns * SAMPLE_STRIDE + 0.5) * float(scale[0])
-    y = y0 - (rows * SAMPLE_STRIDE + 0.5) * float(scale[1])
     transformer = Transformer.from_crs(DPC_CRS, "EPSG:4326", always_xy=True)
-    longitudes, latitudes = transformer.transform(x, y)
-    rates = sampled[rows, columns]
+    intensity_grid = np.zeros(data.shape, dtype=np.uint8)
+    for row, column in zip(rows, columns):
+        intensity_grid[row, column] = rain_rate_to_intensity(
+            float(data[row, column])
+        )
+
+    def corner_to_latlon(row, column):
+        lon, lat = transformer.transform(
+            x0 + column * float(scale[0]),
+            y0 - row * float(scale[1]),
+        )
+        return round(float(lat), 5), round(float(lon), 5)
+
+    components = extract_components(intensity_grid, corner_to_latlon)
     observations = []
-    for lat, lon, rate in zip(latitudes, longitudes, rates):
+    frame_id = f"dpc_radar:{timestamp:.0f}"
+    pixel_area_km2 = float(scale[0]) * float(scale[1]) / 1_000_000.0
+    for component in components:
+        lon, lat = transformer.transform(
+            x0 + component.centroid_col * float(scale[0]),
+            y0 - component.centroid_row * float(scale[1]),
+        )
         if areas and not any(area.contains(float(lat), float(lon)) for area in areas):
             continue
+        component_id = f"{frame_id}:c{component.index}"
+        area_km2 = len(component.pixels) * pixel_area_km2
         observations.append(Observation(
             obs_type=ObservationType.RADAR, lat=float(lat), lon=float(lon),
-            timestamp=timestamp, intensity=rain_rate_to_intensity(float(rate)),
-            area_km2=float(SAMPLE_STRIDE ** 2), quality=0.99, source="dpc_radar",
+            timestamp=timestamp, intensity=component.max_intensity,
+            area_km2=area_km2, quality=0.99,
+            footprint_points=component.boundary,
+            radar_cell_id=component_id,
+            parent_system_id=component_id,
+            parent_area_km2=area_km2,
+            parent_footprint_points=component.boundary,
+            source="dpc_radar",
         ))
     return observations
 

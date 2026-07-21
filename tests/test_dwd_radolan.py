@@ -56,7 +56,9 @@ def test_parse_current_rv_frame(dwd_radolan_module, base_module):
     assert len(observations) == 1
     assert observations[0].source == "dwd_radolan"
     assert observations[0].intensity >= 1
-    assert observations[0].area_km2 == 16
+    assert observations[0].area_km2 == 1
+    assert observations[0].footprint_points[0] == observations[0].footprint_points[-1]
+    assert observations[0].parent_system_id
 
 
 def test_stale_rv_frame_is_rejected(dwd_radolan_module, base_module):

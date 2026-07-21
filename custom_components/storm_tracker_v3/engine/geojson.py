@@ -221,11 +221,13 @@ def build_feature_collection(
             for cell in cells:
                 if radar_cells_written >= MAX_RADAR_CELLS:
                     break
-                # OPERA-footprints zijn puntwolken/scanlijnen, geen gegarandeerd
-                # geordende polygonring. Eerst hullen voorkomt zigzagdiagonalen.
+                footprint = tuple(cell.footprint_points or ())
+                is_closed_source_ring = (
+                    len(footprint) >= 4 and footprint[0] == footprint[-1]
+                )
                 cell_ring = _sample_ring(
-                    cell.footprint_points,
-                    order_as_hull=_cell_source(cell) != "opera",
+                    footprint,
+                    order_as_hull=not is_closed_source_ring,
                 )
                 cell_geometry = (
                     {"type": "Polygon", "coordinates": [cell_ring]}

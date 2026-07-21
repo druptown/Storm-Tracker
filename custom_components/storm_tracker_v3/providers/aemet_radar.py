@@ -12,13 +12,13 @@ import numpy as np
 
 from ..engine.observation import Observation, ObservationType
 from .base import Capability, CoverageResult
+from .raster_components import extract_components
 
 _LOGGER = logging.getLogger(__name__)
 DOWNLOAD_URL = "https://www.aemet.es/es/api-eltiempo/radar/download/compo"
 MAX_ARCHIVE_BYTES = 10 * 1024 * 1024
 MAX_FRAME_BYTES = 5 * 1024 * 1024
 MAX_FRAME_AGE_SECONDS = 25 * 60
-SAMPLE_STRIDE = 2
 FRAME_RE = re.compile(r"^down_radw(\d{12})_4326\.tif$")
 
 
@@ -56,18 +56,36 @@ def parse_aemet_geotiff(payload: bytes, areas: tuple, *, timestamp: float, now: 
         scale = image.tag_v2.get(33550)
     if not tie or not scale:
         raise ValueError("AEMET GeoTIFF mist EPSG:4326-georeferentie")
-    sampled = data[::SAMPLE_STRIDE, ::SAMPLE_STRIDE]
-    rows, columns = np.nonzero((sampled >= 1) & (sampled <= 8))
-    latitudes = float(tie[4]) - (rows * SAMPLE_STRIDE + 0.5) * float(scale[1])
-    longitudes = float(tie[3]) + (columns * SAMPLE_STRIDE + 0.5) * float(scale[0])
+    intensity_grid = np.where((data >= 1) & (data <= 8), data, 0).astype(np.uint8)
+    lat_top, lon_left = float(tie[4]), float(tie[3])
+    lat_scale, lon_scale = float(scale[1]), float(scale[0])
+    components = extract_components(
+        intensity_grid,
+        lambda row, col: (
+            round(lat_top - row * lat_scale, 5),
+            round(lon_left + col * lon_scale, 5),
+        ),
+    )
     observations = []
-    for row, column, lat, lon in zip(rows, columns, latitudes, longitudes):
+    frame_id = f"aemet_radar:{timestamp:.0f}"
+    for component in components:
+        lat = lat_top - component.centroid_row * lat_scale
+        lon = lon_left + component.centroid_col * lon_scale
         if areas and not any(area.contains(float(lat), float(lon)) for area in areas):
             continue
+        lat_km = lat_scale * 110.574
+        lon_km = lon_scale * 111.320 * max(0.1, abs(np.cos(np.radians(lat))))
+        area_km2 = len(component.pixels) * lat_km * lon_km
+        component_id = f"{frame_id}:c{component.index}"
         observations.append(Observation(
             obs_type=ObservationType.RADAR, lat=float(lat), lon=float(lon),
-            timestamp=timestamp, intensity=int(sampled[row, column]),
-            area_km2=25.0, quality=0.98, source="aemet_radar",
+            timestamp=timestamp, intensity=component.max_intensity,
+            area_km2=area_km2, quality=0.98,
+            footprint_points=component.boundary,
+            radar_cell_id=component_id, parent_system_id=component_id,
+            parent_area_km2=area_km2,
+            parent_footprint_points=component.boundary,
+            source="aemet_radar",
         ))
     return observations
 

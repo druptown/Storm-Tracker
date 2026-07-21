@@ -1,5 +1,19 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.66
+
+- Vervang regelmatige rasterpuntbemonstering door echte 4-connected
+  neerslagcomponenten met gesloten buitenranden op bronpixelniveau.
+- Pas hetzelfde rastercontract toe op KMI, KNMI, DPC Italië, DWD Duitsland,
+  AEMET Spanje, RainViewer en nationale ODIM-producten zoals Météo-France en
+  Met Office; OPERA behield zijn bestaande exacte pixelgrenzen.
+- Geef iedere component deterministische cel- en parent-ID's per radarframe,
+  zodat opeenvolgende frames betrouwbaar kunnen worden geteld en gematcht.
+- Match WeatherSystems tegen hun werkelijke footprints en bouw hun geometrie
+  uit recente broncontouren in plaats van kettingen van regelmatige punten.
+- Behoud gesloten bronringen in GeoJSON zonder ze opnieuw tot een kunstmatige
+  convexe driehoek of veelhoek te reduceren.
+
 # 0.4.65
 
 - Kies radarbronnen per RegionEngine in vaste volgorde: operationele lokale

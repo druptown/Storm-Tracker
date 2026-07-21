@@ -227,19 +227,28 @@ def region_manager_module(storm_engine_module, ofe_module):
 # ── Overige providers ──────────────────────────────────────────────────────
 
 @pytest.fixture(scope="session")
-def kmi_module(observation_module):
+def raster_components_module():
+    _ensure_stub_package(f"{PKG_NAME}.providers")
+    return _load_module(
+        f"{PKG_NAME}.providers.raster_components",
+        PKG_ROOT / "providers" / "raster_components.py",
+    )
+
+
+@pytest.fixture(scope="session")
+def kmi_module(observation_module, raster_components_module):
     _ensure_stub_package(f"{PKG_NAME}.providers")
     return _load_module(f"{PKG_NAME}.providers.kmi", PKG_ROOT / "providers" / "kmi.py")
 
 
 @pytest.fixture(scope="session")
-def knmi_module(observation_module):
+def knmi_module(observation_module, raster_components_module):
     _ensure_stub_package(f"{PKG_NAME}.providers")
     return _load_module(f"{PKG_NAME}.providers.knmi", PKG_ROOT / "providers" / "knmi.py")
 
 
 @pytest.fixture(scope="session")
-def rainviewer_module(observation_module):
+def rainviewer_module(observation_module, raster_components_module):
     _ensure_stub_package(f"{PKG_NAME}.providers")
     return _load_module(f"{PKG_NAME}.providers.rainviewer", PKG_ROOT / "providers" / "rainviewer.py")
 
@@ -275,7 +284,7 @@ def noaa_goes_glm_module(observation_module):
 
 
 @pytest.fixture(scope="session")
-def dwd_radolan_module(observation_module, base_module):
+def dwd_radolan_module(observation_module, base_module, raster_components_module):
     _ensure_stub_package(f"{PKG_NAME}.providers")
     return _load_module(
         f"{PKG_NAME}.providers.dwd_radolan",
@@ -284,7 +293,7 @@ def dwd_radolan_module(observation_module, base_module):
 
 
 @pytest.fixture(scope="session")
-def odim_hdf5_module(observation_module):
+def odim_hdf5_module(observation_module, raster_components_module):
     _ensure_stub_package(f"{PKG_NAME}.providers")
     return _load_module(
         f"{PKG_NAME}.providers.odim_hdf5",
@@ -333,7 +342,7 @@ def italiameteo_module(observation_module, base_module):
 
 
 @pytest.fixture(scope="session")
-def dpc_radar_module(observation_module, base_module, odim_hdf5_module):
+def dpc_radar_module(observation_module, base_module, odim_hdf5_module, raster_components_module):
     return _load_module(
         f"{PKG_NAME}.providers.dpc_radar",
         PKG_ROOT / "providers" / "dpc_radar.py",
@@ -341,7 +350,7 @@ def dpc_radar_module(observation_module, base_module, odim_hdf5_module):
 
 
 @pytest.fixture(scope="session")
-def aemet_radar_module(observation_module, base_module):
+def aemet_radar_module(observation_module, base_module, raster_components_module):
     return _load_module(
         f"{PKG_NAME}.providers.aemet_radar",
         PKG_ROOT / "providers" / "aemet_radar.py",
