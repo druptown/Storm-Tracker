@@ -98,12 +98,12 @@ class Stv3MultiTargetMap extends HTMLElement {
     for(const f of ordered) if(!['target','lightning'].includes(f.properties.layer)) this._feature(svg,f,center,w,h);
     if(this._showLightning) this._lightningClusters(svg,lightning,center,w,h);
     this._targetGroups(svg,ordered.filter(f=>f.properties.layer==='target'),center,w,h);
-    const visibleCells=ordered.filter(f=>f.properties.layer==='radar_cell').length;
+    const availableCells=visible.filter(f=>f.properties.layer==='radar_cell').length;
     const visibleLightning=lightning.length;
     const source=selected.properties.radar_source||'geen';
     const reason=selected.properties.radar_source_reason||'nog niet geselecteerd';
     const overlayText=radarOverlay?' | raster: '+radarOverlay.runs.length+' pixelruns':'';
-    this.shadowRoot.querySelector('.meta').textContent=(selected.properties.name||selected.properties.target_id)+' | '+(selectedEngine||'alle engines')+' | radar: '+source+' | '+reason+overlayText+' | zoom '+this._zoom+' | '+visibleCells+' radarcellen | '+visibleLightning+' bliksems (15 min)';
+    this.shadowRoot.querySelector('.meta').textContent=(selected.properties.name||selected.properties.target_id)+' | '+(selectedEngine||'alle engines')+' | radar: '+source+' | '+reason+overlayText+' | zoom '+this._zoom+' | '+availableCells+' analysecellen | '+visibleLightning+' bliksems (15 min)';
   }
   _radarOverlay(svg,overlay,center,w,h,lightning,pulseStorms) {
     const ns='http://www.w3.org/2000/svg';

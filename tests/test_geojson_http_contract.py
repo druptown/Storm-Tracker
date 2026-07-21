@@ -47,4 +47,6 @@ def test_dashboard_prefers_intensity_overlay_over_technical_contours():
     assert "radarOverlay&&!this._showTechnical" in source
     assert "storm-pulse" in source
     assert "_lightningClusters" in source
+    assert "availableCells=visible.filter" in source
+    assert "analysecellen" in source
     assert "type==='MultiPolygon'" in source
