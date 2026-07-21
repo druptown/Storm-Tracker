@@ -43,6 +43,8 @@ def test_dashboard_prefers_intensity_overlay_over_technical_contours():
     source = (ROOT / "dashboard" / "stv3-multi-target-map.js").read_text(
         encoding="utf-8"
     )
-    assert "_radarOverlay(svg,overlay,center,w,h)" in source
+    assert "_radarOverlay(svg,overlay,center,w,h,lightning,pulseStorms)" in source
     assert "radarOverlay&&!this._showTechnical" in source
+    assert "storm-pulse" in source
+    assert "_lightningClusters" in source
     assert "type==='MultiPolygon'" in source

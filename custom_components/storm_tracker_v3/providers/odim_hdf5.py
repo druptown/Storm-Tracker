@@ -9,7 +9,7 @@ import numpy as np
 from pyproj import CRS, Transformer
 
 from ..engine.observation import Observation, ObservationType
-from .raster_components import extract_components
+from .raster_components import extract_components, extract_intensity_runs
 
 
 def _text(value) -> str:
@@ -35,6 +35,7 @@ def parse_odim_rainfall(
     sample_stride: int = 4,
     accumulation_minutes: float | None = None,
     now: float | None = None,
+    overlay_out: list | None = None,
 ) -> list[Observation]:
     """Decodeer het eerste ODIM-raster naar echte neerslagcomponenten."""
     with h5py.File(io.BytesIO(payload), "r") as dataset:
@@ -86,6 +87,17 @@ def parse_odim_rainfall(
             return round(float(lat), 5), round(float(lon), 5)
 
         components = extract_components(intensity_grid, corner_to_latlon)
+        if overlay_out is not None:
+            overlay_out.append({
+                "source": source, "timestamp": timestamp,
+                "runs": extract_intensity_runs(
+                    intensity_grid, corner_to_latlon,
+                    include_point=(lambda lat, lon: not areas or any(
+                        area.contains(lat, lon) for area in areas
+                    )),
+                    max_run_pixels=max(1, sample_stride * 4),
+                ),
+            })
 
     observations = []
     frame_id = f"{source}:{timestamp:.0f}"

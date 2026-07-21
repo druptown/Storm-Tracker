@@ -19,7 +19,7 @@ from typing import Optional
 import aiohttp
 
 from ..engine.observation import Observation, ObservationType
-from .raster_components import extract_components
+from .raster_components import extract_components, extract_intensity_runs
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -97,6 +97,7 @@ class KmiProvider:
         self._last_temp: Optional[float]  = None
         self.last_frame_timestamp: Optional[float] = None
         self.last_fetch_updated = False
+        self.overlay = None
 
     async def fetch_observations(self) -> list[Observation]:
         self.last_fetch_updated = False
@@ -185,6 +186,13 @@ class KmiProvider:
                 intensity_grid,
                 lambda row, col: pixel_to_latlon(col, row, width, height),
             )
+            self.overlay = {
+                "source": "kmi", "timestamp": timestamp,
+                "runs": extract_intensity_runs(
+                    intensity_grid,
+                    lambda row, col: pixel_to_latlon(col, row, width, height),
+                ),
+            }
             obs = []
             frame_id = f"kmi:{timestamp:.0f}"
             for component in components:

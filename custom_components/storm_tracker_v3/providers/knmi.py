@@ -23,7 +23,7 @@ from typing import Optional
 import aiohttp
 
 from ..engine.observation import Observation, ObservationType
-from .raster_components import extract_components
+from .raster_components import extract_components, extract_intensity_runs
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -94,6 +94,7 @@ class KnmiProvider:
         self._wms_key  = wms_api_key or api_key
         self._headers     = {"Authorization": api_key}
         self._wms_headers = {"Authorization": self._wms_key}
+        self.overlay = None
 
     async def fetch_observations(self) -> list[Observation]:
         obs = []
@@ -180,6 +181,14 @@ class KnmiProvider:
                 intensity_grid,
                 lambda row, col: _pixel_to_latlon(col, row, w, h),
             )
+            if source == "knmi":
+                self.overlay = {
+                    "source": "knmi", "timestamp": ts,
+                    "runs": extract_intensity_runs(
+                        intensity_grid,
+                        lambda row, col: _pixel_to_latlon(col, row, w, h),
+                    ),
+                }
             obs = []
             frame_id = f"{source}:{ts:.0f}"
             for component in components:

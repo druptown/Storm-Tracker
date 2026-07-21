@@ -12,7 +12,7 @@ import numpy as np
 
 from ..engine.observation import Observation, ObservationType
 from .base import Capability, CoverageResult
-from .raster_components import extract_components
+from .raster_components import extract_components, extract_intensity_runs
 
 _LOGGER = logging.getLogger(__name__)
 DOWNLOAD_URL = "https://www.aemet.es/es/api-eltiempo/radar/download/compo"
@@ -45,7 +45,7 @@ def latest_frame_from_archive(payload: bytes) -> tuple[bytes, float, str]:
     return frame, timestamp, member.name
 
 
-def parse_aemet_geotiff(payload: bytes, areas: tuple, *, timestamp: float, now: float | None = None):
+def parse_aemet_geotiff(payload: bytes, areas: tuple, *, timestamp: float, now: float | None = None, overlay_out: list | None = None):
     reference_now = datetime.now(timezone.utc).timestamp() if now is None else now
     if reference_now - timestamp > MAX_FRAME_AGE_SECONDS:
         raise ValueError("AEMET-radarframe is ouder dan 25 minuten")
@@ -66,6 +66,20 @@ def parse_aemet_geotiff(payload: bytes, areas: tuple, *, timestamp: float, now: 
             round(lon_left + col * lon_scale, 5),
         ),
     )
+    if overlay_out is not None:
+        overlay_out.append({
+            "source": "aemet_radar", "timestamp": timestamp,
+            "runs": extract_intensity_runs(
+                intensity_grid,
+                lambda row, col: (
+                    round(lat_top - row * lat_scale, 5),
+                    round(lon_left + col * lon_scale, 5),
+                ),
+                include_point=(lambda lat, lon: not areas or any(
+                    area.contains(lat, lon) for area in areas
+                )),
+            ),
+        })
     observations = []
     frame_id = f"aemet_radar:{timestamp:.0f}"
     for component in components:
@@ -98,6 +112,7 @@ class AemetRadarProvider:
     def __init__(self, session):
         self._session, self._areas, self._last_name = session, (), None
         self.diagnostics = {}
+        self.overlay = None
 
     def supports(self, area):
         margin = area.horizon_km / 90.0
@@ -119,9 +134,12 @@ class AemetRadarProvider:
         frame, timestamp, name = await asyncio.to_thread(latest_frame_from_archive, payload)
         if name == self._last_name:
             return []
+        overlays = []
         observations = await asyncio.to_thread(
-            parse_aemet_geotiff, frame, self._areas, timestamp=timestamp
+            parse_aemet_geotiff, frame, self._areas, timestamp=timestamp,
+            overlay_out=overlays,
         )
+        self.overlay = overlays[0] if overlays else None
         self._last_name = name
         self.diagnostics = {
             "frame": name, "frame_timestamp": timestamp,

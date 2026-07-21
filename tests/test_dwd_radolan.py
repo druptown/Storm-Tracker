@@ -50,8 +50,10 @@ def _archive(timestamp: datetime, *, wet=True) -> bytes:
 def test_parse_current_rv_frame(dwd_radolan_module, base_module):
     timestamp = datetime.now(timezone.utc).replace(microsecond=0)
     world = base_module.CoverageArea(50, 10, 5000)
+    overlays = []
     observations = dwd_radolan_module.parse_rv_archive(
-        _archive(timestamp), (world,), now=timestamp.timestamp()
+        _archive(timestamp), (world,), now=timestamp.timestamp(),
+        overlay_out=overlays,
     )
     assert len(observations) == 1
     assert observations[0].source == "dwd_radolan"
@@ -59,6 +61,8 @@ def test_parse_current_rv_frame(dwd_radolan_module, base_module):
     assert observations[0].area_km2 == 1
     assert observations[0].footprint_points[0] == observations[0].footprint_points[-1]
     assert observations[0].parent_system_id
+    assert overlays[0]["source"] == "dwd_radolan"
+    assert overlays[0]["runs"]
 
 
 def test_stale_rv_frame_is_rejected(dwd_radolan_module, base_module):

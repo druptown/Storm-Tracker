@@ -34,14 +34,18 @@ def test_aemet_archive_selects_latest_safe_frame(aemet_radar_module):
 
 
 def test_aemet_geotiff_maps_intensity_and_coordinates(aemet_radar_module):
+    overlays = []
     observations = aemet_radar_module.parse_aemet_geotiff(
-        _geotiff(), (), timestamp=1_000.0, now=1_100.0
+        _geotiff(), (), timestamp=1_000.0, now=1_100.0,
+        overlay_out=overlays,
     )
     assert len(observations) == 1
     assert observations[0].source == "aemet_radar"
     assert observations[0].intensity == 6
     assert -12.2 < observations[0].lon < 6.2
     assert 33.0 < observations[0].lat < 46.5
+    assert overlays[0]["source"] == "aemet_radar"
+    assert overlays[0]["runs"]
 
 
 def test_aemet_coverage_is_limited_to_published_composite(aemet_radar_module, base_module):

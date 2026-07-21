@@ -92,6 +92,8 @@ def test_extract_observations_from_synthetic_image(kmi_module):
     assert obs, "verwachtte minstens één RADAR-observatie uit het rode blok"
     assert all(o.source == "kmi" for o in obs)
     assert all(o.obs_type == kmi_module.ObservationType.RADAR for o in obs)
+    assert provider.overlay["source"] == "kmi"
+    assert provider.overlay["runs"]
 
 
 def test_extract_observations_all_dry_gives_empty_list(kmi_module):

@@ -13,7 +13,7 @@ from pyproj import CRS, Transformer
 
 from ..engine.observation import Observation, ObservationType
 from .base import Capability, CoverageArea, CoverageResult
-from .raster_components import extract_components
+from .raster_components import extract_components, extract_intensity_runs
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -43,6 +43,7 @@ def parse_rv_archive(
     areas: tuple[CoverageArea, ...],
     *,
     now: float | None = None,
+    overlay_out: list | None = None,
 ) -> list[Observation]:
     """Parseer uitsluitend het actuele (+000) RV HDF5-frame."""
     with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as archive:
@@ -103,6 +104,16 @@ def parse_rv_archive(
             return round(float(lat), 5), round(float(lon), 5)
 
         components = extract_components(intensity_grid, corner_to_latlon)
+        if overlay_out is not None:
+            overlay_out.append({
+                "source": "dwd_radolan", "timestamp": timestamp,
+                "runs": extract_intensity_runs(
+                    intensity_grid, corner_to_latlon,
+                    include_point=(lambda lat, lon: not areas or any(
+                        area.contains(lat, lon) for area in areas
+                    )),
+                ),
+            })
 
     observations = []
     frame_id = f"dwd_radolan:{timestamp:.0f}"
@@ -142,6 +153,7 @@ class DwdRadolanProvider:
     def __init__(self, session) -> None:
         self._session = session
         self._areas: tuple[CoverageArea, ...] = ()
+        self.overlay = None
 
     def supports(self, area: CoverageArea) -> CoverageResult:
         lat_margin = area.horizon_km / 111.0
@@ -174,6 +186,10 @@ class DwdRadolanProvider:
             payload = await response.read()
         if len(payload) > MAX_ARCHIVE_BYTES:
             raise ValueError("DWD RV-archief overschrijdt veiligheidslimiet")
-        observations = await asyncio.to_thread(parse_rv_archive, payload, self._areas)
+        overlays = []
+        observations = await asyncio.to_thread(
+            parse_rv_archive, payload, self._areas, overlay_out=overlays
+        )
+        self.overlay = overlays[0] if overlays else None
         _LOGGER.info("DWD RADOLAN: %d observaties binnen actieve engines", len(observations))
         return observations

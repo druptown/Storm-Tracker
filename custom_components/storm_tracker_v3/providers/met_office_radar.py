@@ -29,6 +29,7 @@ class MetOfficeRadarProvider:
         self._session = session
         self._areas = ()
         self._last_key = None
+        self.overlay = None
 
     def supports(self, area):
         margin = area.horizon_km / 80.0
@@ -61,7 +62,9 @@ class MetOfficeRadarProvider:
             payload = await response.read()
         if len(payload) > MAX_FILE_BYTES:
             raise ValueError("Met Office-bestand overschrijdt veiligheidslimiet")
-        observations = await asyncio.to_thread(parse_odim_rainfall, payload, self._areas, source=self.plugin_id, quality=0.99, max_age_seconds=45 * 60)
+        overlays = []
+        observations = await asyncio.to_thread(parse_odim_rainfall, payload, self._areas, source=self.plugin_id, quality=0.99, max_age_seconds=45 * 60, overlay_out=overlays)
+        self.overlay = overlays[0] if overlays else None
         self._last_key = key
         _LOGGER.info("Met Office radar: %d observaties binnen actieve engines", len(observations))
         return observations

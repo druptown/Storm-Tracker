@@ -1,5 +1,16 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.69
+
+- Publiceer echte intensiteitsruns voor alle beschikbare bronrasters: KMI,
+  KNMI, DWD, AEMET, DPC, RainViewer, Météo-France en Met Office.
+- Koppel iedere kaartoverlay aan de actieve radarprovider van de geselecteerde
+  RegionEngine; providers zonder bronpixels blijven eerlijke contourdata.
+- Breid de kaartlegenda uit tot zes neerslagklassen.
+- Cluster zichtbare blikseminslagen om het radarbeeld leesbaar te houden.
+- Laat bij verborgen inslagen de getroffen neerslagpixels knipperen wanneer
+  daar in de voorbije vijf minuten actieve bliksem werd gemeten.
+
 # 0.4.68
 
 - Publiceer voor DPC Italië de werkelijk natte bronpixels als korte,

@@ -19,6 +19,7 @@ class MeteoFranceRadarProvider:
 
     def __init__(self, session, token: str) -> None:
         self._session, self._token, self._areas = session, token, ()
+        self.overlay = None
 
     def supports(self, area):
         margin = area.horizon_km / 80.0
@@ -38,6 +39,8 @@ class MeteoFranceRadarProvider:
             payload = await response.read()
         if len(payload) > MAX_FILE_BYTES:
             raise ValueError("Météo-France-bestand overschrijdt veiligheidslimiet")
-        observations = await asyncio.to_thread(parse_odim_rainfall, payload, self._areas, source=self.plugin_id, quality=0.99, max_age_seconds=25 * 60, sample_stride=8, accumulation_minutes=5)
+        overlays = []
+        observations = await asyncio.to_thread(parse_odim_rainfall, payload, self._areas, source=self.plugin_id, quality=0.99, max_age_seconds=25 * 60, sample_stride=8, accumulation_minutes=5, overlay_out=overlays)
+        self.overlay = overlays[0] if overlays else None
         _LOGGER.info("Météo-France radar: %d observaties binnen actieve engines", len(observations))
         return observations

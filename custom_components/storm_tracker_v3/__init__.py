@@ -921,6 +921,7 @@ async def _async_setup_runtime(
         _route_selected_radar(rainviewer_obs, "rainviewer")
         _route_selected_radar(hass.data[DOMAIN].get("last_kmi_observations", []), "kmi")
         _route_selected_radar(hass.data[DOMAIN].get("knmi_current", []), "knmi")
+        _refresh_radar_overlays(decisions)
 
         hass.bus.async_fire(f"{DOMAIN}_radar_source_update", {
             "source": hass.data[DOMAIN].get("active_radar_source"),
@@ -965,13 +966,29 @@ async def _async_setup_runtime(
         hass.data[DOMAIN]["provider_lifecycle_diagnostics"] = (
             provider_lifecycle.diagnostics()
         )
-        hass.data[DOMAIN]["radar_overlays_by_engine"] = {
-            region.engine_id: overlay
-            for region in storm_manager.get_all_engines()
-            if (overlay := provider_lifecycle.overlay(
-                (decisions.get(region.engine_id) or {}).get("source")
-            ))
+
+    def _refresh_radar_overlays(decisions):
+        """Publiceer bronpixels voor de per-engine gekozen rasterprovider."""
+        overlays = {}
+        shared = {
+            "kmi": hass.data[DOMAIN].get("kmi_provider"),
+            "knmi": hass.data[DOMAIN].get("knmi_provider"),
         }
+        per_engine = {
+            "rainviewer": hass.data[DOMAIN].get("rainviewer_providers_by_engine", {}),
+        }
+        for region in storm_manager.get_all_engines():
+            source = (decisions.get(region.engine_id) or {}).get("source")
+            provider = per_engine.get(source, {}).get(region.engine_id)
+            if provider is None:
+                provider = shared.get(source)
+            overlay = getattr(provider, "overlay", None) if provider else None
+            if overlay is None:
+                overlay = provider_lifecycle.overlay(source)
+            if overlay:
+                overlays[region.engine_id] = overlay
+        hass.data[DOMAIN]["radar_overlays_by_engine"] = overlays
+        _refresh_radar_overlays(decisions)
         hass.bus.async_fire(f"{DOMAIN}_provider_lifecycle_update")
         hass.bus.async_fire(f"{DOMAIN}_radar_source_update", {"engines": decisions})
 

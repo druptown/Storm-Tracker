@@ -32,7 +32,7 @@ from typing import Optional
 import aiohttp
 
 from ..engine.observation import Observation, ObservationType
-from .raster_components import extract_components
+from .raster_components import extract_components, extract_intensity_runs
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -131,6 +131,7 @@ class RainViewerProvider:
         self._healthy = False
         self._last_error: Optional[str] = "nog niet opgehaald"
         self._consecutive_failures = 0
+        self.overlay = None
 
     @property
     def healthy(self) -> bool:
@@ -200,6 +201,7 @@ class RainViewerProvider:
             if frame.path == self._last_path:
                 return list(self._last_observations)
             self._last_path = frame.path
+            self.overlay = {"source": "rainviewer", "timestamp": frame.timestamp, "runs": []}
             observations = await self._fetch_tile_observations(
                 frame.path, frame.timestamp
             )
@@ -282,6 +284,11 @@ class RainViewerProvider:
             pixels     = img.load()
             lat_t, lat_b, lon_l, lon_r = _tile_bounds(tx, ty, TILE_ZOOM)
             observation_ts = frame_timestamp if frame_timestamp is not None else time.time()
+            if self.overlay is None:
+                self.overlay = {
+                    "source": "rainviewer", "timestamp": observation_ts,
+                    "runs": [],
+                }
             import numpy as np
             intensity_grid = np.zeros((tile_size, tile_size), dtype=np.uint8)
             for py in range(tile_size):
@@ -296,6 +303,13 @@ class RainViewerProvider:
                     col, row, tile_size, lat_t, lat_b, lon_l, lon_r
                 ),
             )
+            if self.overlay is not None:
+                self.overlay["runs"].extend(extract_intensity_runs(
+                    intensity_grid,
+                    lambda row, col: _pixel_to_latlon_tile(
+                        col, row, tile_size, lat_t, lat_b, lon_l, lon_r
+                    ),
+                ))
             obs = []
             frame_id = f"rainviewer:{observation_ts:.0f}:t{tx}_{ty}"
             for component in components:

@@ -47,8 +47,8 @@ class Stv3MultiTargetMap extends HTMLElement {
       '<style>'+
       ':host{display:block} ha-card{overflow:hidden} .top{display:flex;gap:8px;align-items:center;padding:12px 14px;background:var(--ha-card-background,var(--card-background-color));flex-wrap:wrap}'+
       '.title{font-weight:700;font-size:18px;flex:1;min-width:180px}.controls{display:flex;gap:6px;align-items:center} select,button{font:inherit;color:var(--primary-text-color);background:var(--secondary-background-color);border:1px solid var(--divider-color);border-radius:8px;padding:7px 9px}button{width:36px;font-weight:700;cursor:pointer}.lightning-toggle,.technical-toggle{width:auto;font-size:13px}.lightning-toggle.active{background:#5d4037;color:#fff;border-color:#ffca28}.technical-toggle.active{background:#37474f;color:#fff}'+
-      '.map{position:relative;overflow:hidden;background:#cfe7f5;height:'+Number(this.config.height)+'px}.tiles,.overlay{position:absolute;inset:0}.tiles img{position:absolute;width:256px;height:256px}.overlay{pointer-events:none}.legend{position:absolute;left:10px;bottom:10px;background:rgba(20,25,30,.82);color:#fff;border-radius:8px;padding:7px 10px;font-size:12px;line-height:1.6}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}.meta{padding:8px 14px;font-size:12px;color:var(--secondary-text-color)}.error{padding:18px;color:var(--error-color)}'+
-      '</style><ha-card><div class="top"><div class="title">Neerslag, bliksem en targets</div><div class="controls"><select aria-label="Target"></select><button class="lightning-toggle'+(this._showLightning?' active':'')+'" title="Bliksemlaag aan- of uitzetten">&#9889; bliksem</button><button class="technical-toggle'+(this._showTechnical?' active':'')+'" title="Technische contouren">techniek</button><button class="minus" title="Uitzoomen">-</button><button class="plus" title="Inzoomen">+</button></div></div><div class="map"><div class="tiles"></div><svg class="overlay"></svg><div class="legend"><span class="dot" style="background:#00e676"></span>target &nbsp; <span class="dot" style="background:#81d4fa"></span>lichte regen &nbsp; <span class="dot" style="background:#f44336"></span>zware regen<br><span style="display:inline-block;width:12px;border-top:1px dashed #455a64;vertical-align:middle"></span> afstandsringen<br><span style="color:#ffeb3b;font-size:15px">&#9889;</span> bliksem &lt;2 min &nbsp; <span style="color:#ff9800;font-size:15px">&#9889;</span> 2-5 min &nbsp; <span style="color:#9e9e9e;font-size:15px">&#9889;</span> ouder</div></div><div class="meta"></div></ha-card>';
+      '.map{position:relative;overflow:hidden;background:#cfe7f5;height:'+Number(this.config.height)+'px}.tiles,.overlay{position:absolute;inset:0}.tiles img{position:absolute;width:256px;height:256px}.overlay{pointer-events:none}@keyframes stormPulse{0%,100%{fill-opacity:.18;stroke-opacity:.55}50%{fill-opacity:.72;stroke-opacity:1}}.storm-pulse{animation:stormPulse 1.25s ease-in-out infinite}.legend{position:absolute;left:10px;bottom:10px;background:rgba(20,25,30,.82);color:#fff;border-radius:8px;padding:7px 10px;font-size:12px;line-height:1.6}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}.meta{padding:8px 14px;font-size:12px;color:var(--secondary-text-color)}.error{padding:18px;color:var(--error-color)}'+
+      '</style><ha-card><div class="top"><div class="title">Neerslag, bliksem en targets</div><div class="controls"><select aria-label="Target"></select><button class="lightning-toggle'+(this._showLightning?' active':'')+'" title="Bliksemdetail wisselen">&#9889; '+(this._showLightning?'inslagen':'buien')+'</button><button class="technical-toggle'+(this._showTechnical?' active':'')+'" title="Technische contouren">techniek</button><button class="minus" title="Uitzoomen">-</button><button class="plus" title="Inzoomen">+</button></div></div><div class="map"><div class="tiles"></div><svg class="overlay"></svg><div class="legend"><span class="dot" style="background:#00e676"></span>target<br><span class="dot" style="background:#b3e5fc"></span>zeer licht <span class="dot" style="background:#29b6f6"></span>licht <span class="dot" style="background:#1565c0"></span>matig <span class="dot" style="background:#ffee58"></span>fors <span class="dot" style="background:#ff9800"></span>zwaar <span class="dot" style="background:#f44336"></span>zeer zwaar<br><span style="display:inline-block;width:12px;border-top:1px dashed #455a64;vertical-align:middle"></span> afstandsringen<br>'+(this._showLightning?'<span style="color:#ffeb3b;font-size:15px">&#9889;</span> inslagen (geclusterd)':'<span style="color:#ffca28">&#9679;</span> knipperende bui = actief onweer')+'</div></div><div class="meta"></div></ha-card>';
     const select=this.shadowRoot.querySelector('select');
     for(const target of targets){
       const option=document.createElement('option');
@@ -84,6 +84,7 @@ class Stv3MultiTargetMap extends HTMLElement {
       if(f.properties.layer==='target') return f.properties.region_engine===selectedEngine;
       return f.properties.engine_id===selectedEngine;
     });
+    const allLightning=visible.filter(f=>f.properties.layer==='lightning');
     const filtered=visible.filter(f=>{
       if(!this._showLightning&&f.properties.layer==='lightning') return false;
       if(radarOverlay&&!this._showTechnical&&['storm','radar_cell'].includes(f.properties.layer)) return false;
@@ -91,33 +92,43 @@ class Stv3MultiTargetMap extends HTMLElement {
     });
     const order={region:0,storm:1,radar_cell:2,motion:3,lightning:4,target:5};
     const ordered=[...filtered].sort((a,b)=>(order[a.properties.layer]??9)-(order[b.properties.layer]??9));
-    if(radarOverlay) this._radarOverlay(svg,radarOverlay,center,w,h);
+    const lightning=allLightning;
+    if(radarOverlay) this._radarOverlay(svg,radarOverlay,center,w,h,lightning,!this._showLightning);
     this._distanceRings(svg,selected,center,w,h);
-    for(const f of ordered) if(f.properties.layer!=='target') this._feature(svg,f,center,w,h);
+    for(const f of ordered) if(!['target','lightning'].includes(f.properties.layer)) this._feature(svg,f,center,w,h);
+    if(this._showLightning) this._lightningClusters(svg,lightning,center,w,h);
     this._targetGroups(svg,ordered.filter(f=>f.properties.layer==='target'),center,w,h);
     const visibleCells=ordered.filter(f=>f.properties.layer==='radar_cell').length;
-    const visibleLightning=ordered.filter(f=>f.properties.layer==='lightning').length;
+    const visibleLightning=lightning.length;
     const source=selected.properties.radar_source||'geen';
     const reason=selected.properties.radar_source_reason||'nog niet geselecteerd';
     const overlayText=radarOverlay?' | raster: '+radarOverlay.runs.length+' pixelruns':'';
     this.shadowRoot.querySelector('.meta').textContent=(selected.properties.name||selected.properties.target_id)+' | '+(selectedEngine||'alle engines')+' | radar: '+source+' | '+reason+overlayText+' | zoom '+this._zoom+' | '+visibleCells+' radarcellen | '+visibleLightning+' bliksems (15 min)';
   }
-  _radarOverlay(svg,overlay,center,w,h) {
+  _radarOverlay(svg,overlay,center,w,h,lightning,pulseStorms) {
     const ns='http://www.w3.org/2000/svg';
     const colors=['transparent','#b3e5fc','#81d4fa','#29b6f6','#1565c0','#ffee58','#ff9800','#f44336','#8e24aa'];
-    const paths=new Map();
+    const paths=new Map(),pulsePaths=[];
+    const strikePoints=(lightning||[]).filter(f=>Number(f.properties.age_seconds||0)<300).map(f=>this._screen(f.geometry.coordinates,center,w,h));
     for(const run of overlay.runs||[]){
       const level=Math.max(1,Math.min(8,Number(run.intensity)||1));
       const points=(run.ring||[]).map(c=>this._screen([Number(c[1]),Number(c[0])],center,w,h));
       if(points.length!==4) continue;
       const d=points.map((p,i)=>(i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' ')+' Z';
       paths.set(level,(paths.get(level)||'')+d+' ');
+      if(pulseStorms&&strikePoints.some(s=>{const cx=points.reduce((n,p)=>n+p[0],0)/4,cy=points.reduce((n,p)=>n+p[1],0)/4;return Math.hypot(s[0]-cx,s[1]-cy)<24;})) pulsePaths.push(d);
     }
     for(const [level,d] of [...paths.entries()].sort((a,b)=>a[0]-b[0])){
       const path=document.createElementNS(ns,'path');
       path.setAttribute('d',d);path.setAttribute('fill',colors[level]);path.setAttribute('fill-opacity','.72');path.setAttribute('stroke','none');
       svg.appendChild(path);
     }
+    if(pulsePaths.length){const pulse=document.createElementNS(ns,'path');pulse.setAttribute('d',pulsePaths.join(' '));pulse.setAttribute('fill','#ffca28');pulse.setAttribute('stroke','#ff6f00');pulse.setAttribute('stroke-width','2');pulse.setAttribute('class','storm-pulse');svg.appendChild(pulse);}
+  }
+  _lightningClusters(svg,features,center,w,h){
+    const ns='http://www.w3.org/2000/svg',groups=new Map();
+    for(const f of features){const p=this._screen(f.geometry.coordinates,center,w,h),key=Math.round(p[0]/18)+','+Math.round(p[1]/18);if(!groups.has(key))groups.set(key,[]);groups.get(key).push({f,p});}
+    for(const group of groups.values()){const newest=group.reduce((a,b)=>Number(a.f.properties.age_seconds||0)<Number(b.f.properties.age_seconds||0)?a:b),age=Number(newest.f.properties.age_seconds||0),x=group.reduce((n,v)=>n+v.p[0],0)/group.length,y=group.reduce((n,v)=>n+v.p[1],0)/group.length,color=age<120?'#ffeb3b':age<300?'#ff9800':'#9e9e9e';const bolt=document.createElementNS(ns,'path');bolt.setAttribute('d','M'+(x-2)+' '+(y-7)+'L'+(x+4)+' '+(y-7)+'L'+x+' '+(y-1)+'L'+(x+5)+' '+(y-1)+'L'+(x-4)+' '+(y+8)+'L'+(x-1)+' '+y+'L'+(x-6)+' '+y+'Z');bolt.setAttribute('fill',color);bolt.setAttribute('stroke','#5d4037');bolt.setAttribute('stroke-width','1');svg.appendChild(bolt);if(group.length>1){const t=document.createElementNS(ns,'text');t.setAttribute('x',x+6);t.setAttribute('y',y-5);t.setAttribute('font-size','10');t.setAttribute('font-weight','700');t.setAttribute('fill','#111');t.setAttribute('stroke','#fff');t.setAttribute('stroke-width','3');t.setAttribute('paint-order','stroke');t.textContent=group.length;svg.appendChild(t);}}
   }
   _distanceRings(svg,selected,center,w,h) {
     const ns='http://www.w3.org/2000/svg';

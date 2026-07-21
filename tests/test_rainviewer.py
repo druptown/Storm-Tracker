@@ -70,6 +70,8 @@ def test_extract_observations_from_synthetic_tile(rainviewer_module):
     assert len(obs) == 1
     assert obs[0].footprint_points[0] == obs[0].footprint_points[-1]
     assert obs[0].radar_cell_id.startswith("rainviewer:")
+    assert provider.overlay["source"] == "rainviewer"
+    assert provider.overlay["runs"]
 
 
 def test_opaque_grey_pixels_do_not_count_as_rain(rainviewer_module):
