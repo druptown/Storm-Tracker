@@ -5,6 +5,7 @@ class Stv3MultiTargetMap extends HTMLElement {
     if (!this.shadowRoot) this.attachShadow({mode:'open'});
     this._zoom = this.config.zoom;
     this._showLightning = this.config.show_lightning !== false;
+    this._showTechnical = this.config.show_technical === true;
   }
   set hass(hass) {
     this._hass = hass;
@@ -45,9 +46,9 @@ class Stv3MultiTargetMap extends HTMLElement {
     this.shadowRoot.innerHTML =
       '<style>'+
       ':host{display:block} ha-card{overflow:hidden} .top{display:flex;gap:8px;align-items:center;padding:12px 14px;background:var(--ha-card-background,var(--card-background-color));flex-wrap:wrap}'+
-      '.title{font-weight:700;font-size:18px;flex:1;min-width:180px}.controls{display:flex;gap:6px;align-items:center} select,button{font:inherit;color:var(--primary-text-color);background:var(--secondary-background-color);border:1px solid var(--divider-color);border-radius:8px;padding:7px 9px}button{width:36px;font-weight:700;cursor:pointer}.lightning-toggle{width:auto;font-size:13px}.lightning-toggle.active{background:#5d4037;color:#fff;border-color:#ffca28}'+
+      '.title{font-weight:700;font-size:18px;flex:1;min-width:180px}.controls{display:flex;gap:6px;align-items:center} select,button{font:inherit;color:var(--primary-text-color);background:var(--secondary-background-color);border:1px solid var(--divider-color);border-radius:8px;padding:7px 9px}button{width:36px;font-weight:700;cursor:pointer}.lightning-toggle,.technical-toggle{width:auto;font-size:13px}.lightning-toggle.active{background:#5d4037;color:#fff;border-color:#ffca28}.technical-toggle.active{background:#37474f;color:#fff}'+
       '.map{position:relative;overflow:hidden;background:#cfe7f5;height:'+Number(this.config.height)+'px}.tiles,.overlay{position:absolute;inset:0}.tiles img{position:absolute;width:256px;height:256px}.overlay{pointer-events:none}.legend{position:absolute;left:10px;bottom:10px;background:rgba(20,25,30,.82);color:#fff;border-radius:8px;padding:7px 10px;font-size:12px;line-height:1.6}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}.meta{padding:8px 14px;font-size:12px;color:var(--secondary-text-color)}.error{padding:18px;color:var(--error-color)}'+
-      '</style><ha-card><div class="top"><div class="title">Neerslag, bliksem en targets</div><div class="controls"><select aria-label="Target"></select><button class="lightning-toggle'+(this._showLightning?' active':'')+'" title="Bliksemlaag aan- of uitzetten">&#9889; bliksem</button><button class="minus" title="Uitzoomen">-</button><button class="plus" title="Inzoomen">+</button></div></div><div class="map"><div class="tiles"></div><svg class="overlay"></svg><div class="legend"><span class="dot" style="background:#00e676"></span>target &nbsp; <span class="dot" style="background:#ff9800"></span>weersysteem<br><span class="dot" style="background:#2196f3"></span>radarcel &nbsp; <span class="dot" style="background:#ab47bc"></span>RegionEngine<br><span style="display:inline-block;width:12px;border-top:1px dashed #455a64;vertical-align:middle"></span> afstandsringen<br><span style="color:#ffeb3b;font-size:15px">&#9889;</span> bliksem &lt;2 min &nbsp; <span style="color:#ff9800;font-size:15px">&#9889;</span> 2-5 min &nbsp; <span style="color:#9e9e9e;font-size:15px">&#9889;</span> ouder</div></div><div class="meta"></div></ha-card>';
+      '</style><ha-card><div class="top"><div class="title">Neerslag, bliksem en targets</div><div class="controls"><select aria-label="Target"></select><button class="lightning-toggle'+(this._showLightning?' active':'')+'" title="Bliksemlaag aan- of uitzetten">&#9889; bliksem</button><button class="technical-toggle'+(this._showTechnical?' active':'')+'" title="Technische contouren">techniek</button><button class="minus" title="Uitzoomen">-</button><button class="plus" title="Inzoomen">+</button></div></div><div class="map"><div class="tiles"></div><svg class="overlay"></svg><div class="legend"><span class="dot" style="background:#00e676"></span>target &nbsp; <span class="dot" style="background:#81d4fa"></span>lichte regen &nbsp; <span class="dot" style="background:#f44336"></span>zware regen<br><span style="display:inline-block;width:12px;border-top:1px dashed #455a64;vertical-align:middle"></span> afstandsringen<br><span style="color:#ffeb3b;font-size:15px">&#9889;</span> bliksem &lt;2 min &nbsp; <span style="color:#ff9800;font-size:15px">&#9889;</span> 2-5 min &nbsp; <span style="color:#9e9e9e;font-size:15px">&#9889;</span> ouder</div></div><div class="meta"></div></ha-card>';
     const select=this.shadowRoot.querySelector('select');
     for(const target of targets){
       const option=document.createElement('option');
@@ -58,6 +59,7 @@ class Stv3MultiTargetMap extends HTMLElement {
     }
     select.addEventListener('change',e=>{this._selected=e.target.value;this._render();});
     this.shadowRoot.querySelector('.lightning-toggle').addEventListener('click',()=>{this._showLightning=!this._showLightning;this._render();});
+    this.shadowRoot.querySelector('.technical-toggle').addEventListener('click',()=>{this._showTechnical=!this._showTechnical;this._render();});
     this.shadowRoot.querySelector('.minus').addEventListener('click',()=>{this._zoom=Math.max(4,this._zoom-1);this._render();});
     this.shadowRoot.querySelector('.plus').addEventListener('click',()=>{this._zoom=Math.min(11,this._zoom+1);this._render();});
     requestAnimationFrame(()=>this._draw(selected));
@@ -76,14 +78,20 @@ class Stv3MultiTargetMap extends HTMLElement {
     }
     svg.setAttribute('viewBox','0 0 '+w+' '+h); svg.setAttribute('width',w); svg.setAttribute('height',h);
     const selectedEngine=selected.properties.region_engine;
+    const radarOverlay=(this._data.radar_overlays||{})[selectedEngine];
     const visible=this._data.features.filter(f=>{
       if(!selectedEngine) return true;
       if(f.properties.layer==='target') return f.properties.region_engine===selectedEngine;
       return f.properties.engine_id===selectedEngine;
     });
-    const filtered=visible.filter(f=>this._showLightning||f.properties.layer!=='lightning');
+    const filtered=visible.filter(f=>{
+      if(!this._showLightning&&f.properties.layer==='lightning') return false;
+      if(radarOverlay&&!this._showTechnical&&['storm','radar_cell'].includes(f.properties.layer)) return false;
+      return true;
+    });
     const order={region:0,storm:1,radar_cell:2,motion:3,lightning:4,target:5};
     const ordered=[...filtered].sort((a,b)=>(order[a.properties.layer]??9)-(order[b.properties.layer]??9));
+    if(radarOverlay) this._radarOverlay(svg,radarOverlay,center,w,h);
     this._distanceRings(svg,selected,center,w,h);
     for(const f of ordered) if(f.properties.layer!=='target') this._feature(svg,f,center,w,h);
     this._targetGroups(svg,ordered.filter(f=>f.properties.layer==='target'),center,w,h);
@@ -91,7 +99,25 @@ class Stv3MultiTargetMap extends HTMLElement {
     const visibleLightning=ordered.filter(f=>f.properties.layer==='lightning').length;
     const source=selected.properties.radar_source||'geen';
     const reason=selected.properties.radar_source_reason||'nog niet geselecteerd';
-    this.shadowRoot.querySelector('.meta').textContent=(selected.properties.name||selected.properties.target_id)+' | '+(selectedEngine||'alle engines')+' | radar: '+source+' | '+reason+' | zoom '+this._zoom+' | '+visibleCells+' radarcellen | '+visibleLightning+' bliksems (15 min)';
+    const overlayText=radarOverlay?' | raster: '+radarOverlay.runs.length+' pixelruns':'';
+    this.shadowRoot.querySelector('.meta').textContent=(selected.properties.name||selected.properties.target_id)+' | '+(selectedEngine||'alle engines')+' | radar: '+source+' | '+reason+overlayText+' | zoom '+this._zoom+' | '+visibleCells+' radarcellen | '+visibleLightning+' bliksems (15 min)';
+  }
+  _radarOverlay(svg,overlay,center,w,h) {
+    const ns='http://www.w3.org/2000/svg';
+    const colors=['transparent','#b3e5fc','#81d4fa','#29b6f6','#1565c0','#ffee58','#ff9800','#f44336','#8e24aa'];
+    const paths=new Map();
+    for(const run of overlay.runs||[]){
+      const level=Math.max(1,Math.min(8,Number(run.intensity)||1));
+      const points=(run.ring||[]).map(c=>this._screen([Number(c[1]),Number(c[0])],center,w,h));
+      if(points.length!==4) continue;
+      const d=points.map((p,i)=>(i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' ')+' Z';
+      paths.set(level,(paths.get(level)||'')+d+' ');
+    }
+    for(const [level,d] of [...paths.entries()].sort((a,b)=>a[0]-b[0])){
+      const path=document.createElementNS(ns,'path');
+      path.setAttribute('d',d);path.setAttribute('fill',colors[level]);path.setAttribute('fill-opacity','.72');path.setAttribute('stroke','none');
+      svg.appendChild(path);
+    }
   }
   _distanceRings(svg,selected,center,w,h) {
     const ns='http://www.w3.org/2000/svg';
@@ -147,10 +173,10 @@ class Stv3MultiTargetMap extends HTMLElement {
       }
       return;
     }
-    const coords=type==='Polygon'?f.geometry.coordinates[0]:f.geometry.coordinates;
-    if(!coords?.length) return;
-    const path=document.createElementNS(ns,'path'),d=coords.map((c,i)=>{const p=this._screen(c,center,w,h);return(i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1);}).join(' ')+(type==='Polygon'?' Z':'');
-    path.setAttribute('d',d);path.setAttribute('stroke',color);path.setAttribute('stroke-width',layer==='storm'?'3':layer==='motion'?'3':'1.5');path.setAttribute('fill',type==='Polygon'?color:'none');path.setAttribute('fill-opacity',layer==='storm'?'.12':'.20');path.setAttribute('stroke-opacity',layer==='radar_cell'?'.75':'.95');svg.appendChild(path);
+    const rings=type==='MultiPolygon'?f.geometry.coordinates.map(p=>p[0]):[type==='Polygon'?f.geometry.coordinates[0]:f.geometry.coordinates];
+    if(!rings[0]?.length) return;
+    const path=document.createElementNS(ns,'path'),d=rings.map(coords=>coords.map((c,i)=>{const p=this._screen(c,center,w,h);return(i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1);}).join(' ')+(type==='Polygon'||type==='MultiPolygon'?' Z':'')).join(' ');
+    path.setAttribute('d',d);path.setAttribute('stroke',color);path.setAttribute('stroke-width',layer==='storm'?'3':layer==='motion'?'3':'1.5');path.setAttribute('fill',type==='Polygon'||type==='MultiPolygon'?color:'none');path.setAttribute('fill-opacity',layer==='storm'?'.12':'.20');path.setAttribute('stroke-opacity',layer==='radar_cell'?'.75':'.95');svg.appendChild(path);
   }
 }
 if(!customElements.get('stv3-multi-target-map')) customElements.define('stv3-multi-target-map',Stv3MultiTargetMap);

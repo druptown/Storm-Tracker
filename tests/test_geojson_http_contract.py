@@ -32,3 +32,17 @@ def test_sensor_does_not_record_full_geojson_payload():
     segment = ast.get_source_segment(source, sensor)
     assert '"endpoint": "/api/storm_tracker_v3/geojson"' in segment
     assert '"geojson": collection' not in segment
+
+
+def test_geojson_feed_exposes_engine_raster_overlays():
+    source = (COMPONENT / "http.py").read_text(encoding="utf-8")
+    assert 'collection["radar_overlays"]' in source
+
+
+def test_dashboard_prefers_intensity_overlay_over_technical_contours():
+    source = (ROOT / "dashboard" / "stv3-multi-target-map.js").read_text(
+        encoding="utf-8"
+    )
+    assert "_radarOverlay(svg,overlay,center,w,h)" in source
+    assert "radarOverlay&&!this._showTechnical" in source
+    assert "type==='MultiPolygon'" in source

@@ -965,6 +965,13 @@ async def _async_setup_runtime(
         hass.data[DOMAIN]["provider_lifecycle_diagnostics"] = (
             provider_lifecycle.diagnostics()
         )
+        hass.data[DOMAIN]["radar_overlays_by_engine"] = {
+            region.engine_id: overlay
+            for region in storm_manager.get_all_engines()
+            if (overlay := provider_lifecycle.overlay(
+                (decisions.get(region.engine_id) or {}).get("source")
+            ))
+        }
         hass.bus.async_fire(f"{DOMAIN}_provider_lifecycle_update")
         hass.bus.async_fire(f"{DOMAIN}_radar_source_update", {"engines": decisions})
 

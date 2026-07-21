@@ -142,3 +142,8 @@ class ProviderLifecycleController:
                 **(details if isinstance(details, dict) else {}),
             }
         return diagnostics
+
+    def overlay(self, provider_id: str):
+        """Geef het laatste veilige kaartoverlay-contract van een provider."""
+        runtime = self._runtimes.get(provider_id)
+        return getattr(runtime.plugin, "overlay", None) if runtime else None

@@ -19,6 +19,44 @@ class RasterComponent:
     boundary: tuple[tuple[float, float], ...]
 
 
+def extract_intensity_runs(
+    intensity_grid,
+    corner_to_latlon: Callable[[float, float], tuple[float, float]],
+    *,
+    include_point: Callable[[float, float], bool] | None = None,
+    max_run_pixels: int = 16,
+) -> list[dict]:
+    """Comprimeer natte bronpixels tot korte, exact geprojecteerde rijruns."""
+    height, width = intensity_grid.shape
+    runs = []
+    for row in range(height):
+        col = 0
+        while col < width:
+            intensity = int(intensity_grid[row, col])
+            if intensity <= 0:
+                col += 1
+                continue
+            end = col + 1
+            limit = min(width, col + max_run_pixels)
+            while end < limit and int(intensity_grid[row, end]) == intensity:
+                end += 1
+            center_lat, center_lon = corner_to_latlon(
+                row + 0.5, (col + end) / 2.0
+            )
+            if include_point is None or include_point(center_lat, center_lon):
+                runs.append({
+                    "intensity": intensity,
+                    "ring": (
+                        corner_to_latlon(row, col),
+                        corner_to_latlon(row, end),
+                        corner_to_latlon(row + 1, end),
+                        corner_to_latlon(row + 1, col),
+                    ),
+                })
+            col = end
+    return runs
+
+
 def _pixel_components(values) -> list[list[tuple[int, int]]]:
     """Label natte pixels 4-connected, zonder scipy-afhankelijkheid."""
     import numpy as np

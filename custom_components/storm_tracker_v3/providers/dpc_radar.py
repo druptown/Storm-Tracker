@@ -12,7 +12,7 @@ from pyproj import Transformer
 from ..engine.observation import Observation, ObservationType
 from .base import Capability, CoverageResult
 from .odim_hdf5 import rain_rate_to_intensity
-from .raster_components import extract_components
+from .raster_components import extract_components, extract_intensity_runs
 
 _LOGGER = logging.getLogger(__name__)
 API_URL = "https://radar-api.protezionecivile.it"
@@ -22,7 +22,7 @@ MAX_FRAME_AGE_SECONDS = 20 * 60
 DPC_CRS = "+proj=lcc +lat_0=42 +lon_0=12.5 +lat_1=42 +lat_2=42 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
 
 
-def parse_sri_geotiff(payload: bytes, areas: tuple, *, timestamp: float, now: float | None = None):
+def _parse_sri_product(payload: bytes, areas: tuple, *, timestamp: float, now: float | None = None):
     """Decodeer het actuele DPC-SRI-raster; waarden zijn rechtstreeks mm/u."""
     reference_now = datetime.now(timezone.utc).timestamp() if now is None else now
     if reference_now - timestamp > MAX_FRAME_AGE_SECONDS:
@@ -36,7 +36,7 @@ def parse_sri_geotiff(payload: bytes, areas: tuple, *, timestamp: float, now: fl
         raise ValueError("DPC GeoTIFF mist georeferentie")
     rows, columns = np.nonzero((data >= 0.1) & (data < 500.0))
     if not len(rows):
-        return []
+        return [], {"source": "dpc_radar", "timestamp": timestamp, "runs": []}
     x0, y0 = float(tie[3]), float(tie[4])
     transformer = Transformer.from_crs(DPC_CRS, "EPSG:4326", always_xy=True)
     intensity_grid = np.zeros(data.shape, dtype=np.uint8)
@@ -53,6 +53,13 @@ def parse_sri_geotiff(payload: bytes, areas: tuple, *, timestamp: float, now: fl
         return round(float(lat), 5), round(float(lon), 5)
 
     components = extract_components(intensity_grid, corner_to_latlon)
+    include_point = (
+        (lambda lat, lon: any(area.contains(float(lat), float(lon)) for area in areas))
+        if areas else None
+    )
+    overlay_runs = extract_intensity_runs(
+        intensity_grid, corner_to_latlon, include_point=include_point
+    )
     observations = []
     frame_id = f"dpc_radar:{timestamp:.0f}"
     pixel_area_km2 = float(scale[0]) * float(scale[1]) / 1_000_000.0
@@ -76,6 +83,18 @@ def parse_sri_geotiff(payload: bytes, areas: tuple, *, timestamp: float, now: fl
             parent_footprint_points=component.boundary,
             source="dpc_radar",
         ))
+    return observations, {
+        "source": "dpc_radar",
+        "timestamp": timestamp,
+        "runs": overlay_runs,
+    }
+
+
+def parse_sri_geotiff(payload: bytes, areas: tuple, *, timestamp: float, now: float | None = None):
+    """Compatibele observatie-API voor tests en externe callers."""
+    observations, _ = _parse_sri_product(
+        payload, areas, timestamp=timestamp, now=now
+    )
     return observations
 
 
@@ -87,6 +106,7 @@ class DpcRadarProvider:
     def __init__(self, session):
         self._session, self._areas, self._last_timestamp = session, (), None
         self.diagnostics = {}
+        self.overlay = None
 
     def supports(self, area):
         margin = area.horizon_km / 90.0
@@ -119,7 +139,10 @@ class DpcRadarProvider:
             payload = await response.read()
         if len(payload) > MAX_FILE_BYTES:
             raise ValueError("DPC GeoTIFF overschrijdt veiligheidslimiet")
-        observations = await asyncio.to_thread(parse_sri_geotiff, payload, self._areas, timestamp=timestamp)
+        observations, overlay = await asyncio.to_thread(
+            _parse_sri_product, payload, self._areas, timestamp=timestamp
+        )
+        self.overlay = overlay
         self._last_timestamp = timestamp_ms
         self.diagnostics = {
             "product": "SRI", "frame_timestamp": timestamp,

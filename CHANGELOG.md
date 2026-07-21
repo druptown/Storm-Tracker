@@ -1,5 +1,16 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.68
+
+- Publiceer voor DPC Italië de werkelijk natte bronpixels als korte,
+  gegeorefereerde rasterruns per intensiteitsniveau; droge gaten blijven leeg.
+- Teken de operationele radarlaag met een KMI/Buienradar-achtige kleurenschaal
+  en verberg uniforme componentvullingen standaard wanneer rasterdata bestaat.
+- Voeg een kaartknop `techniek` toe waarmee interne WeatherSystem- en
+  radarcelcontouren afzonderlijk kunnen worden gecontroleerd.
+- Ondersteun `MultiPolygon` volledig in de custom kaart en houd de rasterlaag
+  gekoppeld aan de geselecteerde RegionEngine en diens actieve provider.
+
 # 0.4.67
 
 - Behoud maximaal 2048 geordende punten van gesloten bronpixelringen in de

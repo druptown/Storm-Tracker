@@ -32,6 +32,7 @@ class FakePlugin:
         self.starts = 0
         self.stops = 0
         self.fetches = 0
+        self.overlay = {"source": "national", "runs": []}
 
     def supports(self, area):
         base = sys.modules["storm_tracker_v3.providers.base"]
@@ -69,6 +70,8 @@ async def test_provider_sleeps_until_matching_engine_and_is_shared(base_module):
     result = await controller.async_fetch_active()
     assert len(result["national"]) == 2
     assert plugin.fetches == 1
+    assert controller.overlay("national") is plugin.overlay
+    assert controller.overlay("missing") is None
 
 
 @pytest.mark.asyncio
