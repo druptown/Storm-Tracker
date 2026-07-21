@@ -7,6 +7,7 @@ import time
 from ..geometry.hull import convex_hull
 
 MAX_HULL_POINTS = 48
+MAX_SOURCE_RING_POINTS = 2048
 MAX_RADAR_CELLS = 150
 MAX_LIGHTNING_EVENTS = 300
 LIGHTNING_MAX_AGE_S = 15 * 60
@@ -29,12 +30,14 @@ def _feature(feature_id: str, geometry: dict, **properties) -> dict:
     }
 
 
-def _sample_ring(points, *, order_as_hull: bool = False) -> list[list[float]]:
+def _sample_ring(
+    points, *, order_as_hull: bool = False, max_points: int = MAX_HULL_POINTS
+) -> list[list[float]]:
     values = list(points or [])
     if order_as_hull and len(values) >= 3:
         values = convex_hull(values)
-    if len(values) > MAX_HULL_POINTS:
-        step = math.ceil(len(values) / MAX_HULL_POINTS)
+    if len(values) > max_points:
+        step = math.ceil(len(values) / max_points)
         values = values[::step]
     ring = [_point(lon, lat) for lat, lon in values]
     if len(ring) >= 3 and ring[0] != ring[-1]:
@@ -182,14 +185,30 @@ def build_feature_collection(
                 "speed_kmh": storm.speed_kmh,
                 "radar_cells": len(storm.radar_cells),
             }
-            ring = _sample_ring(storm.hull)
-            geometry = (
-                {"type": "Polygon", "coordinates": [ring]}
-                if len(ring) >= 4
-                else {"type": "Point", "coordinates": _point(
-                    storm.centroid_lon, storm.centroid_lat
-                )}
-            )
+            source_rings = []
+            for cell in cells:
+                footprint = tuple(cell.footprint_points or ())
+                if len(footprint) < 4 or footprint[0] != footprint[-1]:
+                    continue
+                cell_ring = _sample_ring(
+                    footprint, max_points=MAX_SOURCE_RING_POINTS
+                )
+                if len(cell_ring) >= 4:
+                    source_rings.append([cell_ring])
+            if source_rings:
+                geometry = {
+                    "type": "MultiPolygon",
+                    "coordinates": source_rings,
+                }
+            else:
+                ring = _sample_ring(storm.hull)
+                geometry = (
+                    {"type": "Polygon", "coordinates": [ring]}
+                    if len(ring) >= 4
+                    else {"type": "Point", "coordinates": _point(
+                        storm.centroid_lon, storm.centroid_lat
+                    )}
+                )
             features.append(_feature(
                 f"storm:{storm_id}", geometry, layer="storm", **common
             ))
@@ -228,6 +247,10 @@ def build_feature_collection(
                 cell_ring = _sample_ring(
                     footprint,
                     order_as_hull=not is_closed_source_ring,
+                    max_points=(
+                        MAX_SOURCE_RING_POINTS
+                        if is_closed_source_ring else MAX_HULL_POINTS
+                    ),
                 )
                 cell_geometry = (
                     {"type": "Polygon", "coordinates": [cell_ring]}

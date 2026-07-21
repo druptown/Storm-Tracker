@@ -1,5 +1,14 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.67
+
+- Behoud maximaal 2048 geordende punten van gesloten bronpixelringen in de
+  kaartfeed in plaats van ze willekeurig tot 48 punten en lange koorden terug
+  te brengen.
+- Publiceer WeatherSystems met meerdere actuele broncontouren als GeoJSON
+  `MultiPolygon`, zodat losse regenvelden niet meer door een kunstmatige
+  convexe oranje driehoek worden verbonden.
+
 # 0.4.66
 
 - Vervang regelmatige rasterpuntbemonstering door echte 4-connected

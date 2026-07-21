@@ -211,6 +211,36 @@ def test_unordered_radar_footprint_is_published_as_convex_ring(geojson_module):
     assert ring[0] == ring[-1]
 
 
+def test_closed_source_rings_form_multipolygon_without_48_point_chords(
+    geojson_module,
+):
+    ring = tuple(
+        [(51.0, 4.0 + index * 0.001) for index in range(80)]
+        + [(51.01, 4.079), (51.01, 4.0), (51.0, 4.0)]
+    )
+    cell = SimpleNamespace(
+        cell_id="dpc_radar:1600:c1", timestamp=1_600.0,
+        lat=51.005, lon=4.04, footprint_points=ring,
+        intensity=4, max_dbz=None, area_km2=8.0,
+    )
+
+    result = geojson_module.build_feature_collection(
+        {}, [_region(_storm({"cell": cell}))],
+        active_radar_source="dpc_radar",
+    )
+    storm = next(
+        feature for feature in result["features"]
+        if feature["properties"]["layer"] == "storm"
+    )
+    radar = next(
+        feature for feature in result["features"]
+        if feature["properties"]["layer"] == "radar_cell"
+    )
+
+    assert storm["geometry"]["type"] == "MultiPolygon"
+    assert len(radar["geometry"]["coordinates"][0]) == len(ring)
+
+
 def test_lightning_is_a_separate_recent_point_layer(geojson_module):
     now = time.time()
     result = geojson_module.build_feature_collection(
