@@ -95,6 +95,7 @@ CONFIG_SCHEMA = vol.Schema({
         vol.Optional("eumetsat_consumer_key"): cv.string,
         vol.Optional("eumetsat_consumer_secret"): cv.string,
         vol.Optional("meteofrance_api_token"): cv.string,
+        vol.Optional("meteofrance_application_id"): cv.string,
         vol.Optional("lightning_source_mode", default="auto"): vol.In({"auto", "satellite_test"}),
     })
 }, extra=vol.ALLOW_EXTRA)
@@ -129,6 +130,9 @@ async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
         "eumetsat_consumer_key": raw.get("eumetsat_consumer_key"),
         "eumetsat_consumer_secret": raw.get("eumetsat_consumer_secret"),
         "meteofrance_api_token": raw.get("meteofrance_api_token"),
+        "meteofrance_application_id": raw.get("meteofrance_application_id"),
+        "knmi_api_key": raw.get("knmi_api_key"),
+        "knmi_wms_api_key": raw.get("knmi_wms_api_key"),
         "lightning_source_mode": raw.get("lightning_source_mode", "auto"),
     }
     if raw.get("test_tracker_entity"):
@@ -428,10 +432,14 @@ async def _async_setup_runtime(
     provider_lifecycle.register(ItaliaMeteoRadarProvider(http_session), _national_context)
     provider_lifecycle.register(DpcRadarProvider(http_session), _national_context)
     provider_lifecycle.register(AemetRadarProvider(http_session), _national_context)
-    if conf.get("meteofrance_api_token"):
+    if conf.get("meteofrance_api_token") or conf.get("meteofrance_application_id"):
         from .providers.meteofrance_radar import MeteoFranceRadarProvider
         provider_lifecycle.register(
-            MeteoFranceRadarProvider(http_session, conf["meteofrance_api_token"]),
+            MeteoFranceRadarProvider(
+                http_session,
+                token=conf.get("meteofrance_api_token"),
+                application_id=conf.get("meteofrance_application_id"),
+            ),
             _national_context,
         )
     hass.data[DOMAIN]["provider_lifecycle"] = provider_lifecycle
@@ -792,6 +800,10 @@ async def _async_setup_runtime(
             engine_id: list(result.accepted)
             for engine_id, result in verification_by_engine.items()
         }
+        for engine_id, provider in providers.items():
+            provider.apply_accepted_overlay(
+                accepted_by_engine.get(engine_id, [])
+            )
         raw_obs = [item for values in raw_by_engine.values() for item in values]
         obs = [item for values in accepted_by_engine.values() for item in values]
         observation_counts = {
@@ -976,6 +988,7 @@ async def _async_setup_runtime(
         }
         per_engine = {
             "rainviewer": hass.data[DOMAIN].get("rainviewer_providers_by_engine", {}),
+            "opera": hass.data[DOMAIN].get("opera_providers_by_engine", {}),
         }
         for region in storm_manager.get_all_engines():
             source = (decisions.get(region.engine_id) or {}).get("source")

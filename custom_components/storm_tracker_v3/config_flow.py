@@ -16,6 +16,9 @@ CONF_SHARING_DISTANCE = "engine_sharing_distance_km"
 CONF_EUMETSAT_KEY = "eumetsat_consumer_key"
 CONF_EUMETSAT_SECRET = "eumetsat_consumer_secret"
 CONF_METEOFRANCE_TOKEN = "meteofrance_api_token"
+CONF_METEOFRANCE_APPLICATION_ID = "meteofrance_application_id"
+CONF_KNMI_API_KEY = "knmi_api_key"
+CONF_KNMI_WMS_API_KEY = "knmi_wms_api_key"
 CONF_LIGHTNING_SOURCE_MODE = "lightning_source_mode"
 
 
@@ -50,6 +53,24 @@ def _schema(defaults: dict) -> vol.Schema:
         vol.Optional(
             CONF_METEOFRANCE_TOKEN,
             default=defaults.get(CONF_METEOFRANCE_TOKEN, ""),
+        ): selector.TextSelector(selector.TextSelectorConfig(
+            type=selector.TextSelectorType.PASSWORD,
+        )),
+        vol.Optional(
+            CONF_METEOFRANCE_APPLICATION_ID,
+            default=defaults.get(CONF_METEOFRANCE_APPLICATION_ID, ""),
+        ): selector.TextSelector(selector.TextSelectorConfig(
+            type=selector.TextSelectorType.PASSWORD,
+        )),
+        vol.Optional(
+            CONF_KNMI_API_KEY,
+            default=defaults.get(CONF_KNMI_API_KEY, ""),
+        ): selector.TextSelector(selector.TextSelectorConfig(
+            type=selector.TextSelectorType.PASSWORD,
+        )),
+        vol.Optional(
+            CONF_KNMI_WMS_API_KEY,
+            default=defaults.get(CONF_KNMI_WMS_API_KEY, ""),
         ): selector.TextSelector(selector.TextSelectorConfig(
             type=selector.TextSelectorType.PASSWORD,
         )),

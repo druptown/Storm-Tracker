@@ -146,6 +146,26 @@ def test_valid_storm_cell_detected_with_gain_offset_applied(opera_module, opera_
     assert timestamp == f"{meta['date']}T{meta['time']}Z"
 
 
+def test_opera_exposes_exact_accepted_raster_runs(opera_module, opera_fixture_file):
+    meta = opera_fixture_file
+    with open(meta["path"], "rb") as handle:
+        data = handle.read()
+    overlays = []
+    cells, timestamp = opera_module._parse_hdf5_slice(
+        data, _full_bbox(meta), overlays
+    )
+    assert overlays[0]["source"] == "opera"
+    assert overlays[0]["runs"]
+    provider = opera_module.OperaProvider(
+        meta["test_lat"], meta["test_lon"], radius_km=500
+    )
+    provider._raw_overlay = overlays[0]
+    observations = provider._cells_to_observations(cells, timestamp)
+    provider.apply_accepted_overlay(observations)
+    assert provider.overlay["runs"]
+    assert len(provider.overlay["runs"]) <= len(overlays[0]["runs"])
+
+
 def test_low_quality_is_retained_as_diagnostic_metadata(opera_module, opera_fixture_file):
     """OPERA qi_total=0/low can occur on real rain and must not reject the cell."""
     meta = opera_fixture_file

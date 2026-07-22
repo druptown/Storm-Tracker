@@ -240,7 +240,7 @@ def test_fetch_filters_cells_outside_true_circular_radius(opera_module, monkeypa
             max_dbz=20, mean_dbz=15, mean_quality=0, pixelcount=10,
         )
 
-    def _fake_parse(data, bbox):
+    def _fake_parse(data, bbox, overlay_out=None):
         return [_cell(51.5, 4.5), _cell(55.0, 10.0)], "2026-07-12T12:00:00Z"
 
     _patch_dummy_session(monkeypatch, opera_module)

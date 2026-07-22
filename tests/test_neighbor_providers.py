@@ -1,5 +1,7 @@
 """Contracttests voor de slapende nationale buurlandproviders."""
 
+import asyncio
+
 
 def test_met_office_selects_latest_hdf_key(met_office_radar_module):
     xml = """<ListBucketResult xmlns='http://s3.amazonaws.com/doc/2006-03-01/'>
@@ -20,6 +22,33 @@ def test_national_provider_coverage(base_module, met_office_radar_module, meteof
     assert not met_office_radar_module.MetOfficeRadarProvider(None).supports(miami).supported
     assert not meteofrance_radar_module.MeteoFranceRadarProvider(None, "token").supports(miami).supported
     assert not meteolux_module.MeteoLuxProvider(None).supports(miami).supported
+
+
+def test_meteofrance_application_id_refreshes_and_caches_token(
+    meteofrance_radar_module,
+):
+    class Response:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
+        def raise_for_status(self): return None
+        async def json(self, content_type=None):
+            return {"access_token": "fresh", "expires_in": 3600}
+
+    class Session:
+        def __init__(self): self.posts = 0
+        def post(self, url, data=None, headers=None):
+            self.posts += 1
+            assert headers["Authorization"] == "Basic application-id"
+            return Response()
+
+    session = Session()
+    provider = meteofrance_radar_module.MeteoFranceRadarProvider(
+        session, application_id="application-id"
+    )
+    first = asyncio.run(provider._access_token())
+    second = asyncio.run(provider._access_token())
+    assert first == second == "fresh"
+    assert session.posts == 1
 
 
 def test_policy_uses_real_neighbor_provider_ids():

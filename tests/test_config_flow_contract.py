@@ -10,7 +10,7 @@ COMPONENT = ROOT / "custom_components" / "storm_tracker_v3"
 def test_config_flow_is_enabled_and_version_matches():
     manifest = json.loads((COMPONENT / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["config_flow"] is True
-    assert manifest["version"] == "0.4.69"
+    assert manifest["version"] == "0.4.70"
 
 
 def test_config_flow_and_translations_are_valid():
@@ -25,6 +25,9 @@ def test_config_flow_and_translations_are_valid():
         assert "test_tracker_entity" in fields
         assert "eumetsat_consumer_key" in fields
         assert "eumetsat_consumer_secret" in fields
+        assert "meteofrance_application_id" in fields
+        assert "knmi_api_key" in fields
+        assert "knmi_wms_api_key" in fields
         assert "lightning_source_mode" in fields
 
 

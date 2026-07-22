@@ -51,6 +51,7 @@ from typing import Iterator, Optional
 import aiohttp
 
 from ..engine.observation import Observation, ObservationType
+from .raster_components import extract_intensity_runs
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -152,6 +153,26 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
     )
     return 6371.0088 * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _point_in_ring(lat: float, lon: float, ring) -> bool:
+    """Even-odd test voor een (lat, lon)-bronpixel binnen een celring."""
+    inside = False
+    points = tuple(ring or ())
+    if len(points) < 4:
+        return False
+    previous_lat, previous_lon = points[-1]
+    for current_lat, current_lon in points:
+        crosses = (current_lat > lat) != (previous_lat > lat)
+        if crosses:
+            boundary_lon = (
+                (previous_lon - current_lon) * (lat - current_lat)
+                / (previous_lat - current_lat) + current_lon
+            )
+            if lon < boundary_lon:
+                inside = not inside
+        previous_lat, previous_lon = current_lat, current_lon
+    return inside
 
 
 def _edge_points(bbox: tuple, samples: int = 33):
@@ -422,7 +443,9 @@ def _analyze_components(
     return sorted(cells, key=lambda c: c.area_km2, reverse=True)
 
 
-def _parse_hdf5_slice(data: bytes, bbox: tuple) -> tuple[list[OperaCell], str]:
+def _parse_hdf5_slice(
+    data: bytes, bbox: tuple, overlay_out: list | None = None
+) -> tuple[list[OperaCell], str]:
     """
     Synchrone HDF5 parsing van een lokale bbox slice.
     Wordt via async_add_executor_job buiten de event loop uitgevoerd.
@@ -472,6 +495,35 @@ def _parse_hdf5_slice(data: bytes, bbox: tuple) -> tuple[list[OperaCell], str]:
             & (quality != quality_nodata)
         )
         mask       = valid & (radar >= MIN_DBZ)
+        if overlay_out is not None:
+            from pyproj import CRS, Transformer
+            inverse = Transformer.from_crs(
+                CRS.from_user_input(grid.projdef), CRS.from_epsg(4326),
+                always_xy=True,
+            )
+
+            def corner_to_latlon(row, column):
+                lon, lat = inverse.transform(
+                    (col0 + column) * grid.xscale,
+                    -(row0 + row) * grid.yscale,
+                )
+                return round(float(lat), 5), round(float(lon), 5)
+
+            intensity_grid = np.zeros(radar.shape, dtype=np.uint8)
+            intensity_grid[mask & (radar < 15)] = 1
+            intensity_grid[mask & (radar >= 15) & (radar < 20)] = 2
+            intensity_grid[mask & (radar >= 20) & (radar < 25)] = 3
+            intensity_grid[mask & (radar >= 25) & (radar < 30)] = 4
+            intensity_grid[mask & (radar >= 30) & (radar < 35)] = 5
+            intensity_grid[mask & (radar >= 35) & (radar < 40)] = 6
+            intensity_grid[mask & (radar >= 40) & (radar < 50)] = 7
+            intensity_grid[mask & (radar >= 50)] = 8
+            overlay_out.append({
+                "source": "opera", "timestamp": 0.0,
+                "runs": extract_intensity_runs(
+                    intensity_grid, corner_to_latlon
+                ),
+            })
         groups = _segment_component_groups(mask, radar, MIN_PIXELS)
         cells = []
         for parent_index, group in enumerate(groups):
@@ -500,6 +552,13 @@ def _parse_hdf5_slice(data: bytes, bbox: tuple) -> tuple[list[OperaCell], str]:
         date = _text_attr(h5["what"].attrs.get("date", ""))
         time_ = _text_attr(h5["what"].attrs.get("time", ""))
         timestamp = f"{date}T{time_}Z" if date and time_ else ""
+        if overlay_out:
+            try:
+                overlay_out[0]["timestamp"] = datetime.fromisoformat(
+                    timestamp.replace("Z", "+00:00")
+                ).timestamp()
+            except ValueError:
+                overlay_out[0]["timestamp"] = time.time()
         return cells, timestamp
 
 
@@ -686,11 +745,41 @@ class OperaProvider:
         self._last_product_ts: Optional[float] = None
         self._last_cells: list[dict] = []
         self._last_observations: list[Observation] = []
+        self.overlay = None
+        self._raw_overlay = None
 
     @property
     def healthy(self) -> bool:
         """True only after a fresh product was downloaded/cached and parsed."""
         return self._healthy
+
+    def apply_accepted_overlay(self, observations: list[Observation]) -> None:
+        """Beperk bronpixels tot cellen die de OPERA-verificatie aanvaardde."""
+        if not self._raw_overlay:
+            self.overlay = None
+            return
+        accepted = []
+        for observation in observations:
+            ring = (
+                observation.footprint_points
+                or observation.parent_footprint_points
+            )
+            accepted.append((observation, ring))
+        runs = []
+        for run in self._raw_overlay.get("runs", ()):
+            lat = sum(point[0] for point in run["ring"]) / 4
+            lon = sum(point[1] for point in run["ring"]) / 4
+            if any(
+                _point_in_ring(lat, lon, ring)
+                or (
+                    not ring and _haversine_km(
+                        lat, lon, observation.lat, observation.lon
+                    ) <= max(2.0, math.sqrt(max(0.0, observation.area_km2) / math.pi))
+                )
+                for observation, ring in accepted
+            ):
+                runs.append(run)
+        self.overlay = {**self._raw_overlay, "runs": runs}
 
     @property
     def diagnostics(self) -> dict:
@@ -789,12 +878,26 @@ class OperaProvider:
 
             # Verwerk lokale slice (buiten event loop)
             bbox = self._bbox()
+            overlays = []
             if hass:
                 cells, ts = await hass.async_add_executor_job(
-                    _parse_hdf5_slice, data, bbox
+                    _parse_hdf5_slice, data, bbox, overlays
                 )
             else:
-                cells, ts = _parse_hdf5_slice(data, bbox)
+                cells, ts = _parse_hdf5_slice(data, bbox, overlays)
+
+            raw_overlay = overlays[0] if overlays else None
+            if raw_overlay:
+                raw_overlay["runs"] = [
+                    run for run in raw_overlay["runs"]
+                    if _haversine_km(
+                        self._lat, self._lon,
+                        sum(point[0] for point in run["ring"]) / 4,
+                        sum(point[1] for point in run["ring"]) / 4,
+                    ) <= self._radius
+                ]
+            self._raw_overlay = raw_overlay
+            self.overlay = raw_overlay
 
             # The projected crop is rectangular and its corners can extend far
             # beyond the configured circular monitoring radius. Enforce the

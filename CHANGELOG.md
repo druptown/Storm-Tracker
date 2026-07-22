@@ -1,5 +1,16 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.70
+
+- Publiceer de gegeorefereerde lokale OPERA-DBZH-pixels via hetzelfde
+  intensiteitsruncontract als alle nationale rasterproviders.
+- Beperk de OPERA-kaartlaag tot cellen die door de bestaande kwaliteits- en
+  corroboratiefilter zijn aanvaard; afgekeurde clutter wordt niet getekend.
+- Voeg KNMI API- en WMS-sleutels toe aan de UI-configuratie en geef ze vanuit
+  een config entry daadwerkelijk aan de KNMI-provider door.
+- Voeg een Météo-France APPLICATION_ID toe en vernieuw het kortlevende OAuth2-
+  toegangstoken automatisch; een tijdelijk handmatig token blijft fallback.
+
 # 0.4.69
 
 - Publiceer echte intensiteitsruns voor alle beschikbare bronrasters: KMI,
