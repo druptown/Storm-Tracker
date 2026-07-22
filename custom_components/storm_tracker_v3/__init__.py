@@ -686,10 +686,19 @@ async def _async_setup_runtime(
                 ))
         return routed
     from .engine.radar_calibration import RadarCalibrationObserver
+    from .engine.calibration_store import CalibrationDataStore
     hass.data[DOMAIN]["radar_calibration_observer"] = RadarCalibrationObserver(
         evaluation_center=(home_lat, home_lon),
         evaluation_radius_km=radar_radius,
     )
+    calibration_store = CalibrationDataStore(
+        hass.config.path(".storage", "storm_tracker_v3_calibration.sqlite3")
+    )
+    await hass.async_add_executor_job(calibration_store.initialize)
+    hass.data[DOMAIN]["radar_calibration_store"] = calibration_store
+    hass.data[DOMAIN]["radar_calibration_storage"] = {
+        "status": "ready", "path": str(calibration_store.path), "bytes": 0,
+    }
     hass.data[DOMAIN]["radar_calibration"] = (
         hass.data[DOMAIN]["radar_calibration_observer"].diagnostics()
     )
@@ -728,7 +737,11 @@ async def _async_setup_runtime(
                 evaluation_center=(region.center_lat, region.center_lon),
                 evaluation_radius_km=region.observation_radius_km,
             )
-        hass.data[DOMAIN]["radar_calibration"] = observer.diagnostics()
+        diagnostics = observer.diagnostics()
+        diagnostics["storage"] = hass.data[DOMAIN].get(
+            "radar_calibration_storage", {}
+        )
+        hass.data[DOMAIN]["radar_calibration"] = diagnostics
         hass.bus.async_fire(
             f"{DOMAIN}_calibration_update",
             {"samples": hass.data[DOMAIN]["radar_calibration"]["samples"]},
@@ -895,11 +908,19 @@ async def _async_setup_runtime(
         hass.data[DOMAIN]["last_kmi_observations"] = obs
         hass.data[DOMAIN]["kmi_frame_timestamp"] = p.last_frame_timestamp
         hass.data[DOMAIN]["kmi_count"] = len(obs)
-        _record_calibration_frame(
-            "kmi",
-            [observation for observation in obs if (observation.intensity or 0) >= 2],
-            p.last_frame_timestamp,
-        )
+        from .providers.kmi import KmiProviderFactory
+        calibration_obs = [
+            observation for observation in obs
+            if (observation.intensity or 0) >= 2
+        ]
+        for region in storm_manager.get_all_engines():
+            if KmiProviderFactory.supports(
+                region.center_lat, region.center_lon, region.observation_radius_km
+            ):
+                _record_calibration_frame(
+                    "kmi", calibration_obs, p.last_frame_timestamp,
+                    engine_id=region.engine_id,
+                )
         hass.bus.async_fire(f"{DOMAIN}_radar_update", {"source": "kmi", "count": len(obs)})
         lat = hass.data[DOMAIN].get("fictieve_lat", home_lat)
         lon = hass.data[DOMAIN].get("fictieve_lon", home_lon)
@@ -978,9 +999,15 @@ async def _async_setup_runtime(
         hass.data[DOMAIN]["knmi_intensity_30min"]  = _intens(30)
         hass.data[DOMAIN]["knmi_intensity_60min"]  = _intens(60)
         hass.data[DOMAIN]["knmi_intensity_120min"] = _intens(120)
-        _record_calibration_frame(
-            "knmi", current, getattr(p, "last_frame_timestamp", None)
-        )
+        from .providers.knmi import KnmiProviderFactory
+        for region in storm_manager.get_all_engines():
+            if KnmiProviderFactory.supports(
+                region.center_lat, region.center_lon, region.observation_radius_km
+            ):
+                _record_calibration_frame(
+                    "knmi", current, getattr(p, "last_frame_timestamp", None),
+                    engine_id=region.engine_id,
+                )
         hass.bus.async_fire(f"{DOMAIN}_knmi_update", {
             "current":       len(current),
             "forecast":      len(forecast),
@@ -1617,6 +1644,35 @@ async def _async_setup_runtime(
             hass.data[DOMAIN].setdefault("provider_stage_timeouts", {})[name] = time.time()
             return None
 
+    async def _flush_calibration_data() -> None:
+        """Schrijf de verzamelde kalibratiedata buiten de HA-eventloop weg."""
+        observer = hass.data[DOMAIN]["radar_calibration_observer"]
+        batch = observer.drain_collection_batch()
+        if not batch["frames"] and not batch["comparisons"]:
+            return
+        try:
+            result = await hass.async_add_executor_job(
+                calibration_store.write_batch, batch
+            )
+        except Exception as exc:
+            observer.restore_collection_batch(batch)
+            hass.data[DOMAIN]["radar_calibration_storage"] = {
+                "status": "error", "error": type(exc).__name__,
+                "path": str(calibration_store.path),
+            }
+            _LOGGER.exception("Kalibratiedatabase schrijven mislukt")
+            return
+        hass.data[DOMAIN]["radar_calibration_storage"] = {
+            "status": "ready", **result,
+        }
+        diagnostics = observer.diagnostics()
+        diagnostics["storage"] = hass.data[DOMAIN]["radar_calibration_storage"]
+        hass.data[DOMAIN]["radar_calibration"] = diagnostics
+        hass.bus.async_fire(
+            f"{DOMAIN}_calibration_update",
+            {"samples": diagnostics["samples"]},
+        )
+
     async def _poll_all(now=None):
         """Voer een volledige providercyclus in vaste, racevrije volgorde uit."""
         lock = hass.data[DOMAIN].setdefault("provider_cycle_lock", asyncio.Lock())
@@ -1637,6 +1693,9 @@ async def _async_setup_runtime(
                 "ground_validation",
                 asyncio.gather(_poll_netatmo(), _poll_open_meteo()),
                 30,
+            )
+            await _bounded_provider_stage(
+                "calibration_storage", _flush_calibration_data(), 15
             )
 
     # ── Polling intervallen ───────────────────────────────────────────────
@@ -1837,6 +1896,7 @@ async def _async_setup_runtime(
     def _on_ha_stop(event):
         blitz.stop()
         hass.async_create_task(provider_lifecycle.async_stop_all())
+        hass.async_create_task(_flush_calibration_data())
         for region in storm_manager.get_all_engines():
             hass.async_create_task(
                 mcs_store.async_save_engine(region.storage_key, region.storm_engine)
@@ -1857,5 +1917,5 @@ async def _async_setup_runtime(
         hass.async_create_task(_poll_eumetsat_li())
         hass.async_create_task(_poll_goes_glm())
 
-    _LOGGER.info("Storm Tracker V3 v0.4.59 gestart met radarroutering per RegionEngine")
+    _LOGGER.info("Storm Tracker V3 gestart met radarroutering per RegionEngine")
     return True

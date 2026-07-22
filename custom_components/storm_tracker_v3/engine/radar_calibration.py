@@ -108,6 +108,8 @@ class RadarCalibrationObserver:
         self.evaluation_radius_km = evaluation_radius_km
         self._frames: dict[str, dict[str, dict[int, tuple]]] = {}
         self._matched: set[tuple[str, str, str, int]] = set()
+        self._collection_frames: dict[tuple[str, str, int], tuple] = {}
+        self._collection_comparisons: list[tuple] = []
 
     @staticmethod
     def _nominal_minute(timestamp: float) -> int:
@@ -146,6 +148,28 @@ class RadarCalibrationObserver:
             else self.evaluation_radius_km
         )
         frame = tuple(_within_evaluation_area(observations, center, radius))
+        points: dict[tuple[int, int], list[float | int | None]] = {}
+        for observation in frame:
+            footprint = tuple(getattr(observation, "footprint_points", ()) or ())
+            if not footprint:
+                footprint = ((observation.lat, observation.lon),)
+            intensity = getattr(observation, "intensity", None)
+            quality = getattr(observation, "quality", None)
+            for lat, lon in footprint:
+                cell = _grid_cell(lat, lon, self.grid_deg)
+                current = points.setdefault(cell, [None, None, 0])
+                if intensity is not None:
+                    current[0] = max(float(intensity), current[0] or float("-inf"))
+                if quality is not None:
+                    current[1] = max(float(quality), current[1] or float("-inf"))
+                current[2] += 1
+        collected_at = time.time()
+        self._collection_frames[(str(region_id), str(source), minute)] = (
+            str(region_id), str(source), minute, float(timestamp), collected_at,
+            self.grid_deg, len(frame), len(points),
+            tuple((lat, lon, values[0], values[1], values[2])
+                  for (lat, lon), values in points.items()),
+        )
         self._frames.setdefault(str(region_id), {}).setdefault(str(source), {})[
             minute
         ] = frame
@@ -258,7 +282,31 @@ class RadarCalibrationObserver:
             f1_score=round(f1, 3) if f1 is not None else None,
         )
         self._history.append(snapshot)
+        self._collection_comparisons.append((
+            region_id, snapshot.source_a, snapshot.source_b,
+            self._nominal_minute(current), current,
+            snapshot.primary_cells, snapshot.reference_cells,
+            snapshot.overlap_cells, snapshot.false_positive_cells,
+            snapshot.missed_cells, snapshot.precision, snapshot.recall,
+            snapshot.f1_score,
+        ))
         return snapshot
+
+    def drain_collection_batch(self) -> dict:
+        """Neem alle nog niet weggeschreven records atomair uit de observer."""
+        batch = {
+            "frames": tuple(self._collection_frames.values()),
+            "comparisons": tuple(self._collection_comparisons),
+        }
+        self._collection_frames.clear()
+        self._collection_comparisons.clear()
+        return batch
+
+    def restore_collection_batch(self, batch: dict) -> None:
+        """Plaats een mislukte schrijfbatch terug zodat data niet verloren gaat."""
+        for frame in batch.get("frames", ()):
+            self._collection_frames[tuple(frame[:3])] = frame
+        self._collection_comparisons[:0] = list(batch.get("comparisons", ()))
 
     def diagnostics(self) -> dict:
         """Geef laatste en gemiddelde score; nooit operationele instellingen."""

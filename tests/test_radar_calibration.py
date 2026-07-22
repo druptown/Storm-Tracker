@@ -121,3 +121,26 @@ def test_three_sources_create_each_pair_once(radar_calibration_module):
     assert set(diagnostics["provider_pairs"]) == {
         "kmi<->opera", "kmi<->rainviewer", "opera<->rainviewer",
     }
+
+
+def test_collection_batch_keeps_dry_frames_and_grid_intensity(
+    radar_calibration_module,
+):
+    wet = _obs(51.01, 4.01)
+    wet.intensity = 6
+    wet.quality = 0.8
+    observer = radar_calibration_module.RadarCalibrationObserver(grid_deg=0.1)
+    observer.record_frame(
+        [], source="kmi", timestamp=1_200, region_id="region",
+    )
+    observer.record_frame(
+        [wet], source="opera", timestamp=1_200, region_id="region",
+    )
+    batch = observer.drain_collection_batch()
+    assert len(batch["frames"]) == 2
+    dry = next(frame for frame in batch["frames"] if frame[1] == "kmi")
+    assert dry[6:8] == (0, 0)
+    opera = next(frame for frame in batch["frames"] if frame[1] == "opera")
+    assert opera[8] == ((510, 40, 6.0, 0.8, 1),)
+    assert len(batch["comparisons"]) == 1
+    assert observer.drain_collection_batch() == {"frames": (), "comparisons": ()}

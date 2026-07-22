@@ -409,3 +409,11 @@ def radar_calibration_module():
         f"{PKG_NAME}.engine.radar_calibration",
         PKG_ROOT / "engine" / "radar_calibration.py",
     )
+
+
+@pytest.fixture
+def calibration_store_module():
+    return _load_module(
+        f"{PKG_NAME}.engine.calibration_store",
+        PKG_ROOT / "engine" / "calibration_store.py",
+    )

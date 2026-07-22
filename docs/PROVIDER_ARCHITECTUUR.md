@@ -1,7 +1,7 @@
-# Storm Tracker V3 — providerarchitectuur 0.4.83
+# Storm Tracker V3 — providerarchitectuur 0.4.84
 
 Dit document beschrijft de effectief geïmplementeerde providerstructuur van
-Storm Tracker V3 0.4.83. Het onderscheidt operationele radar, fallbackdata,
+Storm Tracker V3 0.4.84. Het onderscheidt operationele radar, fallbackdata,
 bliksem, validatiebronnen en bronnen die alleen beleidsmatig voor toekomstige
 uitbreiding zijn voorzien.
 
@@ -193,6 +193,13 @@ rapporteert overlap, gemiste en extra bezette rastervakken, precision, recall
 en F1 per providerpaar. Deze scores zijn voorlopig diagnostisch en wijzigen
 geen operationele filtering.
 
+Alle invoer voor latere kalibratie wordt onbeperkt bewaard in
+`.storage/storm_tracker_v3_calibration.sqlite3`. De database bevat afzonderlijke
+tabellen voor bronframes, hun bezette 0,10-gradenrasterpunten en paarsgewijze
+vergelijkingsresultaten. Ook droge frames worden opgeslagen. SQLite gebruikt
+WAL en transactionele batches buiten de Home Assistant-eventloop; er is bewust
+geen retentie, aggregatie of automatische filteraanpassing actief.
+
 - actuele afstand tot elk target;
 - naderend, wegtrekkend, passerend of stationair;
 - bewegingsvector en snelheid;
@@ -232,7 +239,7 @@ zijn nog geen garantie dat de bijbehorende runtimeprovider bestaat. Tot hun
 implementatie gebruikt het systeem in die regio's alleen de hierboven als
 operationeel beschreven bronnen.
 
-## 10. Testdekking in 0.4.83
+## 10. Testdekking in 0.4.84
 
 De provider-audit omvat tests voor:
 

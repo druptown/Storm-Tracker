@@ -1,5 +1,16 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.84
+
+- Leg alle regionale providerframes, inclusief geldige droge frames, permanent
+  vast in een afzonderlijke SQLite-database onder Home Assistant `.storage`.
+- Bewaar per frame de bron, geografische enginesleutel, producttijd en alle
+  bezette 0,10-gradenrasterpunten met maximale intensiteit en kwaliteit.
+- Bewaar iedere exacte paarsgewijze vergelijking append-only voor latere
+  offline analyse; er geldt bewust geen automatische retentie of kalibratie.
+- Gebruik WAL, transacties en schrijven buiten de HA-eventloop, en plaats een
+  mislukte batch terug in het geheugen voor een volgende poging.
+
 # 0.4.83
 
 - Vervang de OPERA-centrische kalibratie door regionale kruisvalidatie tussen
