@@ -455,6 +455,12 @@ async def _async_setup_runtime(
     hass.data[DOMAIN]["radar_sources_by_engine"] = {}
     hass.data[DOMAIN]["opera_providers_by_engine"] = {}
     hass.data[DOMAIN]["rainviewer_providers_by_engine"] = {}
+    from .providers.noaa_goes_rrqpe import (
+        NoaaGoesRrqpeProvider,
+        satellite_for_longitude as goes_rrqpe_satellite_for_longitude,
+    )
+    hass.data[DOMAIN]["noaa_goes_rrqpe_provider"] = NoaaGoesRrqpeProvider(http_session)
+    _LOGGER.info("NOAA GOES-18/19 RRQPE geconfigureerd als slapende Amerika-fallback")
     if hsaf_username and hsaf_password:
         from .providers.hsaf_h40b import HsafH40bProvider
         hass.data[DOMAIN]["hsaf_h40b_provider"] = HsafH40bProvider(
@@ -536,6 +542,21 @@ async def _async_setup_runtime(
             ),
             last_success=float(hsaf_success) if hsaf_success is not None else None,
         )
+        goes = hass.data[DOMAIN].get("noaa_goes_rrqpe_provider")
+        goes_success = getattr(goes, "_last_success_ts", None) if goes else None
+        goes_supported = bool(
+            region is not None
+            and goes is not None
+            and goes_rrqpe_satellite_for_longitude(region.center_lon) is not None
+        )
+        states["noaa_goes_rrqpe"] = SourceState(
+            configured=goes_supported,
+            healthy=bool(
+                goes_supported and goes.healthy and goes_success is not None
+                and now_ts - float(goes_success) <= 45 * 60
+            ),
+            last_success=float(goes_success) if goes_success is not None else None,
+        )
         return states
 
     def _refresh_engine_radar_decisions():
@@ -562,6 +583,9 @@ async def _async_setup_runtime(
                 now=now_ts,
                 hsaf_observations=hass.data[DOMAIN]
                 .get("hsaf_h40b_observation_counts_by_engine", {})
+                .get(region.engine_id, 0),
+                goes_observations=hass.data[DOMAIN]
+                .get("noaa_goes_rrqpe_observation_counts_by_engine", {})
                 .get(region.engine_id, 0),
             )
             decisions[region.engine_id] = {
@@ -821,6 +845,7 @@ async def _async_setup_runtime(
         raw_references.extend(hass.data[DOMAIN].get("dpc_radar_observations", []))
         raw_references.extend(hass.data[DOMAIN].get("aemet_radar_observations", []))
         raw_references.extend(hass.data[DOMAIN].get("hsaf_h40b_observations", []))
+        raw_references.extend(hass.data[DOMAIN].get("noaa_goes_rrqpe_observations", []))
         references = usable_corroborating_observations(raw_references)
         verification_by_engine = {
             engine_id: verify_opera_observations(engine_obs, references)
@@ -1012,9 +1037,40 @@ async def _async_setup_runtime(
         elif hsaf is not None:
             hsaf.sleep()
             hass.data[DOMAIN]["hsaf_h40b_diagnostics"] = hsaf.diagnostics
+
+        goes_regions = [
+            region for region in storm_manager.get_all_engines()
+            if (decisions.get(region.engine_id) or {}).get("source")
+            in {None, "rainviewer", "noaa_goes_rrqpe"}
+        ]
+        goes_obs = []
+        goes_rrqpe = hass.data[DOMAIN].get("noaa_goes_rrqpe_provider")
+        if goes_rrqpe is not None and goes_regions:
+            goes_obs = await goes_rrqpe.async_fetch(tuple(
+                CoverageArea(region.center_lat, region.center_lon, region.observation_radius_km)
+                for region in goes_regions
+            ))
+            hass.data[DOMAIN]["noaa_goes_rrqpe_observations"] = goes_obs
+            hass.data[DOMAIN]["noaa_goes_rrqpe_observation_counts_by_engine"] = {
+                region.engine_id: sum(
+                    1 for item in goes_obs if region.accepts_observation(item.lat, item.lon)
+                )
+                for region in goes_regions
+            }
+            hass.data[DOMAIN]["noaa_goes_rrqpe_diagnostics"] = goes_rrqpe.diagnostics
+            if goes_rrqpe.healthy and goes_rrqpe.overlay:
+                calibration_observer.record_reference_frame(
+                    goes_obs, source="noaa_goes_rrqpe",
+                    timestamp=float(goes_rrqpe.overlay["timestamp"]),
+                )
+            decisions = _refresh_engine_radar_decisions()
+        elif goes_rrqpe is not None:
+            goes_rrqpe.sleep()
+            hass.data[DOMAIN]["noaa_goes_rrqpe_diagnostics"] = goes_rrqpe.diagnostics
         _route_selected_radar(opera_obs, "opera")
         _route_selected_radar(rainviewer_obs, "rainviewer")
         _route_selected_radar(hsaf_obs, "hsaf_h40b")
+        _route_selected_radar(goes_obs, "noaa_goes_rrqpe")
         _route_selected_radar(hass.data[DOMAIN].get("last_kmi_observations", []), "kmi")
         _route_selected_radar(hass.data[DOMAIN].get("knmi_current", []), "knmi")
         _refresh_radar_overlays(decisions)
@@ -1070,6 +1126,7 @@ async def _async_setup_runtime(
             "kmi": hass.data[DOMAIN].get("kmi_provider"),
             "knmi": hass.data[DOMAIN].get("knmi_provider"),
             "hsaf_h40b": hass.data[DOMAIN].get("hsaf_h40b_provider"),
+            "noaa_goes_rrqpe": hass.data[DOMAIN].get("noaa_goes_rrqpe_provider"),
         }
         per_engine = {
             "rainviewer": hass.data[DOMAIN].get("rainviewer_providers_by_engine", {}),

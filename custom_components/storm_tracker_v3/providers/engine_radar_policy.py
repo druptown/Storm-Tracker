@@ -79,6 +79,15 @@ def select_engine_radar_source(
             countries,
             age,
         )
+    goes = states.get("noaa_goes_rrqpe", SourceState(False, False))
+    if goes.configured and goes.healthy:
+        age = now - goes.last_success if goes.last_success is not None else None
+        return EngineRadarDecision(
+            "noaa_goes_rrqpe",
+            f"{local_reason}; geen bruikbare radar, GOES RRQPE satellietfallback",
+            countries,
+            age,
+        )
     return EngineRadarDecision(None, f"{local_reason}; geen gezonde fallback", countries, None)
 
 
@@ -90,6 +99,7 @@ def apply_echo_availability(
     rainviewer_observations: int,
     now: float,
     hsaf_observations: int = 0,
+    goes_observations: int = 0,
 ) -> EngineRadarDecision:
     """Gebruik RainViewer wanneer OPERA lokaal leeg is maar radarregen bestaat."""
     rainviewer = states.get("rainviewer", SourceState(False, False))
@@ -122,6 +132,21 @@ def apply_echo_availability(
         return EngineRadarDecision(
             "hsaf_h40b",
             "RainViewer zonder lokale echo; H SAF H40B toont satellietneerslag",
+            decision.country_codes,
+            age,
+        )
+    goes = states.get("noaa_goes_rrqpe", SourceState(False, False))
+    if (
+        decision.source == "rainviewer"
+        and rainviewer_observations == 0
+        and goes_observations > 0
+        and goes.configured
+        and goes.healthy
+    ):
+        age = now - goes.last_success if goes.last_success is not None else None
+        return EngineRadarDecision(
+            "noaa_goes_rrqpe",
+            "RainViewer zonder lokale echo; GOES RRQPE toont satellietneerslag",
             decision.country_codes,
             age,
         )

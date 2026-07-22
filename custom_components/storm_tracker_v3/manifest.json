@@ -1,7 +1,7 @@
 {
   "domain": "storm_tracker_v3",
   "name": "Storm Tracker V3",
-  "version": "0.4.71",
+  "version": "0.4.72",
   "documentation": "https://github.com/druptown/Storm-Tracker",
   "issue_tracker": "https://github.com/druptown/Storm-Tracker/issues",
   "requirements": [

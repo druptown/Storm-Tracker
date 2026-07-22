@@ -52,12 +52,12 @@
       "ground_validation": ["open_meteo"]
     },
     "US": {
-      "radar": ["noaa_mrms", "rainviewer"],
+      "radar": ["noaa_mrms", "rainviewer", "noaa_goes_rrqpe"],
       "lightning": ["blitzortung", "noaa_goes_glm"],
       "ground_validation": ["open_meteo"]
     },
     "CA": {
-      "radar": ["msc_geomet", "noaa_mrms", "rainviewer"],
+      "radar": ["msc_geomet", "noaa_mrms", "rainviewer", "noaa_goes_rrqpe"],
       "lightning": ["blitzortung", "noaa_goes_glm"],
       "ground_validation": ["open_meteo"]
     },
@@ -77,7 +77,7 @@
       "ground_validation": ["open_meteo"]
     },
     "CO": {
-      "radar": ["ideam", "rainviewer"],
+      "radar": ["ideam", "rainviewer", "noaa_goes_rrqpe"],
       "lightning": ["blitzortung", "noaa_goes_glm"],
       "ground_validation": ["open_meteo"]
     }

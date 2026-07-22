@@ -62,6 +62,9 @@ Statusmodel: `sleeping`, `initializing`, `active`, `stale`, `rate_limited`,
 ## Niet als lokale radar classificeren
 
 - EUMETSAT LI en NOAA GOES GLM zijn bliksemsatellieten, geen neerslagradars.
+- NOAA GOES-18/19 ABI RRQPE is wÃ©l een operationele satellietschatting van
+  neerslagsnelheid voor Amerika (2 km, 10 minuten) en dient als lage-prioriteit
+  fallback na lokale radar/RainViewer.
 - RainViewer is een wereldwijde aggregatiefallback, geen officiële nationale bron.
 - Historische radararchieven zonder realtime stroom zijn nuttig voor tests en
   kalibratie, maar niet voor operationele detectie.

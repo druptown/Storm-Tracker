@@ -368,6 +368,16 @@ def hsaf_h40b_module(
 
 
 @pytest.fixture(scope="session")
+def noaa_goes_rrqpe_module(
+    observation_module, base_module, odim_hdf5_module, raster_components_module
+):
+    return _load_module(
+        f"{PKG_NAME}.providers.noaa_goes_rrqpe",
+        PKG_ROOT / "providers" / "noaa_goes_rrqpe.py",
+    )
+
+
+@pytest.fixture(scope="session")
 def engine_radar_policy_module():
     _ensure_stub_package(f"{PKG_NAME}.providers")
     return _load_module(

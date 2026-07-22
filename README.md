@@ -15,7 +15,8 @@ ProjectionTargets -> StormManager -> dynamische RegionEngine(s)
 ```
 
 De huidige providers omvatten onder andere Blitzortung, OPERA/EUMETNET,
-KMI, KNMI, RainViewer, H SAF H40B, Netatmo en Open-Meteo. OPERA-cellen met lage
+KMI, KNMI, RainViewer, H SAF H40B, NOAA GOES-18/19 RRQPE, Netatmo en
+Open-Meteo. OPERA-cellen met lage
 bronkwaliteit worden alleen operationeel gebruikt wanneer KMI, KNMI of
 RainViewer ze geografisch en temporeel bevestigt.
 
@@ -68,6 +69,11 @@ H SAF H40B is een slapende satellietfallback: lokale officiële radar en OPERA
 blijven prioritair. De H SAF-server biedt momenteel alleen gewone FTP aan;
 credentials zijn lokaal beschermd in Home Assistant maar de FTP-verbinding
 zelf is niet end-to-end versleuteld.
+
+NOAA GOES-18/19 RRQPE is de slapende satellietregenfallback voor Amerika. De
+integratie leest de openbare 2 km/10 min NetCDF-rasterpixels anoniem uit NOAA
+Open Data; er is geen API-sleutel nodig. De laag wordt alleen opgehaald voor
+actieve Amerikaanse targets wanneer geen bruikbare hogere bron beschikbaar is.
 
 Extra targets binnen de geconfigureerde `radar_radius_km` delen de operationele
 radardata. Een verder target krijgt bewust `onvoldoende_data` tot een eigen
