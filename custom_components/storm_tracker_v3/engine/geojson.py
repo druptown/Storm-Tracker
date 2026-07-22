@@ -134,6 +134,7 @@ def build_feature_collection(
             region_engine=target.get("region_engine_id"),
             radar_source=(radar_sources_by_engine.get(target.get("region_engine_id")) or {}).get("source"),
             radar_source_reason=(radar_sources_by_engine.get(target.get("region_engine_id")) or {}).get("reason"),
+            goes_rrqpe=(radar_sources_by_engine.get(target.get("region_engine_id")) or {}).get("goes_rrqpe"),
         ))
 
     for region in regions:
@@ -149,6 +150,7 @@ def build_feature_collection(
             radar_source=region_source,
             radar_source_reason=region_decision.get("reason"),
             radar_age_seconds=region_decision.get("age_seconds"),
+            goes_rrqpe=region_decision.get("goes_rrqpe"),
         ))
         for storm in region.storm_engine.get_storms():
             all_cells = [

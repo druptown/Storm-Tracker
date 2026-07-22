@@ -170,6 +170,33 @@ def test_storm_and_motion_without_current_active_source_cell_are_hidden(
     assert result["metadata"]["radar_cells_total"] == 0
 
 
+def test_target_exposes_goes_fallback_diagnostics(geojson_module):
+    target = {
+        "home": {
+            "latitude": 25.7617, "longitude": -80.1918,
+            "region_engine_id": "region-us", "name": "Miami",
+            "available": True, "radar_covered": True,
+        }
+    }
+    result = geojson_module.build_feature_collection(
+        target, [],
+        radar_sources_by_engine={
+            "region-us": {
+                "source": "rainviewer",
+                "goes_rrqpe": {
+                    "supported": True, "status": "active",
+                    "observations": 0, "satellites": [19],
+                },
+            }
+        },
+    )
+    feature = next(item for item in result["features"] if item["id"] == "target:home")
+    assert feature["properties"]["goes_rrqpe"] == {
+        "supported": True, "status": "active",
+        "observations": 0, "satellites": [19],
+    }
+
+
 def test_missing_target_coordinates_are_not_published(geojson_module):
     result = geojson_module.build_feature_collection({
         "away": {"latitude": None, "longitude": None}

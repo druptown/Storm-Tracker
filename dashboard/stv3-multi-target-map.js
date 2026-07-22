@@ -102,8 +102,18 @@ class Stv3MultiTargetMap extends HTMLElement {
     const visibleLightning=lightning.length;
     const source=selected.properties.radar_source||'geen';
     const reason=selected.properties.radar_source_reason||'nog niet geselecteerd';
+    const goes=selected.properties.goes_rrqpe;
+    let goesText='';
+    if(goes&&goes.supported){
+      const satellites=(goes.satellites||[]).map(n=>'GOES-'+n).join('/');
+      const label=satellites||'GOES';
+      if(goes.status==='error') goesText=' | '+label+': fout';
+      else if(Number(goes.observations||0)>0) goesText=' | '+label+': '+goes.observations+' regencellen';
+      else if(goes.status==='active') goesText=' | '+label+': gecontroleerd, droog';
+      else goesText=' | '+label+': '+(goes.status||'standby');
+    }
     const overlayText=radarOverlay?' | raster: '+radarOverlay.runs.length+' pixelruns':'';
-    this.shadowRoot.querySelector('.meta').textContent=(selected.properties.name||selected.properties.target_id)+' | '+(selectedEngine||'alle engines')+' | radar: '+source+' | '+reason+overlayText+' | zoom '+this._zoom+' | '+availableCells+' analysecellen | '+visibleLightning+' bliksems (15 min)';
+    this.shadowRoot.querySelector('.meta').textContent=(selected.properties.name||selected.properties.target_id)+' | '+(selectedEngine||'alle engines')+' | radar: '+source+' | '+reason+goesText+overlayText+' | zoom '+this._zoom+' | '+availableCells+' analysecellen | '+visibleLightning+' bliksems (15 min)';
   }
   _radarOverlay(svg,overlay,center,w,h,lightning,pulseStorms) {
     const ns='http://www.w3.org/2000/svg';

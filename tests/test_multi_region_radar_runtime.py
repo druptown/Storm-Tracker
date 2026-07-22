@@ -55,3 +55,16 @@ def test_overlay_refresh_never_calls_itself():
         and node.func.id == "_refresh_radar_overlays"
     ]
     assert recursive_calls == []
+
+
+def test_moved_target_starts_radar_cycle_immediately():
+    tree = ast.parse(INIT_SOURCE)
+    functions = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "_update_secondary_target"
+    ]
+    assert len(functions) == 1
+    rendered = ast.unparse(functions[0])
+    assert "_sync_region_radar_providers()" in rendered
+    assert "hass.async_create_task(_poll_radar())" in rendered

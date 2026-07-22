@@ -599,6 +599,20 @@ async def _async_setup_runtime(
                 "rainviewer_observations": hass.data[DOMAIN]
                 .get("rainviewer_observation_counts_by_engine", {})
                 .get(region.engine_id, 0),
+                "goes_rrqpe": {
+                    "supported": states["noaa_goes_rrqpe"].configured,
+                    "status": (
+                        hass.data[DOMAIN]
+                        .get("noaa_goes_rrqpe_diagnostics", {})
+                        .get("status", "standby")
+                    ),
+                    "observations": hass.data[DOMAIN]
+                    .get("noaa_goes_rrqpe_observation_counts_by_engine", {})
+                    .get(region.engine_id, 0),
+                    "satellites": hass.data[DOMAIN]
+                    .get("noaa_goes_rrqpe_diagnostics", {})
+                    .get("satellites", []),
+                },
             }
         hass.data[DOMAIN]["radar_sources_by_engine"] = decisions
         unique = {item["source"] for item in decisions.values() if item["source"]}
@@ -1470,6 +1484,7 @@ async def _async_setup_runtime(
             "region_engine_id": region.engine_id,
         })
         hass.data[DOMAIN]["region_engines"] = storm_manager.get_all_engines()
+        _sync_region_radar_providers()
         blitz.update_regions(_blitz_regions())
         hass.bus.async_fire(
             f"{DOMAIN}_targets_updated", {"targets": [spec.target_id]}
@@ -1478,6 +1493,9 @@ async def _async_setup_runtime(
             "Secundair target %s op %.4f,%.4f gekoppeld aan %s",
             spec.target_id, lat, lon, region.engine_id,
         )
+        # Een verre verplaatsing creëert een nieuwe RegionEngine. Start meteen
+        # een beschermde radarcyclus; de lock voorkomt dubbele gelijktijdige polls.
+        hass.async_create_task(_poll_radar())
 
     @callback
     def _on_secondary_target_change(event):
