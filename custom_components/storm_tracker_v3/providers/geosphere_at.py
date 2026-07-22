@@ -33,8 +33,10 @@ class GeoSphereAustriaProvider:
         self.diagnostics = {}
 
     def supports(self, area):
-        margin = area.horizon_km / 100.0
-        ok = 45.5 - margin <= area.center_lat <= 49.5 + margin and 8.1 - margin <= area.center_lon <= 17.75 + margin
+        # Het endpoint is een punt-nowcast en antwoordt met HTTP 400 buiten
+        # Oostenrijk. Een overlappende waarnemingshorizon maakt het targetpunt
+        # zelf dus nog niet geldig voor deze provider.
+        ok = 45.5 <= area.center_lat <= 49.5 and 8.1 <= area.center_lon <= 17.75
         return CoverageResult(ok, 1.0 if ok else 0.0, 0.97 if ok else 0.0, "GeoSphere INCA 1 km" if ok else "buiten GeoSphere-dekking")
 
     async def async_start(self, context): self._areas = tuple(context.config.get("areas", (context.area,)))

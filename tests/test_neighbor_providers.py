@@ -78,6 +78,11 @@ def test_austria_and_italy_coverage(base_module, geosphere_at_module, italiamete
     assert not italiameteo_module.ItaliaMeteoRadarProvider(None).supports(miami).supported
 
 
+def test_austria_point_nowcast_does_not_query_florence(base_module, geosphere_at_module):
+    florence = base_module.CoverageArea(43.7696, 11.2558, 250.0)
+    assert not geosphere_at_module.GeoSphereAustriaProvider(None).supports(florence).supported
+
+
 def test_italiameteo_selects_latest_bundle(italiameteo_module):
     latest = italiameteo_module.latest_bundle([
         {"date": "2026-07-18", "filename": "old.grib"},

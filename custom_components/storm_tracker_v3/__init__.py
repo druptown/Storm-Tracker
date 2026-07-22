@@ -1143,7 +1143,6 @@ async def _async_setup_runtime(
             if overlay:
                 overlays[region.engine_id] = overlay
         hass.data[DOMAIN]["radar_overlays_by_engine"] = overlays
-        _refresh_radar_overlays(decisions)
         hass.bus.async_fire(f"{DOMAIN}_provider_lifecycle_update")
         hass.bus.async_fire(f"{DOMAIN}_radar_source_update", {"engines": decisions})
 

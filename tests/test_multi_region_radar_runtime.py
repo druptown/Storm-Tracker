@@ -1,6 +1,7 @@
 """Contracttests voor echte radarverwerking per RegionEngine."""
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 
@@ -37,3 +38,20 @@ def test_opera_is_validated_and_counted_per_engine_before_selection():
     assert "accepted_by_engine = {" in INIT_SOURCE
     assert 'hass.data[DOMAIN]["opera_observations_by_engine"]' in INIT_SOURCE
     assert 'hass.data[DOMAIN]["opera_observation_counts_by_engine"]' in INIT_SOURCE
+
+
+def test_overlay_refresh_never_calls_itself():
+    tree = ast.parse(INIT_SOURCE)
+    functions = [
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "_refresh_radar_overlays"
+    ]
+    assert len(functions) == 1
+    recursive_calls = [
+        node for node in ast.walk(functions[0])
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_refresh_radar_overlays"
+    ]
+    assert recursive_calls == []
