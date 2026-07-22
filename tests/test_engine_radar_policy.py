@@ -139,3 +139,40 @@ def test_opera_echo_remains_preferred(engine_radar_policy_module):
         now=1_000.0,
     )
     assert decision.source == "opera"
+
+
+def test_unconfirmed_opera_echo_at_coverage_edge_uses_rainviewer(
+    engine_radar_policy_module,
+):
+    module = engine_radar_policy_module
+    states = {"opera": _state(module), "rainviewer": _state(module)}
+    decision = module.select_engine_radar_source({"TR"}, states, now=1_000.0)
+    decision = module.apply_echo_availability(
+        decision,
+        states,
+        opera_observations=2,
+        rainviewer_observations=5,
+        opera_coverage_complete=False,
+        opera_corroborated_observations=0,
+        now=1_000.0,
+    )
+    assert decision.source == "rainviewer"
+    assert "randdekking" in decision.reason
+
+
+def test_corroborated_opera_echo_at_coverage_edge_remains_preferred(
+    engine_radar_policy_module,
+):
+    module = engine_radar_policy_module
+    states = {"opera": _state(module), "rainviewer": _state(module)}
+    decision = module.select_engine_radar_source({"TR"}, states, now=1_000.0)
+    decision = module.apply_echo_availability(
+        decision,
+        states,
+        opera_observations=2,
+        rainviewer_observations=5,
+        opera_coverage_complete=False,
+        opera_corroborated_observations=1,
+        now=1_000.0,
+    )
+    assert decision.source == "opera"

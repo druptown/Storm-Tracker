@@ -623,6 +623,17 @@ async def _async_setup_runtime(
                 goes_observations=hass.data[DOMAIN]
                 .get("noaa_goes_rrqpe_observation_counts_by_engine", {})
                 .get(region.engine_id, 0),
+                opera_coverage_complete=bool(
+                    hass.data[DOMAIN]
+                    .get("opera_providers_by_engine", {})
+                    .get(region.engine_id)
+                    .coverage_complete
+                ) if hass.data[DOMAIN]
+                .get("opera_providers_by_engine", {})
+                .get(region.engine_id) is not None else True,
+                opera_corroborated_observations=hass.data[DOMAIN]
+                .get("opera_corroborated_counts_by_engine", {})
+                .get(region.engine_id, 0),
             )
             previous_source = (
                 previous_decisions.get(region.engine_id) or {}
@@ -1183,6 +1194,10 @@ async def _async_setup_runtime(
         })
         hass.data[DOMAIN]["opera_count"] = len(obs)
         hass.data[DOMAIN]["opera_observation_counts_by_engine"] = observation_counts
+        hass.data[DOMAIN]["opera_corroborated_counts_by_engine"] = {
+            engine_id: result.corroborated
+            for engine_id, result in verification_by_engine.items()
+        }
         hass.data[DOMAIN]["opera_observations_by_engine"] = accepted_by_engine
         hass.data[DOMAIN]["opera_diagnostics"] = diagnostics
         hass.bus.async_fire(f"{DOMAIN}_radar_update", {"source": "opera", "count": len(obs)})

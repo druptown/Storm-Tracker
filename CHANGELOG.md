@@ -1,5 +1,15 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.86
+
+- Detecteer expliciet wanneer de gevraagde RegionEngine-radius door de rand van
+  het OPERA-composiet wordt afgeknipt.
+- Laat RainViewer operationeel overnemen wanneer OPERA aan zo'n dekkingsrand
+  alleen onbevestigde cellen toont maar RainViewer wel lokale neerslag ziet.
+- Behoud OPERA wanneer de randcellen onafhankelijk bevestigd zijn.
+- Gebruik voor zichtbare en verborgen bliksemsymbolen exact dezelfde
+  geografische bliksemhull; de schakelaar wijzigt alleen nog de symbolen.
+
 # 0.4.85
 
 - Publiceer goedkope persistente collectortellers voor frames, rasterpunten,

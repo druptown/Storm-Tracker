@@ -76,6 +76,7 @@ def test_bbox_normal_case_is_symmetric_around_center(opera_module):
     assert lat_min < 51.026 < lat_max
     assert abs((lon_max - 4.478) - (4.478 - lon_min)) < 1e-6
     assert abs((lat_max - 51.026) - (51.026 - lat_min)) < 1e-6
+    assert p.coverage_complete is True
 
 
 def test_diagnostics_expose_effective_radius_and_bbox(opera_module):
@@ -98,6 +99,14 @@ def test_bbox_clips_against_real_opera_extent_near_top_edge(opera_module):
     _, lat_min, _, lat_max = p._bbox()
     assert lat_max == pytest.approx(opera_module.OPERA_LAT_MAX)
     assert lat_max <= opera_module.OPERA_LAT_MAX + 1e-9
+    assert p.coverage_complete is False
+
+
+def test_istanbul_radius_is_incomplete_at_opera_east_edge(opera_module):
+    p = opera_module.OperaProvider(lat=41.0082, lon=28.9784, radius_km=250.0)
+    assert p._bbox()[2] == pytest.approx(opera_module.OPERA_LON_MAX)
+    assert p.coverage_complete is False
+    assert p.diagnostics["coverage_complete"] is False
 
 
 def test_bbox_clips_against_real_opera_extent_near_west_edge(opera_module):

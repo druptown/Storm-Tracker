@@ -93,7 +93,7 @@ class Stv3MultiTargetMap extends HTMLElement {
     const order={region:0,storm:1,radar_cell:2,lightning_zone:3,motion:4,lightning:5,target:6};
     const ordered=[...filtered].sort((a,b)=>(order[a.properties.layer]??9)-(order[b.properties.layer]??9));
     const lightning=allLightning;
-    if(radarOverlay) this._radarOverlay(svg,radarOverlay,center,w,h,lightning,!this._showLightning);
+    if(radarOverlay) this._radarOverlay(svg,radarOverlay,center,w,h);
     this._distanceRings(svg,selected,center,w,h);
     for(const f of ordered) if(!['target','lightning'].includes(f.properties.layer)) this._feature(svg,f,center,w,h);
     if(this._showLightning) this._lightningClusters(svg,lightning,center,w,h);
@@ -115,25 +115,22 @@ class Stv3MultiTargetMap extends HTMLElement {
     const overlayText=radarOverlay?' | raster: '+radarOverlay.runs.length+' pixelruns':'';
     this.shadowRoot.querySelector('.meta').textContent=(selected.properties.name||selected.properties.target_id)+' | '+(selectedEngine||'alle engines')+' | radar: '+source+' | '+reason+goesText+overlayText+' | zoom '+this._zoom+' | '+availableCells+' analysecellen | '+visibleLightning+' bliksems (15 min)';
   }
-  _radarOverlay(svg,overlay,center,w,h,lightning,pulseStorms) {
+  _radarOverlay(svg,overlay,center,w,h) {
     const ns='http://www.w3.org/2000/svg';
     const colors=['transparent','#b3e5fc','#81d4fa','#29b6f6','#1565c0','#ffee58','#ff9800','#f44336','#8e24aa'];
-    const paths=new Map(),pulsePaths=[];
-    const strikePoints=(lightning||[]).filter(f=>Number(f.properties.age_seconds||0)<300).map(f=>this._screen(f.geometry.coordinates,center,w,h));
+    const paths=new Map();
     for(const run of overlay.runs||[]){
       const level=Math.max(1,Math.min(8,Number(run.intensity)||1));
       const points=(run.ring||[]).map(c=>this._screen([Number(c[1]),Number(c[0])],center,w,h));
       if(points.length!==4) continue;
       const d=points.map((p,i)=>(i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' ')+' Z';
       paths.set(level,(paths.get(level)||'')+d+' ');
-      if(pulseStorms&&strikePoints.some(s=>{const cx=points.reduce((n,p)=>n+p[0],0)/4,cy=points.reduce((n,p)=>n+p[1],0)/4;return Math.hypot(s[0]-cx,s[1]-cy)<24;})) pulsePaths.push(d);
     }
     for(const [level,d] of [...paths.entries()].sort((a,b)=>a[0]-b[0])){
       const path=document.createElementNS(ns,'path');
       path.setAttribute('d',d);path.setAttribute('fill',colors[level]);path.setAttribute('fill-opacity','.72');path.setAttribute('stroke','none');
       svg.appendChild(path);
     }
-    if(pulsePaths.length){const pulse=document.createElementNS(ns,'path');pulse.setAttribute('d',pulsePaths.join(' '));pulse.setAttribute('fill','#ffca28');pulse.setAttribute('stroke','#ff6f00');pulse.setAttribute('stroke-width','2');pulse.setAttribute('class','storm-pulse');svg.appendChild(pulse);}
   }
   _lightningClusters(svg,features,center,w,h){
     const ns='http://www.w3.org/2000/svg',groups=new Map();

@@ -106,12 +106,19 @@ def apply_echo_availability(
     now: float,
     hsaf_observations: int = 0,
     goes_observations: int = 0,
+    opera_coverage_complete: bool = True,
+    opera_corroborated_observations: int = 0,
 ) -> EngineRadarDecision:
     """Gebruik RainViewer wanneer OPERA lokaal leeg is maar radarregen bestaat."""
     rainviewer = states.get("rainviewer", SourceState(False, False))
+    opera_edge_unconfirmed = (
+        not opera_coverage_complete
+        and opera_observations > 0
+        and opera_corroborated_observations == 0
+    )
     if (
         decision.source == "opera"
-        and opera_observations == 0
+        and (opera_observations == 0 or opera_edge_unconfirmed)
         and rainviewer_observations > 0
         and rainviewer.configured
         and rainviewer.healthy
@@ -122,7 +129,12 @@ def apply_echo_availability(
         )
         return EngineRadarDecision(
             "rainviewer",
-            "OPERA zonder lokale echo; RainViewer toont neerslag",
+            (
+                "OPERA-randdekking zonder bevestigde lokale echo; "
+                "RainViewer toont neerslag"
+                if opera_edge_unconfirmed
+                else "OPERA zonder lokale echo; RainViewer toont neerslag"
+            ),
             decision.country_codes,
             age,
         )

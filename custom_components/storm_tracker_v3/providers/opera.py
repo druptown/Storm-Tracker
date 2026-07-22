@@ -799,6 +799,7 @@ class OperaProvider:
             },
             "quality_filter_enabled": "cross_source",
             "radius_km": self._radius,
+            "coverage_complete": self.coverage_complete,
             "bbox": {
                 "lon_min": round(bbox[0], 4),
                 "lat_min": round(bbox[1], 4),
@@ -830,6 +831,18 @@ class OperaProvider:
             max(OPERA_LAT_MIN, self._lat - deg_lat),
             min(OPERA_LON_MAX, self._lon + deg_lon),
             min(OPERA_LAT_MAX, self._lat + deg_lat),
+        )
+
+    @property
+    def coverage_complete(self) -> bool:
+        """Return whether OPERA covers the complete requested radius."""
+        deg_lat = self._radius / 111.32
+        deg_lon = self._radius / (111.32 * math.cos(math.radians(self._lat)))
+        return (
+            self._lon - deg_lon >= OPERA_LON_MIN
+            and self._lon + deg_lon <= OPERA_LON_MAX
+            and self._lat - deg_lat >= OPERA_LAT_MIN
+            and self._lat + deg_lat <= OPERA_LAT_MAX
         )
 
     async def fetch_observations(self, hass=None) -> list[Observation]:
