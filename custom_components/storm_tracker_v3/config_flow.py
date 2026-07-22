@@ -22,6 +22,10 @@ CONF_KNMI_WMS_API_KEY = "knmi_wms_api_key"
 CONF_HSAF_USERNAME = "hsaf_username"
 CONF_HSAF_PASSWORD = "hsaf_password"
 CONF_LIGHTNING_SOURCE_MODE = "lightning_source_mode"
+CONF_NETATMO_CLIENT_ID = "netatmo_client_id"
+CONF_NETATMO_CLIENT_SECRET = "netatmo_client_secret"
+CONF_NETATMO_REFRESH_TOKEN = "netatmo_refresh_token"
+CONF_NETATMO_RADIUS = "netatmo_radius_km"
 
 
 def _schema(defaults: dict) -> vol.Schema:
@@ -85,6 +89,29 @@ def _schema(defaults: dict) -> vol.Schema:
             default=defaults.get(CONF_HSAF_PASSWORD, ""),
         ): selector.TextSelector(selector.TextSelectorConfig(
             type=selector.TextSelectorType.PASSWORD,
+        )),
+        vol.Optional(
+            CONF_NETATMO_CLIENT_ID,
+            default=defaults.get(CONF_NETATMO_CLIENT_ID, ""),
+        ): selector.TextSelector(),
+        vol.Optional(
+            CONF_NETATMO_CLIENT_SECRET,
+            default=defaults.get(CONF_NETATMO_CLIENT_SECRET, ""),
+        ): selector.TextSelector(selector.TextSelectorConfig(
+            type=selector.TextSelectorType.PASSWORD,
+        )),
+        vol.Optional(
+            CONF_NETATMO_REFRESH_TOKEN,
+            default=defaults.get(CONF_NETATMO_REFRESH_TOKEN, ""),
+        ): selector.TextSelector(selector.TextSelectorConfig(
+            type=selector.TextSelectorType.PASSWORD,
+        )),
+        vol.Optional(
+            CONF_NETATMO_RADIUS,
+            default=defaults.get(CONF_NETATMO_RADIUS, 175.0),
+        ): selector.NumberSelector(selector.NumberSelectorConfig(
+            min=25, max=500, step=25, mode=selector.NumberSelectorMode.BOX,
+            unit_of_measurement="km",
         )),
         vol.Optional(
             CONF_LIGHTNING_SOURCE_MODE,

@@ -137,6 +137,10 @@ async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
         "knmi_wms_api_key": raw.get("knmi_wms_api_key"),
         "hsaf_username": raw.get("hsaf_username"),
         "hsaf_password": raw.get("hsaf_password"),
+        "netatmo_client_id": raw.get("netatmo_client_id"),
+        "netatmo_client_secret": raw.get("netatmo_client_secret"),
+        "netatmo_refresh_token": raw.get("netatmo_refresh_token"),
+        "netatmo_radius_km": raw.get("netatmo_radius_km", 175.0),
         "lightning_source_mode": raw.get("lightning_source_mode", "auto"),
     }
     if raw.get("test_tracker_entity"):

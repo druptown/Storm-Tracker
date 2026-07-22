@@ -10,7 +10,7 @@ COMPONENT = ROOT / "custom_components" / "storm_tracker_v3"
 def test_config_flow_is_enabled_and_version_matches():
     manifest = json.loads((COMPONENT / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["config_flow"] is True
-    assert manifest["version"] == "0.4.77"
+    assert manifest["version"] == "0.4.78"
 
 
 def test_config_flow_and_translations_are_valid():
@@ -30,6 +30,10 @@ def test_config_flow_and_translations_are_valid():
         assert "knmi_wms_api_key" in fields
         assert "hsaf_username" in fields
         assert "hsaf_password" in fields
+        assert "netatmo_client_id" in fields
+        assert "netatmo_client_secret" in fields
+        assert "netatmo_refresh_token" in fields
+        assert "netatmo_radius_km" in fields
         assert "lightning_source_mode" in fields
 
 
@@ -40,3 +44,17 @@ def test_runtime_supports_config_entries_and_yaml():
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     assert {"async_setup", "async_setup_entry", "_async_setup_runtime"} <= functions
+
+
+def test_config_entry_passes_netatmo_credentials_to_runtime():
+    source = (COMPONENT / "__init__.py").read_text(encoding="utf-8")
+    mapping = source.split("async def async_setup_entry", 1)[1].split(
+        "setup_ok = await _async_setup_runtime", 1
+    )[0]
+    for key in (
+        "netatmo_client_id",
+        "netatmo_client_secret",
+        "netatmo_refresh_token",
+        "netatmo_radius_km",
+    ):
+        assert f'"{key}": raw.get("{key}"' in mapping
