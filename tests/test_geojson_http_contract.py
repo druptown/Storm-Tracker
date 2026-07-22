@@ -49,6 +49,6 @@ def test_dashboard_prefers_intensity_overlay_over_technical_contours():
     assert "_lightningClusters" in source
     assert "availableCells=visible.filter" in source
     assert "analysecellen" in source
-    assert "gecontroleerd, droog" in source
+    assert "geen echo gedetecteerd" in source
     assert "goes_rrqpe" in source
     assert "type==='MultiPolygon'" in source

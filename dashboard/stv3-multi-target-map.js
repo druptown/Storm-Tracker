@@ -109,7 +109,7 @@ class Stv3MultiTargetMap extends HTMLElement {
       const label=satellites||'GOES';
       if(goes.status==='error') goesText=' | '+label+': fout';
       else if(Number(goes.observations||0)>0) goesText=' | '+label+': '+goes.observations+' regencellen';
-      else if(goes.status==='active') goesText=' | '+label+': gecontroleerd, droog';
+      else if(goes.status==='active') goesText=' | '+label+': geen echo gedetecteerd';
       else goesText=' | '+label+': '+(goes.status||'standby');
     }
     const overlayText=radarOverlay?' | raster: '+radarOverlay.runs.length+' pixelruns':'';

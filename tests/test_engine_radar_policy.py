@@ -49,6 +49,21 @@ def test_shared_cross_border_engine_uses_composite(engine_radar_policy_module):
     assert "meerdere nationale" in decision.reason
 
 
+def test_american_region_reports_outside_opera_coverage(engine_radar_policy_module):
+    module = engine_radar_policy_module
+    decision = module.select_engine_radar_source(
+        {"US"},
+        {
+            "opera": _state(module, configured=False, healthy=False),
+            "rainviewer": _state(module),
+        },
+        now=1_000.0,
+    )
+    assert decision.source == "rainviewer"
+    assert "buiten OPERA-dekking" in decision.reason
+    assert "OPERA niet beschikbaar" not in decision.reason
+
+
 def test_spain_prefers_aemet(engine_radar_policy_module):
     module = engine_radar_policy_module
     decision = module.select_engine_radar_source(

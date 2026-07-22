@@ -69,7 +69,14 @@ def select_engine_radar_source(
     rainviewer = states.get("rainviewer", SourceState(False, False))
     if rainviewer.configured and rainviewer.healthy:
         age = now - rainviewer.last_success if rainviewer.last_success is not None else None
-        return EngineRadarDecision("rainviewer", f"{local_reason}; OPERA niet beschikbaar", countries, age)
+        opera_reason = (
+            "OPERA niet beschikbaar"
+            if opera.configured
+            else "buiten OPERA-dekking"
+        )
+        return EngineRadarDecision(
+            "rainviewer", f"{local_reason}; {opera_reason}", countries, age
+        )
     hsaf = states.get("hsaf_h40b", SourceState(False, False))
     if hsaf.configured and hsaf.healthy:
         age = now - hsaf.last_success if hsaf.last_success is not None else None
