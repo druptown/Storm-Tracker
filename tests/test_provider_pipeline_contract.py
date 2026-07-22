@@ -37,10 +37,14 @@ def test_only_one_ordered_five_minute_provider_cycle_is_scheduled():
             not in runtime
         )
     cycle = _function_source("_poll_all")
-    assert cycle.index("await _poll_national_providers()") < cycle.index(
-        "await _poll_radar_comparison()"
-    ) < cycle.index("await _poll_radar()")
+    assert cycle.index("_poll_national_providers()") < cycle.index(
+        "_poll_radar_comparison()"
+    ) < cycle.index("_poll_radar()")
     assert "provider_cycle_lock" in cycle
+    assert cycle.count("_bounded_provider_stage") == 4
+    bounded = _function_source("_bounded_provider_stage")
+    assert "asyncio.wait_for" in bounded
+    assert "provider_stage_timeouts" in bounded
 
 
 def test_moved_target_runs_the_same_complete_cycle():

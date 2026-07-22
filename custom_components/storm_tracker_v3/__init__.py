@@ -1388,7 +1388,9 @@ async def _async_setup_runtime(
             hass.data[DOMAIN]["lightning_source"] = "blitzortung"
             return
         try:
-            observations = await eumetsat.fetch_observations()
+            observations = await asyncio.wait_for(
+                eumetsat.fetch_observations(), timeout=30
+            )
         except Exception:
             _LOGGER.exception("EUMETSAT LI fallback ophalen mislukt")
             hass.data[DOMAIN]["eumetsat_li_status"] = "error"
@@ -1435,9 +1437,24 @@ async def _async_setup_runtime(
             hass.data[DOMAIN]["goes18_glm_status"] = "standby"
             hass.data[DOMAIN]["goes19_glm_status"] = "standby"
             return
-        observations = await goes_glm.fetch_observations(
-            satellites_for_regions(_blitz_regions())
-        )
+        try:
+            observations = await asyncio.wait_for(
+                goes_glm.fetch_observations(
+                    satellites_for_regions(_blitz_regions())
+                ),
+                timeout=30,
+            )
+        except Exception as exc:
+            _LOGGER.error("NOAA GOES GLM fallback ophalen mislukt: %s", exc)
+            hass.data[DOMAIN]["goes_poll"] = {
+                "timestamp": time.time(),
+                "fetched": 0,
+                "accepted": 0,
+                "error": "timeout" if isinstance(exc, asyncio.TimeoutError)
+                else type(exc).__name__,
+            }
+            hass.bus.async_fire(f"{DOMAIN}_lightning_status_update")
+            return
         hass.data[DOMAIN]["goes18_glm_status"] = goes_glm.status[18]
         hass.data[DOMAIN]["goes19_glm_status"] = goes_glm.status[19]
         accepted = 0
@@ -1500,6 +1517,19 @@ async def _async_setup_runtime(
 
     hass.data[DOMAIN]["set_lightning_source_mode"] = _set_lightning_source_mode
 
+    async def _bounded_provider_stage(name: str, awaitable, timeout_s: float):
+        """Begrens een volledige providerfase zodat de cyclus kan herstellen."""
+        try:
+            return await asyncio.wait_for(awaitable, timeout=timeout_s)
+        except asyncio.TimeoutError:
+            _LOGGER.error(
+                "Providerfase %s overschreed harde timeout van %.0f seconden",
+                name,
+                timeout_s,
+            )
+            hass.data[DOMAIN].setdefault("provider_stage_timeouts", {})[name] = time.time()
+            return None
+
     async def _poll_all(now=None):
         """Voer een volledige providercyclus in vaste, racevrije volgorde uit."""
         lock = hass.data[DOMAIN].setdefault("provider_cycle_lock", asyncio.Lock())
@@ -1509,10 +1539,18 @@ async def _async_setup_runtime(
         async with lock:
             _sync_region_radar_providers()
             _sync_region_open_meteo_providers()
-            await _poll_national_providers()
-            await _poll_radar_comparison()
-            await _poll_radar()
-            await asyncio.gather(_poll_netatmo(), _poll_open_meteo())
+            await _bounded_provider_stage(
+                "national", _poll_national_providers(), 25
+            )
+            await _bounded_provider_stage(
+                "radar_comparison", _poll_radar_comparison(), 60
+            )
+            await _bounded_provider_stage("radar", _poll_radar(), 120)
+            await _bounded_provider_stage(
+                "ground_validation",
+                asyncio.gather(_poll_netatmo(), _poll_open_meteo()),
+                30,
+            )
 
     # ── Polling intervallen ───────────────────────────────────────────────
     from homeassistant.helpers.event import async_track_time_interval, async_track_state_change_event

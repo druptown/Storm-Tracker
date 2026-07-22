@@ -1,5 +1,19 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.81
+
+- Begrens iedere nationale providerpoll afzonderlijk tot twintig seconden en
+  haal onafhankelijke nationale providers parallel op.
+- Begrens daarnaast de vier volledige fasen van de vijfminutencyclus, zodat
+  een hangende externe verbinding de volgende cyclus nooit onbeperkt blokkeert.
+- Voeg harde timeouts en foutdiagnostiek toe aan EUMETSAT LI en NOAA GOES GLM.
+- Leg cold-startgedrag vast: ontbrekende drukhistory blijft neutraal als
+  `onvoldoende_data`, een lege Open-Meteo-cache blijft `initializing` en er
+  worden geen drukval, confidence of regenobservaties verzonnen.
+- Behoud het bestaande globale Netatmo-entitycontract: dezelfde unique ID,
+  altijd beschikbaar, `unknown` in plaats van een misleidende nulwaarde zolang
+  geen betrouwbare 60-minutentrend bestaat, en uitsluitend gekoppeld aan home.
+
 # 0.4.80
 
 - Audit de volledige providerketen van geografische activatie tot kaartoverlay,

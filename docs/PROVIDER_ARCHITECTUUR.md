@@ -1,7 +1,7 @@
-# Storm Tracker V3 — providerarchitectuur 0.4.80
+# Storm Tracker V3 — providerarchitectuur 0.4.81
 
 Dit document beschrijft de effectief geïmplementeerde providerstructuur van
-Storm Tracker V3 0.4.80. Het onderscheidt operationele radar, fallbackdata,
+Storm Tracker V3 0.4.81. Het onderscheidt operationele radar, fallbackdata,
 bliksem, validatiebronnen en bronnen die alleen beleidsmatig voor toekomstige
 uitbreiding zijn voorzien.
 
@@ -47,6 +47,13 @@ bron klaar is. De provider-lifecycle zet een nationale provider alleen aan als
 minstens één actieve RegionEngine binnen zijn dekking valt. Na vijf minuten
 zonder toepasselijke engine gaat hij van cooldown naar sleeping.
 
+Elke nationale provideraanroep heeft bovendien een harde timeout van twintig
+seconden en onafhankelijke nationale providers worden parallel opgehaald. Ook
+de volledige fasen zijn begrensd: nationaal 25 seconden, radarvergelijking 60
+seconden, operationele radar 120 seconden en grondvalidatie 30 seconden. Eén
+hangende TCP-verbinding kan de vijfminutencyclus daardoor niet onbeperkt
+vasthouden. EUMETSAT LI en GOES GLM hebben elk een aparte limiet van 30 seconden.
+
 ## 3. Operationele neerslagproviders
 
 | Provider | Dekking | Data | Runtimefrequentie | Rol |
@@ -81,6 +88,14 @@ niet onbeperkt een actuele fallback blokkeren.
 Netatmo en Open-Meteo zijn strikt per RegionEngine geïsoleerd. De bestaande
 globale Netatmo-luchtdruksensor blijft voor compatibiliteit bestaan, maar toont
 uitsluitend de trend van `zone.home`.
+
+Bij een cold start zonder bruikbare opslaghistoriek meldt de druktrend
+`onvoldoende_data`. Delta's blijven leeg en `rapid_pressure_fall` blijft false;
+er wordt dus geen drukval of confidencewijziging verzonnen. De legacy-sensor
+behoudt dezelfde unique ID en blijft beschikbaar, maar heeft state `unknown`
+in plaats van een foutieve `0` totdat minstens drie stations een vergelijkbaar
+60-minutenvenster leveren. Een lege Open-Meteo-cache staat op `initializing`,
+bevat geen natte punten en wordt niet naar de fusion engine gerouteerd.
 
 ## 5. Bliksemproviders
 
@@ -185,7 +200,7 @@ zijn nog geen garantie dat de bijbehorende runtimeprovider bestaat. Tot hun
 implementatie gebruikt het systeem in die regio's alleen de hierboven als
 operationeel beschreven bronnen.
 
-## 10. Testdekking in 0.4.80
+## 10. Testdekking in 0.4.81
 
 De provider-audit omvat tests voor:
 
@@ -199,5 +214,6 @@ De provider-audit omvat tests voor:
 - scheiding tussen bliksem- en neerslagrouting;
 - één geordende vijfminutencyclus zonder concurrerende providerpolls.
 
-Release 0.4.80 is gevalideerd met 372 geslaagde tests en één bewust
-overgeslagen test.
+De suite controleert daarnaast harde providertimeouts, fasebegrenzing,
+cold-startneutraliteit en het backwards-compatible statecontract van de
+globale Netatmo-luchtdruksensor.

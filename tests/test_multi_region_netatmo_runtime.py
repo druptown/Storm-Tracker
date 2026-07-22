@@ -58,6 +58,15 @@ def test_legacy_pressure_sensor_is_explicitly_home_scoped():
     assert 'hass.data[DOMAIN]["netatmo_pressure_trend"]' in poll_block
 
 
+def test_legacy_pressure_sensor_stays_available_and_never_substitutes_zero():
+    sensor_block = SENSOR_SOURCE.split("class NetatmoPressureTrendSensor", 1)[1].split(
+        "class PrecipitationStatusSensor", 1
+    )[0]
+    assert 'trend.get("delta_60m_hpa")' in sensor_block
+    assert "return True" in sensor_block
+    assert 'trend.get("delta_60m_hpa", 0)' not in sensor_block
+
+
 def test_pressure_store_remains_backward_compatible_without_ha_migration():
     assert 'Store(hass, 1, f"{DOMAIN}_pressure_trend")' in INIT_SOURCE
     assert 'restored_pressure_snapshot.get("engines", {})' in INIT_SOURCE

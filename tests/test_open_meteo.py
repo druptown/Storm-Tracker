@@ -52,6 +52,16 @@ def test_generate_grid_point_count_matches_grid_rings(open_meteo_module):
     assert len(open_meteo_module._generate_grid(51.026, 4.478)) == expected == 324
 
 
+def test_cold_start_cache_is_explicitly_dry_and_initializing(open_meteo_module):
+    provider = open_meteo_module.OpenMeteoProvider(51.026, 4.478)
+    result = provider.last_result
+
+    assert result["provider_status"] == "initializing"
+    assert result["is_raining"] is False
+    assert result["wet_locations_now"] == []
+    assert result.get("fetch_sequence", 0) == 0
+
+
 def test_generate_grid_points_are_within_max_radius(open_meteo_module, distance_module):
     points = open_meteo_module._generate_grid(51.026, 4.478)
     max_radius = max(radius for radius, _ in open_meteo_module.GRID_RINGS)

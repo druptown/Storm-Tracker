@@ -50,6 +50,18 @@ def test_pressure_trend_requires_three_paired_stations(pressure_trend_module):
     assert result["trend"] == "onvoldoende_data"
 
 
+def test_cold_start_never_invents_pressure_change(pressure_trend_module):
+    tracker = pressure_trend_module.PressureTrendTracker()
+    result = tracker.update([], timestamp=1_000.0)
+
+    assert result["trend"] == "onvoldoende_data"
+    assert result["rapid_fall"] is False
+    assert result["median_pressure_hpa"] is None
+    assert result["delta_15m_hpa"] is None
+    assert result["delta_30m_hpa"] is None
+    assert result["delta_60m_hpa"] is None
+
+
 def test_pressure_history_survives_snapshot_restore(pressure_trend_module):
     base = 1_700_000_000.0
     original = pressure_trend_module.PressureTrendTracker()

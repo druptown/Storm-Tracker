@@ -27,6 +27,18 @@ def test_status_is_dry_without_active_systems(nowcast_module):
     assert result["pressure_trend"] == "stabiel"
 
 
+def test_cold_start_without_pressure_history_is_neutral(nowcast_module):
+    result = nowcast_module.build_precipitation_status(
+        [], 51.0, 5.0, radar_source=None, pressure_trend=None
+    )
+
+    assert result["status"] == "droog"
+    assert result["pressure_trend"] == "onvoldoende_data"
+    assert result["pressure_delta_60m_hpa"] is None
+    assert result["rapid_pressure_fall"] is False
+    assert result["forecast_confidence_percent"] is None
+
+
 def test_single_radar_frame_is_only_observed(nowcast_module, storm_module):
     storm = storm_module.Storm(storm_id="echo", centroid_lat=51.0, centroid_lon=4.0)
     _add_frame(storm_module, storm, "one", 1_000.0, dbz=32.0)

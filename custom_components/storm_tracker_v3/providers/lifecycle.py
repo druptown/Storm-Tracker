@@ -39,8 +39,15 @@ class ProviderRuntime:
 class ProviderLifecycleController:
     """Activeer één gedeelde provider uitsluitend bij relevante engines."""
 
-    def __init__(self, *, cooldown_seconds: float = 300.0, clock=time.monotonic):
+    def __init__(
+        self,
+        *,
+        cooldown_seconds: float = 300.0,
+        fetch_timeout_seconds: float = 20.0,
+        clock=time.monotonic,
+    ):
         self._cooldown_seconds = float(cooldown_seconds)
+        self._fetch_timeout_seconds = float(fetch_timeout_seconds)
         self._clock = clock
         self._runtimes: dict[str, ProviderRuntime] = {}
 
@@ -98,24 +105,46 @@ class ProviderLifecycleController:
                 runtime.cooldown_started = None
 
     async def async_fetch_active(self) -> dict[str, list]:
-        """Poll iedere actieve provider eenmaal; overlappende polls worden overgeslagen."""
-        results = {}
-        for provider_id, runtime in self._runtimes.items():
-            if runtime.status != ProviderStatus.ACTIVE or runtime.lock.locked():
-                continue
+        """Poll actieve providers parallel met een harde timeout per provider."""
+        async def _fetch_one(provider_id: str, runtime: ProviderRuntime):
             async with runtime.lock:
                 try:
-                    observations = await runtime.plugin.async_fetch()
+                    observations = await asyncio.wait_for(
+                        runtime.plugin.async_fetch(),
+                        timeout=self._fetch_timeout_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    runtime.status = ProviderStatus.ERROR
+                    runtime.error = "timeout"
+                    _LOGGER.warning(
+                        "Provider %s overschreed timeout van %.0f seconden",
+                        provider_id,
+                        self._fetch_timeout_seconds,
+                    )
+                    return provider_id, None
                 except Exception as exc:
                     runtime.status = ProviderStatus.ERROR
                     runtime.error = type(exc).__name__
                     _LOGGER.exception("Provider %s pollen mislukt", provider_id)
-                    continue
+                    return provider_id, None
                 runtime.last_poll = time.time()
                 runtime.fetched = len(observations)
                 runtime.error = None
-                results[provider_id] = observations
-        return results
+                return provider_id, observations
+
+        pending = [
+            _fetch_one(provider_id, runtime)
+            for provider_id, runtime in self._runtimes.items()
+            if runtime.status == ProviderStatus.ACTIVE and not runtime.lock.locked()
+        ]
+        if not pending:
+            return {}
+        fetched = await asyncio.gather(*pending)
+        return {
+            provider_id: observations
+            for provider_id, observations in fetched
+            if observations is not None
+        }
 
     async def async_stop_all(self) -> None:
         """Stop actieve providers onmiddellijk bij het afsluiten van HA."""

@@ -49,6 +49,14 @@ class FakePlugin:
         return [object(), object()]
 
 
+class SlowPlugin(FakePlugin):
+    plugin_id = "slow"
+
+    async def async_fetch(self):
+        await __import__("asyncio").sleep(1)
+        return []
+
+
 @pytest.mark.asyncio
 async def test_provider_sleeps_until_matching_engine_and_is_shared(base_module):
     lifecycle = _load_lifecycle(base_module)
@@ -109,4 +117,18 @@ async def test_engine_return_during_cooldown_reuses_provider(base_module):
     assert plugin.starts == 1
     assert plugin.stops == 0
     assert controller.diagnostics()["national"]["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_slow_provider_is_cancelled_by_hard_timeout(base_module):
+    lifecycle = _load_lifecycle(base_module)
+    controller = lifecycle.ProviderLifecycleController(fetch_timeout_seconds=0.01)
+    plugin = SlowPlugin()
+    controller.register(plugin, lambda plugin, areas: object())
+    await controller.async_reconcile([base_module.CoverageArea(50, 12, 200)])
+
+    assert await controller.async_fetch_active() == {}
+    diagnostics = controller.diagnostics()["slow"]
+    assert diagnostics["status"] == "error"
+    assert diagnostics["error"] == "timeout"
 
