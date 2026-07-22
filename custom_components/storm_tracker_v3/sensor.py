@@ -699,6 +699,7 @@ class PrecipitationStatusSensor(StormTrackerBaseSensor):
     @property
     def _listen_events(self):
         return [
+            f"{DOMAIN}_targets_updated",
             f"{DOMAIN}_storms_updated",
             f"{DOMAIN}_radar_source_update",
             f"{DOMAIN}_netatmo_update",
@@ -710,14 +711,17 @@ class PrecipitationStatusSensor(StormTrackerBaseSensor):
         data = self.hass.data.get(DOMAIN, {})
         home_target = data.get("targets", {}).get("home", {})
         engine_id = home_target.get("region_engine_id")
+        manager = data.get("storm_manager")
+        region = manager.get_engine_for_target("zone.home") if manager else None
+        storms = region.storm_engine.get_active_storms() if region else []
         radar_source = (
             (data.get("radar_sources_by_engine", {}).get(engine_id) or {}).get("source")
             if engine_id else data.get("active_radar_source")
         )
         result = build_precipitation_status(
-            data.get("storms", []),
-            data.get("fictieve_lat", 0.0),
-            data.get("fictieve_lon", 0.0),
+            storms,
+            float(home_target.get("latitude", data.get("fictieve_lat", 0.0))),
+            float(home_target.get("longitude", data.get("fictieve_lon", 0.0))),
             radar_source=radar_source,
             pressure_trend=data.get("netatmo_pressure_trend"),
         )

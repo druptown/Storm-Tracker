@@ -55,3 +55,17 @@ def test_target_status_distinguishes_lightning_only_from_dry() -> None:
     assert "_lightning_only_summary" in rendered
     assert "_lightning_update" in rendered
     assert "_lightning_status_update" in rendered
+
+
+def test_home_status_uses_same_live_region_path_as_person_targets() -> None:
+    """Thuis mag niet terugvallen op de verouderde globale stormlijst."""
+    tree = ast.parse(SENSOR_MODULE.read_text(encoding="utf-8"))
+    classes = {
+        node.name: node for node in tree.body if isinstance(node, ast.ClassDef)
+    }
+    rendered = ast.unparse(classes["PrecipitationStatusSensor"])
+    assert "get_engine_for_target" in rendered
+    assert "zone.home" in rendered
+    assert "region.storm_engine.get_active_storms()" in rendered
+    assert "data.get('storms', [])" not in rendered
+    assert "_targets_updated" in rendered
