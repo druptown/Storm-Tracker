@@ -230,7 +230,14 @@ class NoaaGoesRrqpeProvider:
                     key = await self._latest_key(satellite)
                     payload = await self._download(satellite, key)
                     downloaded += len(payload)
-                    sat_obs, overlay = parse_rrqpe_netcdf(payload, satellite, satellite_areas)
+                    # HDF5-decompressie, projectietransformaties en pixelclustering
+                    # zijn CPU-intensief. Laat ze nooit de HA-eventloop blokkeren.
+                    sat_obs, overlay = await asyncio.to_thread(
+                        parse_rrqpe_netcdf,
+                        payload,
+                        satellite,
+                        satellite_areas,
+                    )
                     self._cache[satellite] = (signature, list(sat_obs), overlay, key)
                 observations.extend(sat_obs)
                 overlays.extend(overlay.get("runs", []))

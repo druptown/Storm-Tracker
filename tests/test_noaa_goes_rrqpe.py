@@ -41,6 +41,13 @@ def test_goes_satellite_selection(noaa_goes_rrqpe_module):
     assert module.satellite_for_longitude(120) is None
 
 
+def test_goes_decode_is_offloaded_from_home_assistant_event_loop():
+    source = Path(
+        "custom_components/storm_tracker_v3/providers/noaa_goes_rrqpe.py"
+    ).read_text(encoding="utf-8")
+    assert "sat_obs, overlay = await asyncio.to_thread(" in source
+
+
 def test_goes_rrqpe_decodes_real_projection(noaa_goes_rrqpe_module, base_module):
     timestamp = 1784684420.3
     observations, overlay = noaa_goes_rrqpe_module.parse_rrqpe_netcdf(

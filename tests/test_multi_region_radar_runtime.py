@@ -68,3 +68,12 @@ def test_moved_target_starts_radar_cycle_immediately():
     rendered = ast.unparse(functions[0])
     assert "_sync_region_radar_providers()" in rendered
     assert "hass.async_create_task(_poll_radar())" in rendered
+
+
+def test_radar_cycle_binds_shared_calibration_observer_before_fallbacks():
+    inner = INIT_SOURCE.split("async def _poll_radar_inner", 1)[1]
+    before_hsaf = inner.split("if hsaf is not None and hsaf_regions", 1)[0]
+    assert (
+        'calibration_observer = hass.data[DOMAIN]["radar_calibration_observer"]'
+        in before_hsaf
+    )

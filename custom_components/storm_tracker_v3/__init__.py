@@ -994,6 +994,7 @@ async def _async_setup_runtime(
 
     async def _poll_radar_inner(select_radar_source):
         """Inner radar cycle, protected by radar_poll_lock."""
+        calibration_observer = hass.data[DOMAIN]["radar_calibration_observer"]
         _sync_region_radar_providers()
         rainviewer_obs = await _poll_rv(operational=False)
         opera_obs = await _poll_opera()
