@@ -23,6 +23,7 @@ provider_logs/
 debug/
 tmp/
 storm_tracker_v3_v*_deploy.zip
+testdata/
 
 # Editors and operating systems
 .vscode/

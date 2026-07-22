@@ -19,6 +19,8 @@ CONF_METEOFRANCE_TOKEN = "meteofrance_api_token"
 CONF_METEOFRANCE_APPLICATION_ID = "meteofrance_application_id"
 CONF_KNMI_API_KEY = "knmi_api_key"
 CONF_KNMI_WMS_API_KEY = "knmi_wms_api_key"
+CONF_HSAF_USERNAME = "hsaf_username"
+CONF_HSAF_PASSWORD = "hsaf_password"
 CONF_LIGHTNING_SOURCE_MODE = "lightning_source_mode"
 
 
@@ -71,6 +73,16 @@ def _schema(defaults: dict) -> vol.Schema:
         vol.Optional(
             CONF_KNMI_WMS_API_KEY,
             default=defaults.get(CONF_KNMI_WMS_API_KEY, ""),
+        ): selector.TextSelector(selector.TextSelectorConfig(
+            type=selector.TextSelectorType.PASSWORD,
+        )),
+        vol.Optional(
+            CONF_HSAF_USERNAME,
+            default=defaults.get(CONF_HSAF_USERNAME, ""),
+        ): selector.TextSelector(),
+        vol.Optional(
+            CONF_HSAF_PASSWORD,
+            default=defaults.get(CONF_HSAF_PASSWORD, ""),
         ): selector.TextSelector(selector.TextSelectorConfig(
             type=selector.TextSelectorType.PASSWORD,
         )),

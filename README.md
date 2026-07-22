@@ -15,7 +15,7 @@ ProjectionTargets -> StormManager -> dynamische RegionEngine(s)
 ```
 
 De huidige providers omvatten onder andere Blitzortung, OPERA/EUMETNET,
-KMI, KNMI, RainViewer, Netatmo en Open-Meteo. OPERA-cellen met lage
+KMI, KNMI, RainViewer, H SAF H40B, Netatmo en Open-Meteo. OPERA-cellen met lage
 bronkwaliteit worden alleen operationeel gebruikt wanneer KMI, KNMI of
 RainViewer ze geografisch en temporeel bevestigt.
 
@@ -57,10 +57,17 @@ storm_tracker_v3:
       longitude: 4.42
   knmi_api_key: !secret knmi_api_key
   knmi_wms_api_key: !secret knmi_wms_api_key
+  hsaf_username: !secret hsaf_username
+  hsaf_password: !secret hsaf_password
 ```
 
-KNMI- en Netatmo-instellingen zijn optioneel. Bewaar echte tokens en sleutels
+KNMI-, H SAF- en Netatmo-instellingen zijn optioneel. Bewaar echte tokens en sleutels
 uitsluitend in `secrets.yaml`; commit die nooit naar Git.
+
+H SAF H40B is een slapende satellietfallback: lokale officiële radar en OPERA
+blijven prioritair. De H SAF-server biedt momenteel alleen gewone FTP aan;
+credentials zijn lokaal beschermd in Home Assistant maar de FTP-verbinding
+zelf is niet end-to-end versleuteld.
 
 Extra targets binnen de geconfigureerde `radar_radius_km` delen de operationele
 radardata. Een verder target krijgt bewust `onvoldoende_data` tot een eigen
@@ -81,4 +88,4 @@ release notes.
 
 ## Versie
 
-De huidige integratieversie is **0.4.32**.
+De huidige integratieversie is **0.4.71**.

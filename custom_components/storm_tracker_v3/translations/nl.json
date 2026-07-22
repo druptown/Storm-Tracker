@@ -13,6 +13,8 @@
           "eumetsat_consumer_secret": "EUMETSAT consumer secret",
           "meteofrance_api_token": "Météo-France tijdelijk API-token (optionele terugval)",
           "meteofrance_application_id": "Météo-France APPLICATION_ID voor automatische tokenvernieuwing",
+          "hsaf_username": "H SAF FTP-gebruikersnaam",
+          "hsaf_password": "H SAF FTP-wachtwoord",
           "knmi_api_key": "KNMI API-key",
           "knmi_wms_api_key": "KNMI WMS API-key (optioneel; anders dezelfde key)",
           "lightning_source_mode": "Bliksembron"
@@ -37,6 +39,8 @@
           "eumetsat_consumer_secret": "EUMETSAT consumer secret",
           "meteofrance_api_token": "Météo-France tijdelijk API-token (optionele terugval)",
           "meteofrance_application_id": "Météo-France APPLICATION_ID voor automatische tokenvernieuwing",
+          "hsaf_username": "H SAF FTP-gebruikersnaam",
+          "hsaf_password": "H SAF FTP-wachtwoord",
           "knmi_api_key": "KNMI API-key",
           "knmi_wms_api_key": "KNMI WMS API-key (optioneel; anders dezelfde key)",
           "lightning_source_mode": "Bliksembron"

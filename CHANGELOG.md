@@ -1,5 +1,21 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.71
+
+- Voeg H SAF H40B toe als gedeelde Meteosat-neerslagfallback voor Europa,
+  Afrika, het Middellandse Zeegebied en aangrenzende Atlantische regio's.
+- Download maximaal één centraal full-diskframe per cyclus en decodeer alleen
+  de geografische vensters rond RegionEngines die satellietfallback nodig
+  hebben; lokale radar en OPERA laten de provider slapen.
+- Verwerk de echte H40B NetCDF-projectie, instantane `rr`-neerslagintensiteit,
+  `qind`-pixelkwaliteit, bronpixels, componentfootprints en producttijd.
+- Laat H40B een lege RainViewer-regio overnemen wanneer satellietneerslag wel
+  aanwezig is en gebruik H40B daarnaast als onafhankelijke OPERA-bevestiging.
+- Neem iedere zes uur een beperkte kalibratieprobe en vergelijk alleen frames
+  met exact dezelfde nominale minuut; lokale officiële radar blijft referentie.
+- Voeg H SAF FTP-credentials toe aan de configuratie-UI en verbeter de aparte
+  toegangstest met host-, pad-, TLS- en FTP-diagnose.
+
 # 0.4.70
 
 - Publiceer de gegeorefereerde lokale OPERA-DBZH-pixels via hetzelfde

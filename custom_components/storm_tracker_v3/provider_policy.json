@@ -1,53 +1,53 @@
 {
   "schema_version": 1,
   "default": {
-    "radar": ["rainviewer"],
+    "radar": ["rainviewer", "hsaf_h40b"],
     "lightning": ["blitzortung", "satellite_by_longitude"],
     "ground_validation": ["open_meteo"]
   },
   "countries": {
     "BE": {
-      "radar": ["kmi", "opera", "rainviewer"],
+      "radar": ["kmi", "opera", "rainviewer", "hsaf_h40b"],
       "lightning": ["blitzortung", "eumetsat_li"],
       "ground_validation": ["netatmo", "open_meteo"]
     },
     "NL": {
-      "radar": ["knmi", "opera", "rainviewer"],
+      "radar": ["knmi", "opera", "rainviewer", "hsaf_h40b"],
       "lightning": ["blitzortung", "eumetsat_li"],
       "ground_validation": ["netatmo", "open_meteo"]
     },
     "DE": {
-      "radar": ["dwd_radolan", "opera", "rainviewer"],
+      "radar": ["dwd_radolan", "opera", "rainviewer", "hsaf_h40b"],
       "lightning": ["blitzortung", "eumetsat_li"],
       "ground_validation": ["netatmo", "open_meteo"]
     },
     "FR": {
-      "radar": ["meteofrance_radar", "opera", "rainviewer"],
+      "radar": ["meteofrance_radar", "opera", "rainviewer", "hsaf_h40b"],
       "lightning": ["blitzortung", "eumetsat_li"],
       "ground_validation": ["netatmo", "open_meteo"]
     },
     "AT": {
-      "radar": ["opera", "geosphere_at", "rainviewer"],
+      "radar": ["opera", "geosphere_at", "rainviewer", "hsaf_h40b"],
       "lightning": ["blitzortung", "eumetsat_li"],
       "ground_validation": ["netatmo", "open_meteo"]
     },
     "IT": {
-      "radar": ["dpc_radar", "opera", "rainviewer"],
+      "radar": ["dpc_radar", "opera", "rainviewer", "hsaf_h40b"],
       "lightning": ["blitzortung", "eumetsat_li"],
       "ground_validation": ["italiameteo", "netatmo", "open_meteo"]
     },
     "ES": {
-      "radar": ["aemet_radar", "opera", "rainviewer"],
+      "radar": ["aemet_radar", "opera", "rainviewer", "hsaf_h40b"],
       "lightning": ["blitzortung", "eumetsat_li"],
       "ground_validation": ["netatmo", "open_meteo"]
     },
     "LU": {
-      "radar": ["opera", "kmi", "dwd_radolan", "meteofrance_radar", "rainviewer"],
+      "radar": ["opera", "kmi", "dwd_radolan", "meteofrance_radar", "rainviewer", "hsaf_h40b"],
       "lightning": ["blitzortung", "eumetsat_li"],
       "ground_validation": ["meteolux", "netatmo", "open_meteo"]
     },
     "GB": {
-      "radar": ["met_office_radar", "opera", "rainviewer"],
+      "radar": ["met_office_radar", "opera", "rainviewer", "hsaf_h40b"],
       "lightning": ["blitzortung", "eumetsat_li"],
       "ground_validation": ["open_meteo"]
     },

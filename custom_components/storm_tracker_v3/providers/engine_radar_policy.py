@@ -70,6 +70,15 @@ def select_engine_radar_source(
     if rainviewer.configured and rainviewer.healthy:
         age = now - rainviewer.last_success if rainviewer.last_success is not None else None
         return EngineRadarDecision("rainviewer", f"{local_reason}; OPERA niet beschikbaar", countries, age)
+    hsaf = states.get("hsaf_h40b", SourceState(False, False))
+    if hsaf.configured and hsaf.healthy:
+        age = now - hsaf.last_success if hsaf.last_success is not None else None
+        return EngineRadarDecision(
+            "hsaf_h40b",
+            f"{local_reason}; geen bruikbare radar, H SAF satellietfallback",
+            countries,
+            age,
+        )
     return EngineRadarDecision(None, f"{local_reason}; geen gezonde fallback", countries, None)
 
 
@@ -80,6 +89,7 @@ def apply_echo_availability(
     opera_observations: int,
     rainviewer_observations: int,
     now: float,
+    hsaf_observations: int = 0,
 ) -> EngineRadarDecision:
     """Gebruik RainViewer wanneer OPERA lokaal leeg is maar radarregen bestaat."""
     rainviewer = states.get("rainviewer", SourceState(False, False))
@@ -97,6 +107,21 @@ def apply_echo_availability(
         return EngineRadarDecision(
             "rainviewer",
             "OPERA zonder lokale echo; RainViewer toont neerslag",
+            decision.country_codes,
+            age,
+        )
+    hsaf = states.get("hsaf_h40b", SourceState(False, False))
+    if (
+        decision.source == "rainviewer"
+        and rainviewer_observations == 0
+        and hsaf_observations > 0
+        and hsaf.configured
+        and hsaf.healthy
+    ):
+        age = now - hsaf.last_success if hsaf.last_success is not None else None
+        return EngineRadarDecision(
+            "hsaf_h40b",
+            "RainViewer zonder lokale echo; H SAF H40B toont satellietneerslag",
             decision.country_codes,
             age,
         )

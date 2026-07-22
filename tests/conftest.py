@@ -358,6 +358,16 @@ def aemet_radar_module(observation_module, base_module, raster_components_module
 
 
 @pytest.fixture(scope="session")
+def hsaf_h40b_module(
+    observation_module, base_module, odim_hdf5_module, raster_components_module
+):
+    return _load_module(
+        f"{PKG_NAME}.providers.hsaf_h40b",
+        PKG_ROOT / "providers" / "hsaf_h40b.py",
+    )
+
+
+@pytest.fixture(scope="session")
 def engine_radar_policy_module():
     _ensure_stub_package(f"{PKG_NAME}.providers")
     return _load_module(

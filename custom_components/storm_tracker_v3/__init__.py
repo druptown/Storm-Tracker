@@ -96,6 +96,8 @@ CONFIG_SCHEMA = vol.Schema({
         vol.Optional("eumetsat_consumer_secret"): cv.string,
         vol.Optional("meteofrance_api_token"): cv.string,
         vol.Optional("meteofrance_application_id"): cv.string,
+        vol.Optional("hsaf_username"): cv.string,
+        vol.Optional("hsaf_password"): cv.string,
         vol.Optional("lightning_source_mode", default="auto"): vol.In({"auto", "satellite_test"}),
     })
 }, extra=vol.ALLOW_EXTRA)
@@ -133,6 +135,8 @@ async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
         "meteofrance_application_id": raw.get("meteofrance_application_id"),
         "knmi_api_key": raw.get("knmi_api_key"),
         "knmi_wms_api_key": raw.get("knmi_wms_api_key"),
+        "hsaf_username": raw.get("hsaf_username"),
+        "hsaf_password": raw.get("hsaf_password"),
         "lightning_source_mode": raw.get("lightning_source_mode", "auto"),
     }
     if raw.get("test_tracker_entity"):
@@ -169,6 +173,8 @@ async def _async_setup_runtime(
     radar_radius    = conf.get("radar_radius_km", 200.0)
     sharing_distance = conf.get("engine_sharing_distance_km", 150.0)
     lightning_source_mode = conf.get("lightning_source_mode", "auto")
+    hsaf_username = conf.get("hsaf_username")
+    hsaf_password = conf.get("hsaf_password")
     hass.data[DOMAIN]["lightning_source_mode"] = lightning_source_mode
     target_specs = build_target_specs(
         home_lat,
@@ -449,6 +455,14 @@ async def _async_setup_runtime(
     hass.data[DOMAIN]["radar_sources_by_engine"] = {}
     hass.data[DOMAIN]["opera_providers_by_engine"] = {}
     hass.data[DOMAIN]["rainviewer_providers_by_engine"] = {}
+    if hsaf_username and hsaf_password:
+        from .providers.hsaf_h40b import HsafH40bProvider
+        hass.data[DOMAIN]["hsaf_h40b_provider"] = HsafH40bProvider(
+            hsaf_username, hsaf_password
+        )
+        _LOGGER.info("H SAF H40B geconfigureerd als slapende satellietfallback")
+    else:
+        hass.data[DOMAIN]["hsaf_h40b_provider"] = None
 
     def _engine_country_codes(region) -> tuple[str, ...]:
         return tuple(sorted({
@@ -510,6 +524,18 @@ async def _async_setup_runtime(
             healthy=bool(rainviewer and rainviewer.healthy),
             last_success=rv_success,
         )
+        hsaf = hass.data[DOMAIN].get("hsaf_h40b_provider")
+        hsaf_success = getattr(hsaf, "_last_success_ts", None) if hsaf else None
+        states["hsaf_h40b"] = SourceState(
+            configured=hsaf is not None,
+            healthy=bool(
+                hsaf
+                and hsaf.healthy
+                and hsaf_success is not None
+                and now_ts - float(hsaf_success) <= 90 * 60
+            ),
+            last_success=float(hsaf_success) if hsaf_success is not None else None,
+        )
         return states
 
     def _refresh_engine_radar_decisions():
@@ -534,6 +560,9 @@ async def _async_setup_runtime(
                 .get("rainviewer_observation_counts_by_engine", {})
                 .get(region.engine_id, 0),
                 now=now_ts,
+                hsaf_observations=hass.data[DOMAIN]
+                .get("hsaf_h40b_observation_counts_by_engine", {})
+                .get(region.engine_id, 0),
             )
             decisions[region.engine_id] = {
                 "source": decision.source,
@@ -791,6 +820,7 @@ async def _async_setup_runtime(
         raw_references.extend(hass.data[DOMAIN].get("meteolux_observations", []))
         raw_references.extend(hass.data[DOMAIN].get("dpc_radar_observations", []))
         raw_references.extend(hass.data[DOMAIN].get("aemet_radar_observations", []))
+        raw_references.extend(hass.data[DOMAIN].get("hsaf_h40b_observations", []))
         references = usable_corroborating_observations(raw_references)
         verification_by_engine = {
             engine_id: verify_opera_observations(engine_obs, references)
@@ -929,8 +959,62 @@ async def _async_setup_runtime(
         rainviewer_obs = await _poll_rv(operational=False)
         opera_obs = await _poll_opera()
         decisions = _refresh_engine_radar_decisions()
+        fallback_regions = [
+            region for region in storm_manager.get_all_engines()
+            if (decisions.get(region.engine_id) or {}).get("source")
+            in {None, "rainviewer", "hsaf_h40b"}
+        ]
+        calibration_due = (
+            time.time()
+            - float(hass.data[DOMAIN].get("hsaf_h40b_last_calibration_probe", 0.0))
+            >= 6 * 60 * 60
+        )
+        hsaf_regions = (
+            fallback_regions
+            if fallback_regions
+            else list(storm_manager.get_all_engines()) if calibration_due else []
+        )
+        hsaf_obs = []
+        hsaf = hass.data[DOMAIN].get("hsaf_h40b_provider")
+        if hsaf is not None and hsaf_regions:
+            hsaf_obs = await hsaf.async_fetch(tuple(
+                CoverageArea(
+                    region.center_lat,
+                    region.center_lon,
+                    region.observation_radius_km,
+                )
+                for region in hsaf_regions
+            ))
+            hass.data[DOMAIN]["hsaf_h40b_observations"] = hsaf_obs
+            hass.data[DOMAIN]["hsaf_h40b_observation_counts_by_engine"] = {
+                region.engine_id: sum(
+                    1 for item in hsaf_obs
+                    if region.accepts_observation(item.lat, item.lon)
+                )
+                for region in hsaf_regions
+            }
+            hass.data[DOMAIN]["hsaf_h40b_diagnostics"] = hsaf.diagnostics
+            if hsaf.healthy:
+                hass.data[DOMAIN]["hsaf_h40b_last_calibration_probe"] = time.time()
+                overlay_timestamp = (
+                    hsaf.overlay or {}
+                ).get("timestamp")
+                if overlay_timestamp is not None:
+                    calibration_observer.record_reference_frame(
+                        hsaf_obs,
+                        source="hsaf_h40b",
+                        timestamp=float(overlay_timestamp),
+                    )
+                    hass.data[DOMAIN]["radar_calibration"] = (
+                        calibration_observer.diagnostics()
+                    )
+            decisions = _refresh_engine_radar_decisions()
+        elif hsaf is not None:
+            hsaf.sleep()
+            hass.data[DOMAIN]["hsaf_h40b_diagnostics"] = hsaf.diagnostics
         _route_selected_radar(opera_obs, "opera")
         _route_selected_radar(rainviewer_obs, "rainviewer")
+        _route_selected_radar(hsaf_obs, "hsaf_h40b")
         _route_selected_radar(hass.data[DOMAIN].get("last_kmi_observations", []), "kmi")
         _route_selected_radar(hass.data[DOMAIN].get("knmi_current", []), "knmi")
         _refresh_radar_overlays(decisions)
@@ -985,6 +1069,7 @@ async def _async_setup_runtime(
         shared = {
             "kmi": hass.data[DOMAIN].get("kmi_provider"),
             "knmi": hass.data[DOMAIN].get("knmi_provider"),
+            "hsaf_h40b": hass.data[DOMAIN].get("hsaf_h40b_provider"),
         }
         per_engine = {
             "rainviewer": hass.data[DOMAIN].get("rainviewer_providers_by_engine", {}),
