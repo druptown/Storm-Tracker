@@ -25,7 +25,9 @@ def decode_json_response(text: str) -> dict:
 
 class ItaliaMeteoRadarProvider:
     plugin_id = "italiameteo"
-    capabilities = frozenset({Capability.RADAR, Capability.NOWCAST})
+    # De catalogusbundel is historisch/dagelijks en mag daarom nooit als
+    # operationele realtime-radar in de bronhiërarchie terechtkomen.
+    capabilities = frozenset({Capability.NOWCAST})
     priority = 100
 
     def __init__(self, session):

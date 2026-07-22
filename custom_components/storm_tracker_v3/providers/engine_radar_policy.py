@@ -11,7 +11,6 @@ LOCAL_RADAR_BY_COUNTRY = {
     "GB": "met_office_radar",
     "IT": "dpc_radar",
     "ES": "aemet_radar",
-    "LU": "meteolux",
 }
 
 COUNTRY_CODE_ALIASES = {

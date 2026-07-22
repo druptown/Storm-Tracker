@@ -67,7 +67,7 @@ def test_moved_target_starts_radar_cycle_immediately():
     assert len(functions) == 1
     rendered = ast.unparse(functions[0])
     assert "_sync_region_radar_providers()" in rendered
-    assert "hass.async_create_task(_poll_radar())" in rendered
+    assert "hass.async_create_task(_poll_all())" in rendered
 
 
 def test_radar_cycle_binds_shared_calibration_observer_before_fallbacks():

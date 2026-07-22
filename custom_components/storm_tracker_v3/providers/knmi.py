@@ -95,8 +95,11 @@ class KnmiProvider:
         self._headers     = {"Authorization": api_key}
         self._wms_headers = {"Authorization": self._wms_key}
         self.overlay = None
+        self.last_frame_timestamp: Optional[float] = None
+        self.last_fetch_success = False
 
     async def fetch_observations(self) -> list[Observation]:
+        self.last_fetch_success = False
         obs = []
 
         # Huidige neerslag (gecorrigeerd)
@@ -182,6 +185,8 @@ class KnmiProvider:
                 lambda row, col: _pixel_to_latlon(col, row, w, h),
             )
             if source == "knmi":
+                self.last_frame_timestamp = ts
+                self.last_fetch_success = True
                 self.overlay = {
                     "source": "knmi", "timestamp": ts,
                     "runs": extract_intensity_runs(

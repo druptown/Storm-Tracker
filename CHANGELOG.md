@@ -1,5 +1,23 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.80
+
+- Audit de volledige providerketen van geografische activatie tot kaartoverlay,
+  inclusief lokale radar, continentale fallback, satelliet, bliksem en
+  grondvalidatie.
+- Activeer gedeelde KMI- en KNMI-radar op basis van alle RegionEngines in
+  plaats van uitsluitend de thuislocatie.
+- Beschouw een geldig droog KNMI-frame als gezond en bepaal de gezondheid van
+  nationale radar uit de werkelijke producttijd in plaats van de polltijd.
+- Behandel MeteoLux en ItaliaMeteo uitsluitend als validatie/nowcast; zij
+  kunnen OPERA of een echte lokale realtime-radar niet meer blokkeren.
+- Isoleer Open-Meteo-provider, modelgrid, resultaat en routing per
+  RegionEngine, zodat verre targets geen gegevens met thuis delen.
+- Vervang gelijktijdige losse polls door één vergrendelde providercyclus:
+  lokale bronnen, radarvergelijking, bronselectie en daarna grondvalidatie.
+- Voeg end-to-end contracttests toe voor providerfrequentie, regionale
+  isolatie, hiërarchie, routing, overlays en bliksemscheiding.
+
 # 0.4.79
 
 - Isoleer Netatmo-stations, luchtdrukhistoriek en druktrends per RegionEngine;

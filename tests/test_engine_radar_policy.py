@@ -84,14 +84,14 @@ def test_localized_country_name_still_prefers_local_radar(engine_radar_policy_mo
     assert decision.country_codes == ("BE",)
 
 
-def test_luxembourg_prefers_meteolux(engine_radar_policy_module):
+def test_luxembourg_uses_opera_while_meteolux_remains_validation(engine_radar_policy_module):
     module = engine_radar_policy_module
     decision = module.select_engine_radar_source(
         {"LUXEMBURG"},
         {"meteolux": _state(module), "opera": _state(module)},
         now=1_000.0,
     )
-    assert decision.source == "meteolux"
+    assert decision.source == "opera"
 
 
 def test_empty_local_opera_uses_rainviewer_echo(engine_radar_policy_module):

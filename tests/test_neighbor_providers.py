@@ -91,10 +91,10 @@ def test_italiameteo_selects_latest_bundle(italiameteo_module):
     assert latest["filename"] == "new.grib"
 
 
-def test_italiameteo_declares_forecast_and_radar(italiameteo_module, base_module):
+def test_italiameteo_is_validation_not_realtime_radar(italiameteo_module, base_module):
     provider = italiameteo_module.ItaliaMeteoRadarProvider(None)
-    assert base_module.Capability.RADAR in provider.capabilities
     assert base_module.Capability.NOWCAST in provider.capabilities
+    assert base_module.Capability.RADAR not in provider.capabilities
 
 
 def test_italiameteo_rejects_non_json_success_body(italiameteo_module):

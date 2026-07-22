@@ -229,6 +229,9 @@ async def _async_setup_runtime(
     )
     hass.data[DOMAIN]["netatmo_pressure_trends_by_engine"] = {}
     hass.data[DOMAIN]["netatmo_observations_by_engine"] = {}
+    hass.data[DOMAIN]["open_meteo_providers_by_engine"] = {}
+    hass.data[DOMAIN]["open_meteo_results_by_engine"] = {}
+    hass.data[DOMAIN]["open_meteo_processed_sequences_by_engine"] = {}
 
     # ── StormEngine + OFE aanmaken ────────────────────────────────────────
     mcs_store = McsHistoryStore(hass)
@@ -512,27 +515,30 @@ async def _async_setup_runtime(
         states = {}
         for provider_id in ("dwd_radolan", "met_office_radar", "meteofrance_radar", "meteolux", "dpc_radar", "aemet_radar"):
             details = lifecycle.get(provider_id, {})
-            last_poll = details.get("last_poll")
+            overlay = provider_lifecycle.overlay(provider_id) or {}
+            product_timestamp = overlay.get("timestamp")
             states[provider_id] = SourceState(
                 configured=provider_id in lifecycle,
                 healthy=bool(
                     details.get("status") == "active"
                     and details.get("error") is None
-                    and last_poll is not None
-                    and now_ts - float(last_poll) <= 20 * 60
+                    and product_timestamp is not None
+                    and now_ts - float(product_timestamp) <= 20 * 60
                 ),
-                last_success=float(last_poll) if last_poll is not None else None,
+                last_success=(
+                    float(product_timestamp)
+                    if product_timestamp is not None else None
+                ),
             )
         kmi = hass.data[DOMAIN].get("kmi_provider")
-        kmi_timestamp = hass.data[DOMAIN].get("kmi_frame_timestamp")
+        kmi_timestamp = getattr(kmi, "last_frame_timestamp", None) if kmi else None
         states["kmi"] = SourceState(
             configured=kmi is not None,
             healthy=bool(kmi_timestamp and now_ts - float(kmi_timestamp) <= 20 * 60),
             last_success=float(kmi_timestamp) if kmi_timestamp else None,
         )
         knmi = hass.data[DOMAIN].get("knmi_provider")
-        knmi_current = hass.data[DOMAIN].get("knmi_current", [])
-        knmi_timestamp = max((float(item.timestamp) for item in knmi_current), default=None)
+        knmi_timestamp = getattr(knmi, "last_frame_timestamp", None) if knmi else None
         states["knmi"] = SourceState(
             configured=knmi is not None,
             healthy=bool(knmi_timestamp and now_ts - knmi_timestamp <= 20 * 60),
@@ -674,32 +680,7 @@ async def _async_setup_runtime(
     # ── Locatie-afhankelijke providers initialiseren ──────────────────────
     async def _init_location_providers(lat: float, lon: float) -> None:
         """Start of herstart alle locatie-afhankelijke providers op nieuwe locatie."""
-        from .providers.kmi import KmiProvider, KmiProviderFactory
-        from .providers.rainviewer import RainViewerProvider
-        from .providers.knmi import KnmiProvider, KnmiProviderFactory
-        from .providers.open_meteo import OpenMeteoProvider
-
         _LOGGER.info("Providers initialiseren voor (%.4f,%.4f)", lat, lon)
-
-        if KmiProviderFactory.supports(lat, lon, 700):
-            hass.data[DOMAIN]["kmi_provider"] = KmiProvider(lat, lon)
-            _LOGGER.info("KMI: gestart")
-        else:
-            hass.data[DOMAIN]["kmi_provider"] = None
-            _LOGGER.info("KMI: buiten dekkingsgebied")
-
-        if knmi_api_key and KnmiProviderFactory.supports(lat, lon, 700):
-            hass.data[DOMAIN]["knmi_provider"] = KnmiProvider(lat, lon, knmi_api_key, knmi_wms_key)
-            _LOGGER.info("KNMI: gestart")
-        else:
-            hass.data[DOMAIN]["knmi_provider"] = None
-            _LOGGER.info("KNMI: buiten dekkingsgebied of niet geconfigureerd")
-
-        hass.data[DOMAIN]["open_meteo"] = OpenMeteoProvider(lat, lon)
-        _LOGGER.info("Open-Meteo: gestart (%d gridpunten)",
-                     len(hass.data[DOMAIN]["open_meteo"]._points))
-
-        hass.async_create_task(_poll_all())
 
     def _sync_region_netatmo_providers() -> None:
         """Houd één Netatmo-provider en druktracker per RegionEngine bij."""
@@ -736,12 +717,75 @@ async def _async_setup_runtime(
                 )
             _pressure_tracker_for_region(region)
 
+    def _sync_region_open_meteo_providers() -> None:
+        """Houd het Open-Meteo-modelgrid strikt per RegionEngine gescheiden."""
+        from .providers.open_meteo import OpenMeteoProvider
+
+        providers = hass.data[DOMAIN]["open_meteo_providers_by_engine"]
+        regions = {region.engine_id: region for region in storm_manager.get_all_engines()}
+        for engine_id in tuple(providers):
+            if engine_id not in regions:
+                providers.pop(engine_id, None)
+                hass.data[DOMAIN]["open_meteo_results_by_engine"].pop(engine_id, None)
+                hass.data[DOMAIN]["open_meteo_processed_sequences_by_engine"].pop(
+                    engine_id, None
+                )
+        for engine_id, region in regions.items():
+            provider = providers.get(engine_id)
+            if (
+                provider is None
+                or abs(provider._lat - region.center_lat) > 0.01
+                or abs(provider._lon - region.center_lon) > 0.01
+            ):
+                providers[engine_id] = OpenMeteoProvider(
+                    region.center_lat, region.center_lon
+                )
+                _LOGGER.info(
+                    "Open-Meteo: %s gestart rond %.4f,%.4f",
+                    engine_id,
+                    region.center_lat,
+                    region.center_lon,
+                )
+
     def _sync_region_radar_providers() -> None:
         """Houd OPERA- en RainViewer-instanties gelijk aan actieve engines."""
+        from .providers.kmi import KmiProvider, KmiProviderFactory
+        from .providers.knmi import KnmiProvider, KnmiProviderFactory
         from .providers.opera import OperaProvider, OperaProviderFactory
         from .providers.rainviewer import RainViewerProvider
 
         regions = {region.engine_id: region for region in storm_manager.get_all_engines()}
+        kmi_region = next((
+            region for region in regions.values()
+            if KmiProviderFactory.supports(
+                region.center_lat, region.center_lon, region.observation_radius_km
+            )
+        ), None)
+        if kmi_region is not None and hass.data[DOMAIN].get("kmi_provider") is None:
+            hass.data[DOMAIN]["kmi_provider"] = KmiProvider(
+                kmi_region.center_lat, kmi_region.center_lon
+            )
+            _LOGGER.info("KMI: geactiveerd voor %s", kmi_region.engine_id)
+        elif kmi_region is None:
+            hass.data[DOMAIN]["kmi_provider"] = None
+
+        knmi_region = next((
+            region for region in regions.values()
+            if knmi_api_key and KnmiProviderFactory.supports(
+                region.center_lat, region.center_lon, region.observation_radius_km
+            )
+        ), None)
+        if knmi_region is not None and hass.data[DOMAIN].get("knmi_provider") is None:
+            hass.data[DOMAIN]["knmi_provider"] = KnmiProvider(
+                knmi_region.center_lat,
+                knmi_region.center_lon,
+                knmi_api_key,
+                knmi_wms_key,
+            )
+            _LOGGER.info("KNMI: geactiveerd voor %s", knmi_region.engine_id)
+        elif knmi_region is None:
+            hass.data[DOMAIN]["knmi_provider"] = None
+
         opera_providers = hass.data[DOMAIN]["opera_providers_by_engine"]
         rainviewer_providers = hass.data[DOMAIN]["rainviewer_providers_by_engine"]
         for engine_id in tuple(opera_providers):
@@ -1155,6 +1199,7 @@ async def _async_setup_runtime(
 
     async def _poll_radar_comparison(now=None):
         """Keep national products observable without feeding the OFE."""
+        _sync_region_radar_providers()
         await _poll_kmi()
         await _poll_knmi()
 
@@ -1285,36 +1330,54 @@ async def _async_setup_runtime(
             storm_manager.route_observation(o)
 
     async def _poll_open_meteo(now=None):
-        p = hass.data[DOMAIN].get("open_meteo")
-        if not p: return
-        result = await p.fetch()
-        hass.data[DOMAIN]["open_meteo_result"] = result
-        hass.bus.async_fire(f"{DOMAIN}_open_meteo_update", result)
-        sequence = result.get("fetch_sequence", 0)
-        if sequence == hass.data[DOMAIN].get("open_meteo_processed_sequence"):
+        _sync_region_open_meteo_providers()
+        providers = hass.data[DOMAIN].get("open_meteo_providers_by_engine", {})
+        if not providers:
             return
-        hass.data[DOMAIN]["open_meteo_processed_sequence"] = sequence
-        lat = hass.data[DOMAIN].get("fictieve_lat", home_lat)
-        lon = hass.data[DOMAIN].get("fictieve_lon", home_lon)
-        log_open_meteo(hass, result, lat, lon)
-        if result["is_raining"] and not hass.data[DOMAIN].get("open_meteo_was_raining", False):
-            _LOGGER.info("Open-Meteo: regen gedetecteerd — %d punten nat nu, %d binnen 90min",
-                         result.get("wet_now", 0), result.get("wet_forecast_90m", 0))
-        hass.data[DOMAIN]["open_meteo_was_raining"] = result["is_raining"]
-        # Natte punten naar OFE
+        engine_ids = tuple(providers)
+        results = await asyncio.gather(
+            *(providers[engine_id].fetch() for engine_id in engine_ids),
+            return_exceptions=True,
+        )
+        regions = {region.engine_id: region for region in storm_manager.get_all_engines()}
+        result_map = hass.data[DOMAIN]["open_meteo_results_by_engine"]
+        processed = hass.data[DOMAIN]["open_meteo_processed_sequences_by_engine"]
         from .engine.observation import Observation, ObservationType
         import time as _t
         now_ts = _t.time()
-        for loc in result.get("wet_locations_now", []):
-            obs = Observation(
-                obs_type  = ObservationType.RAIN,
-                lat       = loc["lat"],
-                lon       = loc["lon"],
-                timestamp = now_ts,
-                rain_mm   = loc["mm"],
-                source    = "open_meteo",
-            )
-            storm_manager.route_observation(obs)
+        for engine_id, result in zip(engine_ids, results):
+            if isinstance(result, Exception):
+                _LOGGER.error("Open-Meteo-poll voor %s mislukt: %s", engine_id, result)
+                continue
+            result_map[engine_id] = result
+            region = regions.get(engine_id)
+            if region is None:
+                continue
+            log_open_meteo(hass, result, region.center_lat, region.center_lon)
+            sequence = result.get("fetch_sequence", 0)
+            if not sequence or sequence == processed.get(engine_id):
+                continue
+            processed[engine_id] = sequence
+            for loc in result.get("wet_locations_now", []):
+                observation = Observation(
+                    obs_type=ObservationType.RAIN,
+                    lat=loc["lat"],
+                    lon=loc["lon"],
+                    timestamp=now_ts,
+                    rain_mm=loc["mm"],
+                    source="open_meteo",
+                )
+                storm_manager.route_observation_to_engine(engine_id, observation)
+        home_region = storm_manager.get_engine_for_target("zone.home")
+        home_result = result_map.get(home_region.engine_id, {}) if home_region else {}
+        hass.data[DOMAIN]["open_meteo_result"] = home_result
+        hass.data[DOMAIN]["open_meteo"] = (
+            providers.get(home_region.engine_id) if home_region else None
+        )
+        hass.bus.async_fire(
+            f"{DOMAIN}_open_meteo_update",
+            {"engines": sorted(result_map), **home_result},
+        )
 
     async def _poll_eumetsat_li(now=None):
         """Gebruik satellietflashes uitsluitend zolang Blitzortung offline is."""
@@ -1438,25 +1501,27 @@ async def _async_setup_runtime(
     hass.data[DOMAIN]["set_lightning_source_mode"] = _set_lightning_source_mode
 
     async def _poll_all(now=None):
-        """Initial coordinated poll."""
-        # Establish national-radar evidence before the first OPERA validation.
-        # Later five-minute cycles can safely reuse the previous comparison.
-        await _poll_radar_comparison()
-        await _poll_radar()
-        hass.async_create_task(_poll_netatmo())
+        """Voer een volledige providercyclus in vaste, racevrije volgorde uit."""
+        lock = hass.data[DOMAIN].setdefault("provider_cycle_lock", asyncio.Lock())
+        if lock.locked():
+            _LOGGER.debug("Providercyclus overgeslagen: vorige cyclus loopt nog")
+            return
+        async with lock:
+            _sync_region_radar_providers()
+            _sync_region_open_meteo_providers()
+            await _poll_national_providers()
+            await _poll_radar_comparison()
+            await _poll_radar()
+            await asyncio.gather(_poll_netatmo(), _poll_open_meteo())
 
     # ── Polling intervallen ───────────────────────────────────────────────
     from homeassistant.helpers.event import async_track_time_interval, async_track_state_change_event
     from datetime import timedelta
 
     hass.data[DOMAIN]["unsubscribers"].extend([
-        async_track_time_interval(hass, _poll_radar, timedelta(minutes=5)),
-        async_track_time_interval(hass, _poll_radar_comparison, timedelta(minutes=5)),
-        async_track_time_interval(hass, _poll_netatmo, timedelta(minutes=5)),
-        async_track_time_interval(hass, _poll_open_meteo, timedelta(minutes=10)),
+        async_track_time_interval(hass, _poll_all, timedelta(minutes=5)),
         async_track_time_interval(hass, _poll_eumetsat_li, timedelta(minutes=2)),
         async_track_time_interval(hass, _poll_goes_glm, timedelta(minutes=1)),
-        async_track_time_interval(hass, _poll_national_providers, timedelta(minutes=5)),
     ])
 
     # ── Fictieve tracker locatie volgen ───────────────────────────────────
@@ -1526,9 +1591,13 @@ async def _async_setup_runtime(
         await _init_location_providers(lat, lon)
         hass.data[DOMAIN]["providers_initialized"] = True
 
+    async def _refresh_fictieve_location() -> None:
+        await _update_fictieve_location()
+        await _poll_all()
+
     @callback
     def _on_fictieve_state_change(event):
-        hass.async_create_task(_update_fictieve_location())
+        hass.async_create_task(_refresh_fictieve_location())
 
     hass.data[DOMAIN]["unsubscribers"].append(
         async_track_state_change_event(hass, [fictieve_entity], _on_fictieve_state_change)
@@ -1590,6 +1659,7 @@ async def _async_setup_runtime(
         hass.data[DOMAIN]["region_engines"] = storm_manager.get_all_engines()
         _sync_region_radar_providers()
         _sync_region_netatmo_providers()
+        _sync_region_open_meteo_providers()
         blitz.update_regions(_blitz_regions())
         hass.bus.async_fire(
             f"{DOMAIN}_targets_updated", {"targets": [spec.target_id]}
@@ -1600,8 +1670,8 @@ async def _async_setup_runtime(
         )
         # Een verre verplaatsing creëert een nieuwe RegionEngine. Start meteen
         # een beschermde radarcyclus; de lock voorkomt dubbele gelijktijdige polls.
-        hass.async_create_task(_poll_radar())
-        hass.async_create_task(_poll_netatmo())
+        if not initial:
+            hass.async_create_task(_poll_all())
 
     @callback
     def _on_secondary_target_change(event):
@@ -1628,7 +1698,7 @@ async def _async_setup_runtime(
         if not hass.data[DOMAIN].get("providers_initialized"):
             await _init_location_providers(home_lat, home_lon)
             hass.data[DOMAIN]["providers_initialized"] = True
-        await _poll_national_providers()
+        await _poll_all()
 
     if hass.state == CoreState.running:
         await _do_initial_setup()
