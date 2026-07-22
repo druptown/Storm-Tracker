@@ -10,7 +10,9 @@ class Stv3MultiTargetMap extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     const state = hass.states[this.config.entity || 'sensor.stv3_kaart_geojson'];
-    const marker = state ? state.state + ':' + state.last_updated : 'none';
+    this._calibration = hass.states['sensor.stv3_radar_autokalibratie'];
+    const calibrationMarker = this._calibration ? this._calibration.last_updated : 'none';
+    const marker = (state ? state.state + ':' + state.last_updated : 'none')+':'+calibrationMarker;
     if (marker !== this._marker) { this._marker = marker; this._load(); }
   }
   getCardSize() { return 8; }
@@ -47,8 +49,8 @@ class Stv3MultiTargetMap extends HTMLElement {
       '<style>'+
       ':host{display:block} ha-card{overflow:hidden} .top{display:flex;gap:8px;align-items:center;padding:12px 14px;background:var(--ha-card-background,var(--card-background-color));flex-wrap:wrap}'+
       '.title{font-weight:700;font-size:18px;flex:1;min-width:180px}.controls{display:flex;gap:6px;align-items:center} select,button{font:inherit;color:var(--primary-text-color);background:var(--secondary-background-color);border:1px solid var(--divider-color);border-radius:8px;padding:7px 9px}button{width:36px;font-weight:700;cursor:pointer}.lightning-toggle,.technical-toggle{width:auto;font-size:13px}.lightning-toggle.active{background:#5d4037;color:#fff;border-color:#ffca28}.technical-toggle.active{background:#37474f;color:#fff}'+
-      '.map{position:relative;overflow:hidden;background:#cfe7f5;height:'+Number(this.config.height)+'px}.tiles,.overlay{position:absolute;inset:0}.tiles img{position:absolute;width:256px;height:256px}.overlay{pointer-events:none}@keyframes stormPulse{0%,100%{fill-opacity:0;stroke-opacity:0}50%{fill-opacity:.5;stroke-opacity:.5}}.storm-pulse{animation:stormPulse 1.25s ease-in-out infinite}.legend{position:absolute;left:10px;bottom:10px;background:rgba(20,25,30,.82);color:#fff;border-radius:8px;padding:7px 10px;font-size:12px;line-height:1.6}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}.meta{padding:8px 14px;font-size:12px;color:var(--secondary-text-color)}.error{padding:18px;color:var(--error-color)}'+
-      '</style><ha-card><div class="top"><div class="title">Neerslag, bliksem en targets</div><div class="controls"><select aria-label="Target"></select><button class="lightning-toggle'+(this._showLightning?' active':'')+'" title="Bliksemdetail wisselen">&#9889; '+(this._showLightning?'inslagen':'buien')+'</button><button class="technical-toggle'+(this._showTechnical?' active':'')+'" title="Technische contouren">techniek</button><button class="minus" title="Uitzoomen">-</button><button class="plus" title="Inzoomen">+</button></div></div><div class="map"><div class="tiles"></div><svg class="overlay"></svg><div class="legend"><span class="dot" style="background:#00e676"></span>target<br><span class="dot" style="background:#b3e5fc"></span>zeer licht <span class="dot" style="background:#29b6f6"></span>licht <span class="dot" style="background:#1565c0"></span>matig <span class="dot" style="background:#ffee58"></span>fors <span class="dot" style="background:#ff9800"></span>zwaar <span class="dot" style="background:#f44336"></span>zeer zwaar<br><span style="display:inline-block;width:12px;border-top:1px dashed #455a64;vertical-align:middle"></span> afstandsringen<br>'+(this._showLightning?'<span style="color:#ffeb3b;font-size:15px">&#9889;</span> inslagen (geclusterd)':'<span style="color:#ffca28">&#9679;</span> knipperende bui = actief onweer')+'</div></div><div class="meta"></div></ha-card>';
+      '.map{position:relative;overflow:hidden;background:#cfe7f5;height:'+Number(this.config.height)+'px}.tiles,.overlay{position:absolute;inset:0}.tiles img{position:absolute;width:256px;height:256px}.overlay{pointer-events:none}@keyframes stormPulse{0%,100%{fill-opacity:0;stroke-opacity:0}50%{fill-opacity:.5;stroke-opacity:.5}}.storm-pulse{animation:stormPulse 1.25s ease-in-out infinite}.legend{position:absolute;left:10px;bottom:10px;background:rgba(20,25,30,.82);color:#fff;border-radius:8px;padding:7px 10px;font-size:12px;line-height:1.6}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}.meta{padding:8px 14px;font-size:12px;color:var(--secondary-text-color)}.collector{display:none;padding:10px 14px;border-top:1px solid var(--divider-color);font-size:12px;line-height:1.7;background:var(--secondary-background-color)}.collector.visible{display:block}.collector strong{font-size:13px}.error{padding:18px;color:var(--error-color)}'+
+      '</style><ha-card><div class="top"><div class="title">Neerslag, bliksem en targets</div><div class="controls"><select aria-label="Target"></select><button class="lightning-toggle'+(this._showLightning?' active':'')+'" title="Bliksemdetail wisselen">&#9889; '+(this._showLightning?'inslagen':'buien')+'</button><button class="technical-toggle'+(this._showTechnical?' active':'')+'" title="Technische contouren">techniek</button><button class="minus" title="Uitzoomen">-</button><button class="plus" title="Inzoomen">+</button></div></div><div class="map"><div class="tiles"></div><svg class="overlay"></svg><div class="legend"><span class="dot" style="background:#00e676"></span>target<br><span class="dot" style="background:#b3e5fc"></span>zeer licht <span class="dot" style="background:#29b6f6"></span>licht <span class="dot" style="background:#1565c0"></span>matig <span class="dot" style="background:#ffee58"></span>fors <span class="dot" style="background:#ff9800"></span>zwaar <span class="dot" style="background:#f44336"></span>zeer zwaar<br><span style="display:inline-block;width:12px;border-top:1px dashed #455a64;vertical-align:middle"></span> afstandsringen<br>'+(this._showLightning?'<span style="color:#ffeb3b;font-size:15px">&#9889;</span> inslagen (geclusterd)':'<span style="color:#ffca28">&#9679;</span> knipperende bui = actief onweer')+'</div></div><div class="meta"></div><div class="collector'+(this._showTechnical?' visible':'')+'"></div></ha-card>';
     const select=this.shadowRoot.querySelector('select');
     for(const target of targets){
       const option=document.createElement('option');
@@ -90,7 +92,7 @@ class Stv3MultiTargetMap extends HTMLElement {
       if(radarOverlay&&!this._showTechnical&&['storm','radar_cell'].includes(f.properties.layer)) return false;
       return true;
     });
-    const order={region:0,storm:1,radar_cell:2,motion:3,lightning:4,target:5};
+    const order={region:0,storm:1,radar_cell:2,lightning_zone:3,motion:4,lightning:5,target:6};
     const ordered=[...filtered].sort((a,b)=>(order[a.properties.layer]??9)-(order[b.properties.layer]??9));
     const lightning=allLightning;
     if(radarOverlay) this._radarOverlay(svg,radarOverlay,center,w,h,lightning,!this._showLightning);
@@ -114,6 +116,14 @@ class Stv3MultiTargetMap extends HTMLElement {
     }
     const overlayText=radarOverlay?' | raster: '+radarOverlay.runs.length+' pixelruns':'';
     this.shadowRoot.querySelector('.meta').textContent=(selected.properties.name||selected.properties.target_id)+' | '+(selectedEngine||'alle engines')+' | radar: '+source+' | '+reason+goesText+overlayText+' | zoom '+this._zoom+' | '+availableCells+' analysecellen | '+visibleLightning+' bliksems (15 min)';
+    this._collectorStatus();
+  }
+  _collectorStatus(){
+    const panel=this.shadowRoot.querySelector('.collector');if(!panel)return;
+    const attrs=this._calibration?.attributes||{},s=attrs.storage||{};
+    const size=Number(s.bytes||0),sizeText=size>=1073741824?(size/1073741824).toFixed(2)+' GiB':size>=1048576?(size/1048576).toFixed(1)+' MiB':(size/1024).toFixed(1)+' KiB';
+    const fmt=n=>Number(n||0).toLocaleString('nl-BE');
+    panel.innerHTML='<strong>Kalibratiedatabase: '+this._escape(s.status||'wachten')+'</strong><br>'+fmt(s.total_datapoints)+' datapunten · '+fmt(s.total_frames)+' frames · '+fmt(s.total_comparisons)+' vergelijkingen · '+fmt(s.sources)+' bronnen · '+fmt(s.regions)+' regio\'s · '+sizeText+'<br>Laatste batch: '+fmt(s.frames_written)+' frames, '+fmt(s.comparisons_written)+' vergelijkingen';
   }
   _radarOverlay(svg,overlay,center,w,h,lightning,pulseStorms) {
     const ns='http://www.w3.org/2000/svg';
@@ -178,7 +188,7 @@ class Stv3MultiTargetMap extends HTMLElement {
   _feature(svg,f,center,w,h) {
     const ns='http://www.w3.org/2000/svg',layer=f.properties.layer,type=f.geometry.type;
     const age=Number(f.properties.age_seconds||0),lightningColor=age<120?'#ffeb3b':age<300?'#ff9800':'#9e9e9e';
-    const color={target:'#00e676',region:'#ab47bc',storm:'#ff9800',radar_cell:'#2196f3',motion:'#ef5350',lightning:lightningColor}[layer]||'#fff';
+    const color={target:'#00e676',region:'#ab47bc',storm:'#ff9800',radar_cell:'#2196f3',lightning_zone:'#f44336',motion:'#ef5350',lightning:lightningColor}[layer]||'#fff';
     if(type==='Point'){
       const p=this._screen(f.geometry.coordinates,center,w,h);
       if(layer==='lightning'){
@@ -197,7 +207,7 @@ class Stv3MultiTargetMap extends HTMLElement {
     const rings=type==='MultiPolygon'?f.geometry.coordinates.map(p=>p[0]):[type==='Polygon'?f.geometry.coordinates[0]:f.geometry.coordinates];
     if(!rings[0]?.length) return;
     const path=document.createElementNS(ns,'path'),d=rings.map(coords=>coords.map((c,i)=>{const p=this._screen(c,center,w,h);return(i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1);}).join(' ')+(type==='Polygon'||type==='MultiPolygon'?' Z':'')).join(' ');
-    path.setAttribute('d',d);path.setAttribute('stroke',color);path.setAttribute('stroke-width',layer==='storm'?'3':layer==='motion'?'3':'1.5');path.setAttribute('fill',type==='Polygon'||type==='MultiPolygon'?color:'none');path.setAttribute('fill-opacity',layer==='storm'?'.12':'.20');path.setAttribute('stroke-opacity',layer==='radar_cell'?'.75':'.95');svg.appendChild(path);
+    path.setAttribute('d',d);path.setAttribute('stroke',color);path.setAttribute('stroke-width',layer==='storm'?'3':layer==='motion'?'3':'1.5');path.setAttribute('fill',type==='Polygon'||type==='MultiPolygon'?color:'none');path.setAttribute('fill-opacity',layer==='storm'?'.12':layer==='lightning_zone'?'0':'.20');path.setAttribute('stroke-opacity',layer==='radar_cell'?'.75':'.95');if(layer==='lightning_zone')path.setAttribute('class','storm-pulse');svg.appendChild(path);
   }
 }
 if(!customElements.get('stv3-multi-target-map')) customElements.define('stv3-multi-target-map',Stv3MultiTargetMap);

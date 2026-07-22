@@ -1,5 +1,19 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.85
+
+- Publiceer goedkope persistente collectortellers voor frames, rasterpunten,
+  vergelijkingen, bronnen, regio's, databereik en totale SQLite/WAL-grootte.
+- Toon deze status in het technische paneel van de multi-targetkaart, inclusief
+  de omvang van de laatste schrijfbatch.
+- Herstel de tellers bij het opstarten rechtstreeks uit de database en vermijd
+  daarna dure volledige tellingen tijdens iedere vijfminutencyclus.
+- Voeg een afzonderlijke rode pulserende bliksemenvelop toe rond inslagen van
+  de laatste vijf minuten, ook buiten de radarregen; de regenfootprint zelf
+  blijft exact ongewijzigd.
+- Cluster bliksemzones regionaal en markeer diagnostisch of radarneerslag zich
+  binnen 25 km bevindt of dat het een `lightning_only`-zone is.
+
 # 0.4.84
 
 - Leg alle regionale providerframes, inclusief geldige droge frames, permanent

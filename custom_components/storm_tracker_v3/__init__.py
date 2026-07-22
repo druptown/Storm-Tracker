@@ -694,10 +694,13 @@ async def _async_setup_runtime(
     calibration_store = CalibrationDataStore(
         hass.config.path(".storage", "storm_tracker_v3_calibration.sqlite3")
     )
-    await hass.async_add_executor_job(calibration_store.initialize)
+    calibration_stats = await hass.async_add_executor_job(
+        calibration_store.initialize
+    )
     hass.data[DOMAIN]["radar_calibration_store"] = calibration_store
     hass.data[DOMAIN]["radar_calibration_storage"] = {
-        "status": "ready", "path": str(calibration_store.path), "bytes": 0,
+        "status": "ready", "frames_written": 0,
+        "comparisons_written": 0, **calibration_stats,
     }
     hass.data[DOMAIN]["radar_calibration"] = (
         hass.data[DOMAIN]["radar_calibration_observer"].diagnostics()

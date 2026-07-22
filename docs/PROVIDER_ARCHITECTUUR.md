@@ -1,7 +1,7 @@
-# Storm Tracker V3 — providerarchitectuur 0.4.84
+# Storm Tracker V3 — providerarchitectuur 0.4.85
 
 Dit document beschrijft de effectief geïmplementeerde providerstructuur van
-Storm Tracker V3 0.4.84. Het onderscheidt operationele radar, fallbackdata,
+Storm Tracker V3 0.4.85. Het onderscheidt operationele radar, fallbackdata,
 bliksem, validatiebronnen en bronnen die alleen beleidsmatig voor toekomstige
 uitbreiding zijn voorzien.
 
@@ -239,7 +239,20 @@ zijn nog geen garantie dat de bijbehorende runtimeprovider bestaat. Tot hun
 implementatie gebruikt het systeem in die regio's alleen de hierboven als
 operationeel beschreven bronnen.
 
-## 10. Testdekking in 0.4.84
+De technische weergave van de multi-targetkaart toont de actuele
+databasegrootte, aantallen frames, rasterdatapunten, vergelijkingen, bronnen en
+regio's, plus de laatste schrijfbatch. Deze tellers worden incrementeel
+bijgehouden zodat een grote database niet iedere vijf minuten volledig wordt
+gescand.
+
+Recente bliksem wordt daarnaast als een afzonderlijke geclusterde envelop
+gepubliceerd. Deze rode zone pulseert onafhankelijk van de neerslagpixels:
+boven een radarecho betekent ze onweer in de bui, zonder onderliggende
+regenkleur betekent ze bliksemactiviteit zonder bevestigde radarneerslag. De
+zone gebruikt inslagen tot vijf minuten oud, een buffer van twaalf kilometer
+en verandert nooit de geometrie of intensiteit van het radarraster.
+
+## 10. Testdekking in 0.4.85
 
 De provider-audit omvat tests voor:
 

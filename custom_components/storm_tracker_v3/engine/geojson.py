@@ -11,6 +11,10 @@ MAX_SOURCE_RING_POINTS = 2048
 MAX_RADAR_CELLS = 150
 MAX_LIGHTNING_EVENTS = 300
 LIGHTNING_MAX_AGE_S = 15 * 60
+LIGHTNING_ZONE_MAX_AGE_S = 5 * 60
+LIGHTNING_CLUSTER_DISTANCE_KM = 25.0
+LIGHTNING_ZONE_BUFFER_KM = 12.0
+LIGHTNING_RADAR_ASSOCIATION_KM = 25.0
 CURRENT_FRAME_TOLERANCE_S = 60.0
 MIN_MOTION_SAMPLES = 4
 MIN_MOTION_HISTORY_MINUTES = 10.0
@@ -62,6 +66,50 @@ def _destination(lat: float, lon: float, heading: float, distance_km: float):
     return math.degrees(lat2), math.degrees(lon2)
 
 
+def _distance_km(a, b) -> float:
+    lat1, lon1 = a
+    lat2, lon2 = b
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dlat, dlon = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    value = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(p1) * math.cos(p2) * math.sin(dlon / 2) ** 2
+    )
+    return 6371.0088 * 2 * math.atan2(math.sqrt(value), math.sqrt(1 - value))
+
+
+def _lightning_clusters(points):
+    """Groepeer nabije recente inslagen zonder verre systemen te verbinden."""
+    remaining = list(points)
+    clusters = []
+    while remaining:
+        cluster = [remaining.pop()]
+        changed = True
+        while changed:
+            changed = False
+            for point in list(remaining):
+                if any(
+                    _distance_km(point[:2], member[:2])
+                    <= LIGHTNING_CLUSTER_DISTANCE_KM
+                    for member in cluster
+                ):
+                    remaining.remove(point)
+                    cluster.append(point)
+                    changed = True
+        clusters.append(cluster)
+    return clusters
+
+
+def _lightning_zone_ring(cluster):
+    expanded = []
+    for lat, lon, *_ in cluster:
+        for heading in range(0, 360, 45):
+            expanded.append(_destination(
+                lat, lon, heading, LIGHTNING_ZONE_BUFFER_KM
+            ))
+    return _sample_ring(expanded, order_as_hull=True, max_points=64)
+
+
 def _cell_source(cell) -> str | None:
     cell_id = str(getattr(cell, "cell_id", ""))
     if ":" not in cell_id:
@@ -106,6 +154,7 @@ def build_feature_collection(
     radar_sources_by_engine = radar_sources_by_engine or {}
     lightning_events = lightning_events or []
     latest_by_region = {}
+    radar_points_by_engine = {}
     for region in regions:
         region_source = (radar_sources_by_engine.get(region.engine_id) or {}).get("source", active_radar_source)
         timestamps = [
@@ -169,6 +218,10 @@ def build_feature_collection(
             )
             historical_radar_cells_excluded += len(all_cells) - len(cells)
             radar_cells_total += len(cells)
+            radar_points = radar_points_by_engine.setdefault(region.engine_id, [])
+            for cell in cells:
+                footprint = tuple(cell.footprint_points or ())
+                radar_points.extend(footprint or ((cell.lat, cell.lon),))
 
             # Wanneer een operationele bron gekozen is, mag historische
             # StormEngine-state geen verweesde systeemvlakken of vectoren op
@@ -282,6 +335,7 @@ def build_feature_collection(
         key=lambda item: float(item.get("timestamp", 0)),
         reverse=True,
     )[:MAX_LIGHTNING_EVENTS]
+    lightning_by_engine = {}
     for index, event in enumerate(recent_lightning):
         engine_ids = [
             engine_id for engine_id in event.get("engine_ids", [])
@@ -289,6 +343,10 @@ def build_feature_collection(
         ]
         for engine_id in engine_ids:
             timestamp = float(event["timestamp"])
+            lightning_by_engine.setdefault(engine_id, []).append((
+                float(event["lat"]), float(event["lon"]), timestamp,
+                event.get("source", "unknown"),
+            ))
             features.append(_feature(
                 f"lightning:{engine_id}:{timestamp:.3f}:{index}",
                 {"type": "Point", "coordinates": _point(event["lon"], event["lat"])},
@@ -299,6 +357,36 @@ def build_feature_collection(
                 age_seconds=max(0, round(time.time() - timestamp)),
             ))
             lightning_written += 1
+
+    lightning_zones_written = 0
+    zone_cutoff = time.time() - LIGHTNING_ZONE_MAX_AGE_S
+    for engine_id, points in lightning_by_engine.items():
+        active = [point for point in points if point[2] >= zone_cutoff]
+        for index, cluster in enumerate(_lightning_clusters(active)):
+            ring = _lightning_zone_ring(cluster)
+            if len(ring) < 4:
+                continue
+            radar_points = radar_points_by_engine.get(engine_id, [])
+            radar_confirmed = any(
+                _distance_km(strike[:2], radar) <= LIGHTNING_RADAR_ASSOCIATION_KM
+                for strike in cluster for radar in radar_points
+            )
+            newest = max(point[2] for point in cluster)
+            features.append(_feature(
+                f"lightning-zone:{engine_id}:{newest:.0f}:{index}",
+                {"type": "Polygon", "coordinates": [ring]},
+                layer="lightning_zone",
+                engine_id=engine_id,
+                system_type=(
+                    "radar_lightning" if radar_confirmed else "lightning_only"
+                ),
+                radar_confirmed=radar_confirmed,
+                strike_count=len(cluster),
+                newest_timestamp=newest,
+                age_seconds=max(0, round(time.time() - newest)),
+                buffer_km=LIGHTNING_ZONE_BUFFER_KM,
+            ))
+            lightning_zones_written += 1
 
     return {
         "type": "FeatureCollection",
@@ -311,6 +399,7 @@ def build_feature_collection(
             "truncated": radar_cells_written < radar_cells_total,
             "historical_radar_cells_excluded": historical_radar_cells_excluded,
             "lightning_events_included": lightning_written,
+            "lightning_zones_included": lightning_zones_written,
             "lightning_max_age_minutes": LIGHTNING_MAX_AGE_S // 60,
         },
     }

@@ -19,6 +19,11 @@ def test_store_persists_frames_points_and_comparisons(
     })
     assert result["frames_written"] == 1
     assert result["comparisons_written"] == 1
+    assert result["total_frames"] == 1
+    assert result["total_datapoints"] == 1
+    assert result["total_comparisons"] == 1
+    assert result["sources"] == 1
+    assert result["regions"] == 1
     with sqlite3.connect(path) as db:
         assert db.execute("SELECT count(*) FROM frames").fetchone()[0] == 1
         assert db.execute("SELECT count(*) FROM frame_points").fetchone()[0] == 1
@@ -39,6 +44,9 @@ def test_repeated_frame_is_replaced_not_duplicated(
     store.write_batch({"frames": (base,), "comparisons": ()})
     updated = (*base[:6], 2, 1, ((510, 40, 5.0, 0.8, 2),))
     store.write_batch({"frames": (updated,), "comparisons": ()})
+    stats = store.statistics()
+    assert stats["total_frames"] == 1
+    assert stats["total_datapoints"] == 1
     with sqlite3.connect(store.path) as db:
         assert db.execute("SELECT count(*) FROM frames").fetchone()[0] == 1
         assert db.execute(

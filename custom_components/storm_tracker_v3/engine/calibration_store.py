@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sqlite3
+import threading
 
 
 SCHEMA_VERSION = 1
@@ -13,8 +14,14 @@ class CalibrationDataStore:
 
     def __init__(self, path: str) -> None:
         self.path = Path(path)
+        self._lock = threading.Lock()
+        self._totals = {"frames": 0, "datapoints": 0, "comparisons": 0}
+        self._sources: set[str] = set()
+        self._regions: set[str] = set()
+        self._oldest_timestamp: float | None = None
+        self._newest_timestamp: float | None = None
 
-    def initialize(self) -> None:
+    def initialize(self) -> dict:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as db:
             db.executescript("""
@@ -70,12 +77,37 @@ class CalibrationDataStore:
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
             )
+            self._totals = {
+                "frames": db.execute("SELECT count(*) FROM frames").fetchone()[0],
+                "datapoints": db.execute(
+                    "SELECT coalesce(sum(grid_point_count), 0) FROM frames"
+                ).fetchone()[0],
+                "comparisons": db.execute(
+                    "SELECT count(*) FROM comparisons"
+                ).fetchone()[0],
+            }
+            self._sources = {
+                row[0] for row in db.execute("SELECT DISTINCT source FROM frames")
+            }
+            self._regions = {
+                row[0] for row in db.execute("SELECT DISTINCT region_key FROM frames")
+            }
+            bounds = db.execute(
+                "SELECT min(product_timestamp), max(product_timestamp) FROM frames"
+            ).fetchone()
+            self._oldest_timestamp, self._newest_timestamp = bounds
+        return self.statistics()
 
     def write_batch(self, batch: dict) -> dict:
         frames = batch.get("frames", ())
         comparisons = batch.get("comparisons", ())
-        with self._connect() as db:
+        with self._lock, self._connect() as db:
             for frame in frames:
+                existing = db.execute(
+                    "SELECT id, grid_point_count FROM frames "
+                    "WHERE region_key=? AND source=? AND nominal_minute=?",
+                    frame[:3],
+                ).fetchone()
                 db.execute("""
                     INSERT INTO frames(
                         region_key, source, nominal_minute, product_timestamp,
@@ -91,6 +123,22 @@ class CalibrationDataStore:
                     "SELECT id FROM frames WHERE region_key=? AND source=? AND nominal_minute=?",
                     frame[:3],
                 ).fetchone()[0]
+                if existing is None:
+                    self._totals["frames"] += 1
+                else:
+                    self._totals["datapoints"] -= int(existing[1])
+                self._totals["datapoints"] += int(frame[7])
+                self._sources.add(str(frame[1]))
+                self._regions.add(str(frame[0]))
+                product_timestamp = float(frame[3])
+                self._oldest_timestamp = (
+                    product_timestamp if self._oldest_timestamp is None
+                    else min(self._oldest_timestamp, product_timestamp)
+                )
+                self._newest_timestamp = (
+                    product_timestamp if self._newest_timestamp is None
+                    else max(self._newest_timestamp, product_timestamp)
+                )
                 db.execute("DELETE FROM frame_points WHERE frame_id=?", (frame_id,))
                 db.executemany("""
                     INSERT INTO frame_points(
@@ -98,7 +146,15 @@ class CalibrationDataStore:
                         max_quality, observation_count
                     ) VALUES(?, ?, ?, ?, ?, ?)
                 """, ((frame_id, *point) for point in frame[8]))
-            db.executemany("""
+            for comparison in comparisons:
+                exists = db.execute(
+                    "SELECT 1 FROM comparisons WHERE region_key=? AND source_a=? "
+                    "AND source_b=? AND nominal_minute=?",
+                    comparison[:4],
+                ).fetchone()
+                if exists is None:
+                    self._totals["comparisons"] += 1
+                db.execute("""
                 INSERT INTO comparisons(
                     region_key, source_a, source_b, nominal_minute, compared_at,
                     primary_cells, reference_cells, overlap_cells,
@@ -115,12 +171,30 @@ class CalibrationDataStore:
                     precision=excluded.precision,
                     recall=excluded.recall,
                     f1_score=excluded.f1_score
-            """, comparisons)
+                """, comparison)
         return {
             "frames_written": len(frames),
             "comparisons_written": len(comparisons),
-            "bytes": self.path.stat().st_size if self.path.exists() else 0,
+            **self.statistics(),
+        }
+
+    def statistics(self) -> dict:
+        """Geef goedkope tellers zonder de groeiende tabellen opnieuw te scannen."""
+        related = (
+            self.path,
+            Path(f"{self.path}-wal"),
+            Path(f"{self.path}-shm"),
+        )
+        return {
+            "bytes": sum(path.stat().st_size for path in related if path.exists()),
             "path": str(self.path),
+            "total_frames": self._totals["frames"],
+            "total_datapoints": self._totals["datapoints"],
+            "total_comparisons": self._totals["comparisons"],
+            "sources": len(self._sources),
+            "regions": len(self._regions),
+            "oldest_timestamp": self._oldest_timestamp,
+            "newest_timestamp": self._newest_timestamp,
         }
 
     def _connect(self):

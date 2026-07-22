@@ -316,3 +316,70 @@ def test_old_or_unrelated_lightning_is_not_published(geojson_module):
         for feature in result["features"]
     )
     assert result["metadata"]["lightning_events_included"] == 0
+
+
+def test_recent_lightning_creates_separate_pulsing_zone_without_radar(
+    geojson_module,
+):
+    now = time.time()
+    result = geojson_module.build_feature_collection(
+        {}, [_region(_storm())],
+        lightning_events=[{
+            "lat": 51.4, "lon": 4.4, "timestamp": now - 30,
+            "source": "blitzortung", "engine_ids": ["region-1"],
+        }],
+    )
+    zone = next(
+        feature for feature in result["features"]
+        if feature["properties"]["layer"] == "lightning_zone"
+    )
+    assert zone["geometry"]["type"] == "Polygon"
+    assert zone["properties"]["system_type"] == "lightning_only"
+    assert zone["properties"]["radar_confirmed"] is False
+    assert zone["properties"]["strike_count"] == 1
+    assert result["metadata"]["lightning_zones_included"] == 1
+
+
+def test_lightning_zone_is_radar_confirmed_but_does_not_change_radar_geometry(
+    geojson_module,
+):
+    now = time.time()
+    cell = SimpleNamespace(
+        cell_id="cell", timestamp=now, lat=51.0, lon=4.0,
+        footprint_points=((50.95, 3.95), (50.95, 4.05),
+                          (51.05, 4.05), (51.05, 3.95), (50.95, 3.95)),
+        intensity=5, max_dbz=45.0, area_km2=50.0,
+    )
+    result = geojson_module.build_feature_collection(
+        {}, [_region(_storm({"cell": cell}))],
+        lightning_events=[{
+            "lat": 51.08, "lon": 4.08, "timestamp": now - 20,
+            "source": "blitzortung", "engine_ids": ["region-1"],
+        }],
+    )
+    radar = next(
+        feature for feature in result["features"]
+        if feature["properties"]["layer"] == "radar_cell"
+    )
+    zone = next(
+        feature for feature in result["features"]
+        if feature["properties"]["layer"] == "lightning_zone"
+    )
+    assert radar["geometry"]["coordinates"][0][0] == [3.95, 50.95]
+    assert zone["properties"]["system_type"] == "radar_lightning"
+    assert zone["properties"]["radar_confirmed"] is True
+
+
+def test_lightning_zone_expires_before_diagnostic_strike_points(geojson_module):
+    now = time.time()
+    result = geojson_module.build_feature_collection(
+        {}, [_region(_storm())],
+        lightning_events=[{
+            "lat": 51.0, "lon": 4.0,
+            "timestamp": now - geojson_module.LIGHTNING_ZONE_MAX_AGE_S - 1,
+            "source": "blitzortung", "engine_ids": ["region-1"],
+        }],
+    )
+    layers = [item["properties"]["layer"] for item in result["features"]]
+    assert "lightning" in layers
+    assert "lightning_zone" not in layers
