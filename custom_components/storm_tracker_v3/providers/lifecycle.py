@@ -33,6 +33,8 @@ class ProviderRuntime:
     last_poll: float | None = None
     fetched: int = 0
     error: str | None = None
+    consecutive_failures: int = 0
+    circuit_open_until: float | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -44,10 +46,14 @@ class ProviderLifecycleController:
         *,
         cooldown_seconds: float = 300.0,
         fetch_timeout_seconds: float = 20.0,
+        failure_threshold: int = 3,
+        circuit_breaker_seconds: float = 900.0,
         clock=time.monotonic,
     ):
         self._cooldown_seconds = float(cooldown_seconds)
         self._fetch_timeout_seconds = float(fetch_timeout_seconds)
+        self._failure_threshold = max(1, int(failure_threshold))
+        self._circuit_breaker_seconds = float(circuit_breaker_seconds)
         self._clock = clock
         self._runtimes: dict[str, ProviderRuntime] = {}
 
@@ -68,8 +74,16 @@ class ProviderLifecycleController:
             previous_matching = runtime.matching_areas
             runtime.matching_areas = matching
             if matching:
+                if runtime.circuit_open_until is not None:
+                    if now < runtime.circuit_open_until:
+                        runtime.status = ProviderStatus.COOLDOWN
+                        continue
+                    # Half-open: laat precies de volgende normale fetch als
+                    # herstelprobe door. Succes sluit het circuit opnieuw.
+                    runtime.circuit_open_until = None
+                    runtime.status = ProviderStatus.ACTIVE
                 runtime.cooldown_started = None
-                if runtime.status in {ProviderStatus.SLEEPING, ProviderStatus.ERROR}:
+                if runtime.status == ProviderStatus.SLEEPING:
                     runtime.status = ProviderStatus.INITIALIZING
                     try:
                         await runtime.plugin.async_start(
@@ -82,7 +96,7 @@ class ProviderLifecycleController:
                     else:
                         runtime.status = ProviderStatus.ACTIVE
                         runtime.error = None
-                elif runtime.status == ProviderStatus.COOLDOWN:
+                elif runtime.status in {ProviderStatus.COOLDOWN, ProviderStatus.ERROR}:
                     runtime.status = ProviderStatus.ACTIVE
                 elif matching != previous_matching and hasattr(
                     runtime.plugin, "async_update_areas"
@@ -106,6 +120,19 @@ class ProviderLifecycleController:
 
     async def async_fetch_active(self) -> dict[str, list]:
         """Poll actieve providers parallel met een harde timeout per provider."""
+        def _record_failure(runtime: ProviderRuntime, error: str) -> None:
+            runtime.consecutive_failures += 1
+            runtime.error = error
+            if runtime.consecutive_failures >= self._failure_threshold:
+                runtime.status = ProviderStatus.COOLDOWN
+                runtime.circuit_open_until = (
+                    self._clock() + self._circuit_breaker_seconds
+                )
+            else:
+                # Blijf fetchbaar voor de volgende cyclus, maar ongezond voor
+                # bronselectie zolang de fout niet door succes is gewist.
+                runtime.status = ProviderStatus.ACTIVE
+
         async def _fetch_one(provider_id: str, runtime: ProviderRuntime):
             async with runtime.lock:
                 try:
@@ -114,8 +141,7 @@ class ProviderLifecycleController:
                         timeout=self._fetch_timeout_seconds,
                     )
                 except asyncio.TimeoutError:
-                    runtime.status = ProviderStatus.ERROR
-                    runtime.error = "timeout"
+                    _record_failure(runtime, "timeout")
                     _LOGGER.warning(
                         "Provider %s overschreed timeout van %.0f seconden",
                         provider_id,
@@ -123,13 +149,14 @@ class ProviderLifecycleController:
                     )
                     return provider_id, None
                 except Exception as exc:
-                    runtime.status = ProviderStatus.ERROR
-                    runtime.error = type(exc).__name__
+                    _record_failure(runtime, type(exc).__name__)
                     _LOGGER.exception("Provider %s pollen mislukt", provider_id)
                     return provider_id, None
                 runtime.last_poll = time.time()
                 runtime.fetched = len(observations)
                 runtime.error = None
+                runtime.consecutive_failures = 0
+                runtime.circuit_open_until = None
                 return provider_id, observations
 
         pending = [
@@ -168,6 +195,8 @@ class ProviderLifecycleController:
                 "last_poll": runtime.last_poll,
                 "fetched": runtime.fetched,
                 "error": runtime.error,
+                "consecutive_failures": runtime.consecutive_failures,
+                "circuit_open_until": runtime.circuit_open_until,
                 **(details if isinstance(details, dict) else {}),
             }
         return diagnostics

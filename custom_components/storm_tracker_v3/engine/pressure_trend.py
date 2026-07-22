@@ -12,6 +12,8 @@ class PressureTrendTracker:
     MAX_HISTORY_S = 2 * 60 * 60
     MAX_TARGET_ERROR_S = 8 * 60
     MIN_STATIONS = 3
+    MIN_WARMUP_MINUTES = 30
+    MAX_SAMPLE_GAP_S = 15 * 60
 
     def __init__(self) -> None:
         self._history: dict[str, list[tuple[float, float]]] = defaultdict(list)
@@ -77,16 +79,45 @@ class PressureTrendTracker:
             if valid else None,
         }
         active_station_ids = {str(obs.station_id) for obs in valid}
+        warm_station_ids = {
+            station_id for station_id in active_station_ids
+            if self._has_contiguous_warmup(
+                self._history.get(station_id, []), timestamp
+            )
+        }
+        result["warmup_complete"] = len(warm_station_ids) >= self.MIN_STATIONS
+        result["warmup_stations"] = len(warm_station_ids)
+        result["warmup_status"] = (
+            "ready" if result["warmup_complete"] else "initializing"
+        )
         for minutes in self.WINDOWS_MIN:
-            deltas = self._station_deltas(timestamp, minutes, active_station_ids)
+            deltas = self._station_deltas(timestamp, minutes, warm_station_ids)
             key = f"delta_{minutes}m_hpa"
             result[key] = round(median(deltas), 2) if len(deltas) >= self.MIN_STATIONS else None
             result[f"stations_{minutes}m"] = len(deltas)
 
         delta_60m = result["delta_60m_hpa"]
-        result["trend"] = self.classify(delta_60m)
+        result["trend"] = (
+            self.classify(delta_60m)
+            if result["warmup_complete"] else "onvoldoende_data"
+        )
         result["rapid_fall"] = delta_60m is not None and delta_60m <= -2.0
         return result
+
+    def _has_contiguous_warmup(
+        self, samples: list[tuple[float, float]], now: float
+    ) -> bool:
+        """Vereis een recente, voldoende dichte meetreeks voor trendgebruik."""
+        start = now - self.MIN_WARMUP_MINUTES * 60
+        window = [sample for sample in samples if sample[0] >= start]
+        if len(window) < 3 or window[0][0] > start + self.MAX_TARGET_ERROR_S:
+            return False
+        if window[-1][0] < now - 10 * 60:
+            return False
+        return all(
+            current[0] - previous[0] <= self.MAX_SAMPLE_GAP_S
+            for previous, current in zip(window, window[1:])
+        )
 
     def _station_deltas(
         self, now: float, minutes: int, active_station_ids: set[str]

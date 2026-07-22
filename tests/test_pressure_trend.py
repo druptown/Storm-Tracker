@@ -39,11 +39,16 @@ def test_pressure_trend_uses_station_deltas_not_absolute_levels(pressure_trend_m
 def test_pressure_trend_requires_three_paired_stations(pressure_trend_module):
     tracker = pressure_trend_module.PressureTrendTracker()
     base = 1_700_000_000.0
-    tracker.update(_observations(base, {"a": 1010.0, "b": 1012.0}), base)
-    result = tracker.update(
-        _observations(base + 3600, {"a": 1008.0, "b": 1010.0}),
-        base + 3600,
-    )
+    result = None
+    for step in range(13):
+        timestamp = base + step * 300
+        result = tracker.update(
+            _observations(
+                timestamp,
+                {"a": 1010.0 - step / 6, "b": 1012.0 - step / 6},
+            ),
+            timestamp,
+        )
 
     assert result["stations_60m"] == 2
     assert result["delta_60m_hpa"] is None
@@ -65,16 +70,33 @@ def test_cold_start_never_invents_pressure_change(pressure_trend_module):
 def test_pressure_history_survives_snapshot_restore(pressure_trend_module):
     base = 1_700_000_000.0
     original = pressure_trend_module.PressureTrendTracker()
-    original.update(
-        _observations(base, {"a": 1010.0, "b": 1011.0, "c": 1012.0}), base
-    )
+    for step in range(7):
+        timestamp = base + step * 300
+        original.update(
+            _observations(
+                timestamp,
+                {"a": 1010.0, "b": 1011.0, "c": 1012.0},
+            ),
+            timestamp,
+        )
 
     restored = pressure_trend_module.PressureTrendTracker()
-    assert restored.restore(original.to_snapshot(), base + 3600) == 3
-    result = restored.update(
-        _observations(base + 3600, {"a": 1008.0, "b": 1009.0, "c": 1010.0}),
-        base + 3600,
-    )
+    assert restored.restore(original.to_snapshot(), base + 1800) == 3
+    result = None
+    for step in range(7, 13):
+        timestamp = base + step * 300
+        fraction = (step - 6) / 6
+        result = restored.update(
+            _observations(
+                timestamp,
+                {
+                    "a": 1010.0 - 2.0 * fraction,
+                    "b": 1011.0 - 2.0 * fraction,
+                    "c": 1012.0 - 2.0 * fraction,
+                },
+            ),
+            timestamp,
+        )
 
     assert result["delta_60m_hpa"] == pytest.approx(-2.0)
     assert result["trend"] == "snelle_daling"

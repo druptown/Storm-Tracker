@@ -1,5 +1,20 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.82
+
+- Isoleer de OPERA- en RainViewer-fetches per RegionEngine: regio's worden
+  parallel verwerkt en iedere fetch heeft een eigen harde timeout, zodat een
+  trage buitenlandse regio de overige targets niet ophoudt.
+- Voeg een circuit breaker toe aan nationale providers: na drie opeenvolgende
+  fouten volgt vijftien minuten cooldown en daarna één gecontroleerde proef.
+- Markeer een bronwissel tien minuten lang als overgang en verlaag tijdens die
+  periode de prognosezekerheid met tien procentpunten. De echte pixels van de
+  nieuwe bron blijven ongewijzigd; incompatibele radarrasters worden niet
+  kunstmatig gemiddeld.
+- Activeer een regionale luchtdruktrend pas na dertig minuten aaneengesloten
+  historie van minstens drie vergelijkbare stations. Tijdens de opwarming
+  blijft de trend expliciet `onvoldoende_data`/`initializing`.
+
 # 0.4.81
 
 - Begrens iedere nationale providerpoll afzonderlijk tot twintig seconden en

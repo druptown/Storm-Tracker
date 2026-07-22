@@ -118,3 +118,24 @@ def test_lightning_fallbacks_remain_separate_from_radar_routing():
         assert "route_observation(observation)" in poller
         assert "_record_lightning(observation)" in poller
         assert "_route_selected_radar" not in poller
+
+
+def test_regional_radar_fetches_are_parallel_and_individually_bounded():
+    rainviewer = _function_source("_poll_rv")
+    opera = _function_source("_poll_opera")
+    for poller in (rainviewer, opera):
+        assert "asyncio.gather" in poller
+        assert "asyncio.wait_for" in poller
+        assert "return_exceptions=True" in poller
+
+
+def test_source_switch_publishes_ten_minute_transition_window():
+    decisions = _function_source("_refresh_engine_radar_decisions")
+    assert "radar_source_transitions" in decisions
+    assert "active_until" in decisions
+    assert "now_ts + 10 * 60" in decisions
+    sensor_source = (
+        COMPONENT / "sensor.py"
+    ).read_text(encoding="utf-8")
+    assert 'result["source_transition_active"] = True' in sensor_source
+    assert "max(0, confidence - 10)" in sensor_source

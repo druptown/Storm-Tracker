@@ -57,6 +57,13 @@ class SlowPlugin(FakePlugin):
         return []
 
 
+class FailingPlugin(FakePlugin):
+    plugin_id = "failing"
+
+    async def async_fetch(self):
+        raise RuntimeError("offline")
+
+
 @pytest.mark.asyncio
 async def test_provider_sleeps_until_matching_engine_and_is_shared(base_module):
     lifecycle = _load_lifecycle(base_module)
@@ -122,13 +129,45 @@ async def test_engine_return_during_cooldown_reuses_provider(base_module):
 @pytest.mark.asyncio
 async def test_slow_provider_is_cancelled_by_hard_timeout(base_module):
     lifecycle = _load_lifecycle(base_module)
-    controller = lifecycle.ProviderLifecycleController(fetch_timeout_seconds=0.01)
+    controller = lifecycle.ProviderLifecycleController(
+        fetch_timeout_seconds=0.01, failure_threshold=1
+    )
     plugin = SlowPlugin()
     controller.register(plugin, lambda plugin, areas: object())
     await controller.async_reconcile([base_module.CoverageArea(50, 12, 200)])
 
     assert await controller.async_fetch_active() == {}
     diagnostics = controller.diagnostics()["slow"]
-    assert diagnostics["status"] == "error"
+    assert diagnostics["status"] == "cooldown"
     assert diagnostics["error"] == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_three_failures_open_circuit_until_controlled_probe(base_module):
+    lifecycle = _load_lifecycle(base_module)
+    now = [0.0]
+    controller = lifecycle.ProviderLifecycleController(
+        failure_threshold=3,
+        circuit_breaker_seconds=900,
+        clock=lambda: now[0],
+    )
+    plugin = FailingPlugin()
+    controller.register(plugin, lambda plugin, areas: object())
+    area = base_module.CoverageArea(50, 12, 200)
+    await controller.async_reconcile([area])
+
+    for expected in (1, 2, 3):
+        assert await controller.async_fetch_active() == {}
+        assert controller.diagnostics()["failing"]["consecutive_failures"] == expected
+
+    diagnostics = controller.diagnostics()["failing"]
+    assert diagnostics["status"] == "cooldown"
+    assert diagnostics["circuit_open_until"] == 900
+    await controller.async_reconcile([area])
+    assert await controller.async_fetch_active() == {}
+    assert diagnostics["consecutive_failures"] == 3
+
+    now[0] = 900
+    await controller.async_reconcile([area])
+    assert controller.diagnostics()["failing"]["status"] == "active"
 

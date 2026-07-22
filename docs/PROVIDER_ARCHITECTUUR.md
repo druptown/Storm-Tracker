@@ -1,7 +1,7 @@
-# Storm Tracker V3 — providerarchitectuur 0.4.81
+# Storm Tracker V3 — providerarchitectuur 0.4.82
 
 Dit document beschrijft de effectief geïmplementeerde providerstructuur van
-Storm Tracker V3 0.4.81. Het onderscheidt operationele radar, fallbackdata,
+Storm Tracker V3 0.4.82. Het onderscheidt operationele radar, fallbackdata,
 bliksem, validatiebronnen en bronnen die alleen beleidsmatig voor toekomstige
 uitbreiding zijn voorzien.
 
@@ -53,6 +53,17 @@ de volledige fasen zijn begrensd: nationaal 25 seconden, radarvergelijking 60
 seconden, operationele radar 120 seconden en grondvalidatie 30 seconden. Eén
 hangende TCP-verbinding kan de vijfminutencyclus daardoor niet onbeperkt
 vasthouden. EUMETSAT LI en GOES GLM hebben elk een aparte limiet van 30 seconden.
+
+OPERA en RainViewer worden per RegionEngine parallel en geïsoleerd opgehaald.
+RainViewer krijgt maximaal twintig seconden per regio en OPERA maximaal
+veertig seconden. Gedeelde nationale en full-diskproducten worden niet per
+regio opnieuw gedownload.
+
+Een nationale provider die drie opeenvolgende cycli faalt of time-out gaat,
+opent zijn circuit breaker gedurende vijftien minuten. Daarna krijgt hij één
+gecontroleerde proef; succes sluit het circuit en reset de foutenteller, een
+nieuwe fout opent opnieuw de cooldown. De bronhiërarchie gaat ondertussen
+meteen verder naar de eerstvolgende gezonde fallback.
 
 ## 3. Operationele neerslagproviders
 
@@ -167,6 +178,13 @@ waarvan het observatiegebied de positie omvat. De Observation Fusion Engine
 combineert radarcellen, regenmeters en bliksem. De StormEngine onderhoudt de
 historiek en berekent daarna onder andere:
 
+Bij een wissel van radarbron blijft het raster van de nieuwe bron exact intact.
+Omdat verschillende providers niet gegarandeerd dezelfde projectie, resolutie
+of intensiteitsschaal gebruiken, worden hun pixels niet blind gemiddeld. De
+runtime markeert de bronwissel tien minuten lang als overgang en verlaagt de
+prognosezekerheid tijdelijk met tien procentpunten. Dit dempt analytische
+sprongen zonder een kunstmatige neerslagfootprint te tekenen.
+
 - actuele afstand tot elk target;
 - naderend, wegtrekkend, passerend of stationair;
 - bewegingsvector en snelheid;
@@ -192,6 +210,12 @@ De runtime publiceert:
 - de multi-targetkaart met echte bronpixels waar de provider die levert;
 - gebeurtenissen voor dashboardupdates en latere waarschuwingen.
 
+De regionale luchtdruktrend heeft na een cold start een opwarmfase. Er zijn
+minstens dertig minuten aaneengesloten meetpunten nodig van drie vergelijkbare
+Netatmo-stations; gaten groter dan vijftien minuten maken een station tijdelijk
+ongeschikt. Tot aan die voorwaarden blijft de trend `onvoldoende_data` en wordt
+geen snelle drukval of extra confidence afgeleid.
+
 ## 9. Geïmplementeerd versus gepland
 
 De providerpolicy bevat al geografische plaatsen voor toekomstige lokale
@@ -200,7 +224,7 @@ zijn nog geen garantie dat de bijbehorende runtimeprovider bestaat. Tot hun
 implementatie gebruikt het systeem in die regio's alleen de hierboven als
 operationeel beschreven bronnen.
 
-## 10. Testdekking in 0.4.81
+## 10. Testdekking in 0.4.82
 
 De provider-audit omvat tests voor:
 

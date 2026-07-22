@@ -682,6 +682,9 @@ class NetatmoPressureTrendSensor(StormTrackerBaseSensor):
         return {
             "regio_engine": home_region.engine_id if home_region else None,
             "trend": trend.get("trend", "onvoldoende_data"),
+            "opwarming": trend.get("warmup_status", "initializing"),
+            "opwarming_voltooid": trend.get("warmup_complete", False),
+            "opwarming_stations": trend.get("warmup_stations", 0),
             "snelle_daling": trend.get("rapid_fall", False),
             "druk_mediaan_hpa": trend.get("median_pressure_hpa"),
             "drukval_15min_hpa": trend.get("delta_15m_hpa"),
@@ -728,6 +731,11 @@ class PrecipitationStatusSensor(StormTrackerBaseSensor):
             (data.get("radar_sources_by_engine", {}).get(engine_id) or {}).get("source")
             if engine_id else data.get("active_radar_source")
         )
+        transition = (
+            (data.get("radar_sources_by_engine", {}).get(engine_id) or {}).get(
+                "transition"
+            ) if engine_id else None
+        )
         result = build_precipitation_status(
             storms,
             float(home_target.get("latitude", data.get("fictieve_lat", 0.0))),
@@ -747,6 +755,15 @@ class PrecipitationStatusSensor(StormTrackerBaseSensor):
             )
             if lightning is not None:
                 result.update(lightning)
+        if transition:
+            result["source_transition"] = transition
+            result["source_transition_active"] = True
+            confidence = result.get("forecast_confidence_percent")
+            if confidence is not None:
+                result["forecast_confidence_percent"] = max(0, confidence - 10)
+        else:
+            result["source_transition"] = None
+            result["source_transition_active"] = False
         target = home_target
         return {
             **result,
@@ -805,6 +822,11 @@ class TargetPrecipitationStatusSensor(StormTrackerBaseSensor):
             (domain_data.get("radar_sources_by_engine", {}).get(region.engine_id) or {}).get("source")
             if region else domain_data.get("active_radar_source")
         )
+        transition = (
+            (domain_data.get("radar_sources_by_engine", {}).get(region.engine_id) or {}).get(
+                "transition"
+            ) if region else None
+        )
         result = build_precipitation_status(
             storms,
             target.get("latitude", 0.0),
@@ -828,6 +850,15 @@ class TargetPrecipitationStatusSensor(StormTrackerBaseSensor):
             )
             if lightning is not None:
                 result.update(lightning)
+        if transition:
+            result["source_transition"] = transition
+            result["source_transition_active"] = True
+            confidence = result.get("forecast_confidence_percent")
+            if confidence is not None:
+                result["forecast_confidence_percent"] = max(0, confidence - 10)
+        else:
+            result["source_transition"] = None
+            result["source_transition_active"] = False
         return {
             **result,
             "target_id": self._spec.target_id,

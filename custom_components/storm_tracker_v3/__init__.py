@@ -599,6 +599,8 @@ async def _async_setup_runtime(
             select_engine_radar_source,
         )
         now_ts = time.time()
+        previous_decisions = hass.data[DOMAIN].get("radar_sources_by_engine", {})
+        transitions = hass.data[DOMAIN].setdefault("radar_source_transitions", {})
         decisions = {}
         for region in storm_manager.get_all_engines():
             states = _radar_source_states(now_ts, region)
@@ -622,11 +624,26 @@ async def _async_setup_runtime(
                 .get("noaa_goes_rrqpe_observation_counts_by_engine", {})
                 .get(region.engine_id, 0),
             )
+            previous_source = (
+                previous_decisions.get(region.engine_id) or {}
+            ).get("source")
+            if previous_source and decision.source and previous_source != decision.source:
+                transitions[region.engine_id] = {
+                    "from": previous_source,
+                    "to": decision.source,
+                    "started_at": now_ts,
+                    "active_until": now_ts + 10 * 60,
+                }
+            transition = transitions.get(region.engine_id)
+            if transition and now_ts >= transition["active_until"]:
+                transitions.pop(region.engine_id, None)
+                transition = None
             decisions[region.engine_id] = {
                 "source": decision.source,
                 "reason": decision.reason,
                 "country_codes": list(decision.country_codes),
                 "age_seconds": round(decision.age_seconds, 1) if decision.age_seconds is not None else None,
+                "transition": transition,
                 "opera_accepted_observations": hass.data[DOMAIN]
                 .get("opera_observation_counts_by_engine", {})
                 .get(region.engine_id, 0),
@@ -863,8 +880,24 @@ async def _async_setup_runtime(
         regions_by_id = {
             region.engine_id: region for region in storm_manager.get_all_engines()
         }
-        for engine_id, provider in providers.items():
-            engine_obs = await provider.fetch_observations()
+        engine_ids = tuple(providers)
+        fetched = await asyncio.gather(*(
+            asyncio.wait_for(
+                providers[engine_id].fetch_observations(), timeout=20
+            )
+            for engine_id in engine_ids
+        ), return_exceptions=True)
+        for engine_id, result in zip(engine_ids, fetched):
+            provider = providers[engine_id]
+            if isinstance(result, Exception):
+                provider._mark_unhealthy(
+                    "regionale fetch-timeout" if isinstance(result, asyncio.TimeoutError)
+                    else type(result).__name__
+                )
+                _LOGGER.warning("RainViewer %s mislukt: %s", engine_id, result)
+                engine_obs = []
+            else:
+                engine_obs = result
             obs.extend(engine_obs)
             region = regions_by_id.get(engine_id)
             observation_counts[engine_id] = sum(
@@ -931,8 +964,25 @@ async def _async_setup_runtime(
         regions_by_id = {
             region.engine_id: region for region in storm_manager.get_all_engines()
         }
-        for engine_id, provider in providers.items():
-            engine_obs = await provider.fetch_observations(hass)
+        engine_ids = tuple(providers)
+        fetched = await asyncio.gather(*(
+            asyncio.wait_for(
+                providers[engine_id].fetch_observations(hass), timeout=40
+            )
+            for engine_id in engine_ids
+        ), return_exceptions=True)
+        for engine_id, result in zip(engine_ids, fetched):
+            provider = providers[engine_id]
+            if isinstance(result, Exception):
+                provider._healthy = False
+                provider._last_error = (
+                    "regionale fetch-timeout" if isinstance(result, asyncio.TimeoutError)
+                    else type(result).__name__
+                )
+                _LOGGER.warning("OPERA %s mislukt: %s", engine_id, result)
+                engine_obs = []
+            else:
+                engine_obs = result
             raw_by_engine[engine_id] = list(engine_obs)
             provider_diagnostics[engine_id] = {
                 **provider.diagnostics,
