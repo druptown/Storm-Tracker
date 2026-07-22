@@ -52,9 +52,7 @@ def test_dashboard_prefers_intensity_overlay_over_technical_contours():
     assert "geen echo gedetecteerd" in source
     assert "goes_rrqpe" in source
     assert "type==='MultiPolygon'" in source
-    assert "Kalibratiedatabase:" in source
-    assert "total_datapoints" in source
-    assert "total_frames" in source
-    assert "total_comparisons" in source
+    assert "Kalibratiedatabase:" not in source
+    assert "total_datapoints" not in source
     assert "lightning_zone" in source
     assert "layer==='lightning_zone'" in source
