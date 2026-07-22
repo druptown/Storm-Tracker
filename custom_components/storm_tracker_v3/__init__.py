@@ -219,17 +219,16 @@ async def _async_setup_runtime(
         }
         for spec in target_specs
     }
-    pressure_trend = PressureTrendTracker()
+    # Houd dezelfde Store-versie: de nieuwe per-engine envelop kan de oude
+    # globale snapshot zelf migreren, zonder een HA Store-migratiefunctie.
     pressure_store = Store(hass, 1, f"{DOMAIN}_pressure_trend")
-    restored_pressure_stations = pressure_trend.restore(
-        await pressure_store.async_load(), time.time()
+    restored_pressure_snapshot = await pressure_store.async_load() or {}
+    pressure_trackers_by_engine: dict[str, PressureTrendTracker] = {}
+    hass.data[DOMAIN]["netatmo_pressure_trend_trackers_by_engine"] = (
+        pressure_trackers_by_engine
     )
-    if restored_pressure_stations:
-        _LOGGER.info(
-            "Netatmo-drukhistoriek hersteld voor %d stations",
-            restored_pressure_stations,
-        )
-    hass.data[DOMAIN]["netatmo_pressure_trend_tracker"] = pressure_trend
+    hass.data[DOMAIN]["netatmo_pressure_trends_by_engine"] = {}
+    hass.data[DOMAIN]["netatmo_observations_by_engine"] = {}
 
     # ── StormEngine + OFE aanmaken ────────────────────────────────────────
     mcs_store = McsHistoryStore(hass)
@@ -335,6 +334,30 @@ async def _async_setup_runtime(
 
     _activate_region(active_region)
 
+    def _pressure_tracker_for_region(region) -> PressureTrendTracker:
+        """Geef iedere RegionEngine een strikt gescheiden drukhistoriek."""
+        tracker = pressure_trackers_by_engine.get(region.engine_id)
+        if tracker is not None:
+            return tracker
+        tracker = PressureTrendTracker()
+        snapshots = restored_pressure_snapshot.get("engines", {})
+        snapshot = snapshots.get(region.storage_key)
+        # Eenmalige migratie van de oude globale opslag naar de thuisengine.
+        if snapshot is None and region is storm_manager.get_engine_for_target("zone.home"):
+            if "stations" in restored_pressure_snapshot:
+                snapshot = restored_pressure_snapshot
+        restored = tracker.restore(snapshot, time.time())
+        pressure_trackers_by_engine[region.engine_id] = tracker
+        if restored:
+            _LOGGER.info(
+                "Netatmo-drukhistoriek hersteld voor %s: %d stations",
+                region.engine_id,
+                restored,
+            )
+        return tracker
+
+    _pressure_tracker_for_region(active_region)
+
     # ── Netatmo token (locatie-onafhankelijk) ─────────────────────────────
     client_id     = conf.get("netatmo_client_id")
     client_secret = conf.get("netatmo_client_secret")
@@ -343,6 +366,7 @@ async def _async_setup_runtime(
         from .providers.netatmo import NetatmoTokenManager
         token_manager = NetatmoTokenManager(client_id, client_secret, refresh_token)
         hass.data[DOMAIN]["netatmo_token"] = token_manager
+    hass.data[DOMAIN]["netatmo_providers_by_engine"] = {}
 
     # ── Blitzortung (wereldwijd, locatie-onafhankelijk) ───────────────────
     def _record_lightning(observation) -> None:
@@ -654,7 +678,6 @@ async def _async_setup_runtime(
         from .providers.rainviewer import RainViewerProvider
         from .providers.knmi import KnmiProvider, KnmiProviderFactory
         from .providers.open_meteo import OpenMeteoProvider
-        from .providers.netatmo import NetatmoProvider
 
         _LOGGER.info("Providers initialiseren voor (%.4f,%.4f)", lat, lon)
 
@@ -676,12 +699,42 @@ async def _async_setup_runtime(
         _LOGGER.info("Open-Meteo: gestart (%d gridpunten)",
                      len(hass.data[DOMAIN]["open_meteo"]._points))
 
-        token = hass.data[DOMAIN].get("netatmo_token")
-        if token:
-            hass.data[DOMAIN]["netatmo_provider"] = NetatmoProvider(token, lat, lon, netatmo_radius)
-            _LOGGER.info("Netatmo: gestart (r=%.0fkm)", netatmo_radius)
-
         hass.async_create_task(_poll_all())
+
+    def _sync_region_netatmo_providers() -> None:
+        """Houd één Netatmo-provider en druktracker per RegionEngine bij."""
+        from .providers.netatmo import NetatmoProvider
+
+        token = hass.data[DOMAIN].get("netatmo_token")
+        providers = hass.data[DOMAIN]["netatmo_providers_by_engine"]
+        regions = {region.engine_id: region for region in storm_manager.get_all_engines()}
+        for engine_id in tuple(providers):
+            if engine_id not in regions:
+                providers.pop(engine_id, None)
+                pressure_trackers_by_engine.pop(engine_id, None)
+        if token is None:
+            return
+        for engine_id, region in regions.items():
+            provider = providers.get(engine_id)
+            if (
+                provider is None
+                or abs(provider._lat - region.center_lat) > 0.01
+                or abs(provider._lon - region.center_lon) > 0.01
+            ):
+                providers[engine_id] = NetatmoProvider(
+                    token,
+                    region.center_lat,
+                    region.center_lon,
+                    netatmo_radius,
+                )
+                _LOGGER.info(
+                    "Netatmo: %s gestart rond %.4f,%.4f (r=%.0fkm)",
+                    engine_id,
+                    region.center_lat,
+                    region.center_lon,
+                    netatmo_radius,
+                )
+            _pressure_tracker_for_region(region)
 
     def _sync_region_radar_providers() -> None:
         """Houd OPERA- en RainViewer-instanties gelijk aan actieve engines."""
@@ -1166,21 +1219,67 @@ async def _async_setup_runtime(
         hass.bus.async_fire(f"{DOMAIN}_radar_source_update", {"engines": decisions})
 
     async def _poll_netatmo(now=None):
-        p = hass.data[DOMAIN].get("netatmo_provider")
-        if not p: return
-        obs = await p.fetch_observations()
+        _sync_region_netatmo_providers()
+        providers = hass.data[DOMAIN].get("netatmo_providers_by_engine", {})
+        if not providers:
+            return
+        engine_ids = tuple(providers)
+        fetched = await asyncio.gather(
+            *(providers[engine_id].fetch_observations() for engine_id in engine_ids),
+            return_exceptions=True,
+        )
+        observations_by_engine = {}
+        trends_by_engine = {}
+        all_observations = {}
+        all_raining = {}
+        regions = {region.engine_id: region for region in storm_manager.get_all_engines()}
+        for engine_id, result in zip(engine_ids, fetched):
+            if isinstance(result, Exception):
+                _LOGGER.error(
+                    "Netatmo-poll voor %s mislukt: %s", engine_id, result
+                )
+                result = []
+            obs = list(result)
+            observations_by_engine[engine_id] = obs
+            tracker = _pressure_tracker_for_region(regions[engine_id])
+            trends_by_engine[engine_id] = tracker.update(obs)
+            for item in obs:
+                key = str(item.station_id or f"{item.lat:.5f},{item.lon:.5f}")
+                all_observations[key] = item
+                if (item.rain_mm or 0) >= 0.1:
+                    all_raining[key] = item
+            region = regions[engine_id]
+            log_netatmo(
+                hass, obs, region.center_lat, region.center_lon,
+            )
+        obs = list(all_observations.values())
+        raining = list(all_raining.values())
+        hass.data[DOMAIN]["netatmo_observations_by_engine"] = observations_by_engine
+        hass.data[DOMAIN]["netatmo_pressure_trends_by_engine"] = trends_by_engine
         hass.data[DOMAIN]["last_netatmo_observations"] = obs
-        raining = [o for o in obs if (o.rain_mm or 0) >= 0.1]
-        hass.data[DOMAIN]["netatmo_rain_count"]    = len(raining)
+        hass.data[DOMAIN]["netatmo_rain_count"] = len(raining)
         hass.data[DOMAIN]["netatmo_station_count"] = len(obs)
-        hass.data[DOMAIN]["netatmo_pressure_trend"] = pressure_trend.update(obs)
-        await pressure_store.async_save(pressure_trend.to_snapshot())
-        hass.bus.async_fire(f"{DOMAIN}_netatmo_update", {
-            "stations": len(obs), "raining": len(raining)
+        home_region = storm_manager.get_engine_for_target("zone.home")
+        hass.data[DOMAIN]["netatmo_pressure_trend"] = (
+            trends_by_engine.get(home_region.engine_id, {}) if home_region else {}
+        )
+        await pressure_store.async_save({
+            "engines": {
+                region.storage_key: pressure_trackers_by_engine[
+                    region.engine_id
+                ].to_snapshot()
+                for region in storm_manager.get_all_engines()
+                if region.engine_id in pressure_trackers_by_engine
+            }
         })
-        lat = hass.data[DOMAIN].get("fictieve_lat", home_lat)
-        lon = hass.data[DOMAIN].get("fictieve_lon", home_lon)
-        log_netatmo(hass, obs, lat, lon)
+        hass.bus.async_fire(f"{DOMAIN}_netatmo_update", {
+            "stations": len(obs),
+            "raining": len(raining),
+            "engines": {
+                engine_id: len(items)
+                for engine_id, items in observations_by_engine.items()
+            },
+        })
         # Alleen natte stations naar OFE
         for o in raining:
             storm_manager.route_observation(o)
@@ -1490,6 +1589,7 @@ async def _async_setup_runtime(
         })
         hass.data[DOMAIN]["region_engines"] = storm_manager.get_all_engines()
         _sync_region_radar_providers()
+        _sync_region_netatmo_providers()
         blitz.update_regions(_blitz_regions())
         hass.bus.async_fire(
             f"{DOMAIN}_targets_updated", {"targets": [spec.target_id]}
@@ -1501,6 +1601,7 @@ async def _async_setup_runtime(
         # Een verre verplaatsing creëert een nieuwe RegionEngine. Start meteen
         # een beschermde radarcyclus; de lock voorkomt dubbele gelijktijdige polls.
         hass.async_create_task(_poll_radar())
+        hass.async_create_task(_poll_netatmo())
 
     @callback
     def _on_secondary_target_change(event):

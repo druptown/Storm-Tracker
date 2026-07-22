@@ -1,5 +1,17 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.79
+
+- Isoleer Netatmo-stations, luchtdrukhistoriek en druktrends per RegionEngine;
+  een verre testtracker kan daardoor nooit meer zijn Miami-data aan Belgische
+  targets of de thuissensor doorgeven.
+- Poll alle actieve regio's gelijktijdig met gedeeld OAuth-tokenbeheer en start
+  na een verre targetverplaatsing meteen een regionale Netatmo-meting.
+- Houd de bestaande globale Netatmo-sensor expliciet gekoppeld aan `zone.home`
+  en publiceer diagnostiek over de afzonderlijke regionale trends.
+- Migreer de bestaande globale drukhistoriek veilig naar de thuisregio en
+  bewaar voortaan alle RegionEngine-histories in dezelfde HA-opslag.
+
 # 0.4.71
 
 - Voeg H SAF H40B toe als gedeelde Meteosat-neerslagfallback voor Europa,

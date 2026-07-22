@@ -674,8 +674,13 @@ class NetatmoPressureTrendSensor(StormTrackerBaseSensor):
 
     @property
     def extra_state_attributes(self):
-        trend = self.hass.data.get(DOMAIN, {}).get("netatmo_pressure_trend", {})
+        domain_data = self.hass.data.get(DOMAIN, {})
+        trend = domain_data.get("netatmo_pressure_trend", {})
+        manager = domain_data.get("storm_manager")
+        home_region = manager.get_engine_for_target("zone.home") if manager else None
+        regional_trends = domain_data.get("netatmo_pressure_trends_by_engine", {})
         return {
+            "regio_engine": home_region.engine_id if home_region else None,
             "trend": trend.get("trend", "onvoldoende_data"),
             "snelle_daling": trend.get("rapid_fall", False),
             "druk_mediaan_hpa": trend.get("median_pressure_hpa"),
@@ -687,6 +692,11 @@ class NetatmoPressureTrendSensor(StormTrackerBaseSensor):
             "vergelijkbare_stations_30min": trend.get("stations_30m", 0),
             "vergelijkbare_stations_60min": trend.get("stations_60m", 0),
             "laatste_berekening": _timestamp_iso(trend.get("timestamp")),
+            "actieve_regios": len(regional_trends),
+            "regionale_trends": {
+                engine_id: regional.get("trend", "onvoldoende_data")
+                for engine_id, regional in regional_trends.items()
+            },
         }
 
 
@@ -723,7 +733,10 @@ class PrecipitationStatusSensor(StormTrackerBaseSensor):
             float(home_target.get("latitude", data.get("fictieve_lat", 0.0))),
             float(home_target.get("longitude", data.get("fictieve_lon", 0.0))),
             radar_source=radar_source,
-            pressure_trend=data.get("netatmo_pressure_trend"),
+            pressure_trend=(
+                data.get("netatmo_pressure_trends_by_engine", {}).get(engine_id)
+                if engine_id else data.get("netatmo_pressure_trend")
+            ),
         )
         if result.get("status") == "droog" and engine_id:
             lightning = _lightning_only_summary(
@@ -797,7 +810,12 @@ class TargetPrecipitationStatusSensor(StormTrackerBaseSensor):
             target.get("latitude", 0.0),
             target.get("longitude", 0.0),
             radar_source=radar_source,
-            pressure_trend=domain_data.get("netatmo_pressure_trend"),
+            pressure_trend=(
+                domain_data.get("netatmo_pressure_trends_by_engine", {}).get(
+                    region.engine_id
+                )
+                if region else None
+            ),
         )
         if not target.get("radar_covered", False):
             result["status"] = "onvoldoende_data"
