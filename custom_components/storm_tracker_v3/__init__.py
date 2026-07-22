@@ -694,6 +694,47 @@ async def _async_setup_runtime(
         hass.data[DOMAIN]["radar_calibration_observer"].diagnostics()
     )
 
+    def _record_calibration_frame(
+        source: str,
+        observations,
+        timestamp: float | None = None,
+        *,
+        engine_id: str | None = None,
+    ) -> int:
+        """Registreer een providerframe uitsluitend binnen zijn RegionEngine(s)."""
+        observer = hass.data[DOMAIN]["radar_calibration_observer"]
+        observations = list(observations)
+        if timestamp is None and observations:
+            timestamp = float(observations[0].timestamp)
+        if timestamp is None:
+            return 0
+        matched = 0
+        for region in storm_manager.get_all_engines():
+            if engine_id is not None and region.engine_id != engine_id:
+                continue
+            regional = [
+                item for item in observations
+                if region.accepts_observation(item.lat, item.lon)
+            ]
+            # Voor gedeelde producten zonder expliciete engine vermijden we
+            # dat een regio buiten de productdekking als kunstmatig droog telt.
+            if engine_id is None and not regional:
+                continue
+            matched += observer.record_frame(
+                regional,
+                source=source,
+                timestamp=float(timestamp),
+                region_id=f"{region.engine_id}@{region.storage_key}",
+                evaluation_center=(region.center_lat, region.center_lon),
+                evaluation_radius_km=region.observation_radius_km,
+            )
+        hass.data[DOMAIN]["radar_calibration"] = observer.diagnostics()
+        hass.bus.async_fire(
+            f"{DOMAIN}_calibration_update",
+            {"samples": hass.data[DOMAIN]["radar_calibration"]["samples"]},
+        )
+        return matched
+
     # ── Locatie-afhankelijke providers initialiseren ──────────────────────
     async def _init_location_providers(lat: float, lon: float) -> None:
         """Start of herstart alle locatie-afhankelijke providers op nieuwe locatie."""
@@ -854,16 +895,10 @@ async def _async_setup_runtime(
         hass.data[DOMAIN]["last_kmi_observations"] = obs
         hass.data[DOMAIN]["kmi_frame_timestamp"] = p.last_frame_timestamp
         hass.data[DOMAIN]["kmi_count"] = len(obs)
-        calibration_observer = hass.data[DOMAIN]["radar_calibration_observer"]
-        calibration_observer.record_reference_frame(
+        _record_calibration_frame(
+            "kmi",
             [observation for observation in obs if (observation.intensity or 0) >= 2],
-            source="kmi_image",
-            timestamp=p.last_frame_timestamp,
-        )
-        hass.data[DOMAIN]["radar_calibration"] = calibration_observer.diagnostics()
-        hass.bus.async_fire(
-            f"{DOMAIN}_calibration_update",
-            {"samples": hass.data[DOMAIN]["radar_calibration"]["samples"]},
+            p.last_frame_timestamp,
         )
         hass.bus.async_fire(f"{DOMAIN}_radar_update", {"source": "kmi", "count": len(obs)})
         lat = hass.data[DOMAIN].get("fictieve_lat", home_lat)
@@ -908,6 +943,11 @@ async def _async_setup_runtime(
                 **provider.diagnostics,
                 "observations": len(engine_obs),
             }
+            _record_calibration_frame(
+                "rainviewer", engine_obs,
+                getattr(provider, "_last_frame_ts", None),
+                engine_id=engine_id,
+            )
         hass.data[DOMAIN]["last_rv_observations"] = obs
         hass.data[DOMAIN]["rv_count"] = len(obs)
         hass.data[DOMAIN]["rainviewer_diagnostics_by_engine"] = diagnostics
@@ -938,6 +978,9 @@ async def _async_setup_runtime(
         hass.data[DOMAIN]["knmi_intensity_30min"]  = _intens(30)
         hass.data[DOMAIN]["knmi_intensity_60min"]  = _intens(60)
         hass.data[DOMAIN]["knmi_intensity_120min"] = _intens(120)
+        _record_calibration_frame(
+            "knmi", current, getattr(p, "last_frame_timestamp", None)
+        )
         hass.bus.async_fire(f"{DOMAIN}_knmi_update", {
             "current":       len(current),
             "forecast":      len(forecast),
@@ -990,6 +1033,11 @@ async def _async_setup_runtime(
             }
             if getattr(provider, "_last_product_ts", None) is not None:
                 product_timestamps.append(float(provider._last_product_ts))
+            _record_calibration_frame(
+                "opera", engine_obs,
+                getattr(provider, "_last_product_ts", None),
+                engine_id=engine_id,
+            )
 
         # A low OPERA quality score is not automatically dry: RainViewer or a
         # national radar may still confirm a genuine shower. Conversely,
@@ -1034,21 +1082,6 @@ async def _async_setup_runtime(
             )
             for engine_id, engine_obs in accepted_by_engine.items()
         }
-
-        # Bewaar elk OPERA-frame. Alleen een KMI-beeld met exact dezelfde
-        # nominale radarminuut wordt vergeleken, ongeacht aankomstvolgorde.
-        calibration_observer = hass.data[DOMAIN]["radar_calibration_observer"]
-        opera_frame_timestamp = (
-            float(raw_obs[0].timestamp)
-            if raw_obs else max(product_timestamps, default=None)
-        )
-        if opera_frame_timestamp is not None:
-            calibration_observer.record_primary_frame(raw_obs, opera_frame_timestamp)
-        hass.data[DOMAIN]["radar_calibration"] = calibration_observer.diagnostics()
-        hass.bus.async_fire(
-            f"{DOMAIN}_calibration_update",
-            {"samples": hass.data[DOMAIN]["radar_calibration"]["samples"]},
-        )
 
         diagnostics = {
             "engines": provider_diagnostics,
@@ -1145,7 +1178,6 @@ async def _async_setup_runtime(
 
     async def _poll_radar_inner(select_radar_source):
         """Inner radar cycle, protected by radar_poll_lock."""
-        calibration_observer = hass.data[DOMAIN]["radar_calibration_observer"]
         _sync_region_radar_providers()
         rainviewer_obs = await _poll_rv(operational=False)
         opera_obs = await _poll_opera()
@@ -1191,14 +1223,11 @@ async def _async_setup_runtime(
                     hsaf.overlay or {}
                 ).get("timestamp")
                 if overlay_timestamp is not None:
-                    calibration_observer.record_reference_frame(
-                        hsaf_obs,
-                        source="hsaf_h40b",
-                        timestamp=float(overlay_timestamp),
-                    )
-                    hass.data[DOMAIN]["radar_calibration"] = (
-                        calibration_observer.diagnostics()
-                    )
+                    for region in hsaf_regions:
+                        _record_calibration_frame(
+                            "hsaf_h40b", hsaf_obs, float(overlay_timestamp),
+                            engine_id=region.engine_id,
+                        )
             decisions = _refresh_engine_radar_decisions()
         elif hsaf is not None:
             hsaf.sleep()
@@ -1225,10 +1254,12 @@ async def _async_setup_runtime(
             }
             hass.data[DOMAIN]["noaa_goes_rrqpe_diagnostics"] = goes_rrqpe.diagnostics
             if goes_rrqpe.healthy and goes_rrqpe.overlay:
-                calibration_observer.record_reference_frame(
-                    goes_obs, source="noaa_goes_rrqpe",
-                    timestamp=float(goes_rrqpe.overlay["timestamp"]),
-                )
+                for region in goes_regions:
+                    _record_calibration_frame(
+                        "noaa_goes_rrqpe", goes_obs,
+                        float(goes_rrqpe.overlay["timestamp"]),
+                        engine_id=region.engine_id,
+                    )
             decisions = _refresh_engine_radar_decisions()
         elif goes_rrqpe is not None:
             goes_rrqpe.sleep()
@@ -1278,6 +1309,12 @@ async def _async_setup_runtime(
             hass.data[DOMAIN]["dpc_radar_observations"] = results["dpc_radar"]
         if "aemet_radar" in results:
             hass.data[DOMAIN]["aemet_radar_observations"] = results["aemet_radar"]
+        for provider_id, observations in results.items():
+            if provider_id in {
+                "dwd_radolan", "met_office_radar", "meteofrance_radar",
+                "dpc_radar", "aemet_radar",
+            }:
+                _record_calibration_frame(provider_id, observations)
         decisions = _refresh_engine_radar_decisions()
         for provider_id in ("dwd_radolan", "met_office_radar", "meteofrance_radar", "meteolux", "dpc_radar", "aemet_radar"):
             if provider_id in results:

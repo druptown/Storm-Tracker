@@ -302,7 +302,7 @@ class ActiveRadarSourceSensor(StormTrackerBaseSensor):
 
 
 class RadarCalibrationSensor(StormTrackerBaseSensor):
-    """Passieve overeenkomstscore tussen OPERA en het actuele KMI-beeld."""
+    """Passieve regionale overeenkomstscore tussen radar- en satellietbronnen."""
     _attr_name = "STV3 Radar Autokalibratie"
     _attr_unique_id = "stv3_radar_autokalibratie"
     _attr_icon = "mdi:tune-variant"

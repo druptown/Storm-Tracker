@@ -1,5 +1,17 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.83
+
+- Vervang de OPERA-centrische kalibratie door regionale kruisvalidatie tussen
+  alle gelijktijdig beschikbare operationele neerslagproviders.
+- Rapporteer scores per providerpaar en RegionEngine zonder een bron vooraf als
+  absolute waarheid te behandelen.
+- Koppel wachtende vergelijkingsframes aan zowel runtime-engine als stabiele
+  geografische sleutel, zodat een verplaatsende persoon nooit met frames uit
+  zijn vorige regio wordt vergeleken.
+- Houd kalibratie observerend: de gemeten scores wijzigen nog geen operationele
+  filters of providerdata.
+
 # 0.4.82
 
 - Isoleer de OPERA- en RainViewer-fetches per RegionEngine: regio's worden

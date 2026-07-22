@@ -1,7 +1,7 @@
-# Storm Tracker V3 — providerarchitectuur 0.4.82
+# Storm Tracker V3 — providerarchitectuur 0.4.83
 
 Dit document beschrijft de effectief geïmplementeerde providerstructuur van
-Storm Tracker V3 0.4.82. Het onderscheidt operationele radar, fallbackdata,
+Storm Tracker V3 0.4.83. Het onderscheidt operationele radar, fallbackdata,
 bliksem, validatiebronnen en bronnen die alleen beleidsmatig voor toekomstige
 uitbreiding zijn voorzien.
 
@@ -185,6 +185,14 @@ runtime markeert de bronwissel tien minuten lang als overgang en verlaagt de
 prognosezekerheid tijdelijk met tien procentpunten. Dit dempt analytische
 sprongen zonder een kunstmatige neerslagfootprint te tekenen.
 
+De passieve kalibratie is multi-provider en regionaal. Elk beschikbaar frame
+van KMI, KNMI, DWD, Météo-France, Met Office, DPC, AEMET, OPERA, RainViewer,
+H SAF of GOES wordt alleen gekoppeld aan een andere bron met exact dezelfde
+nominale minuut én dezelfde geografische RegionEngine-sleutel. De sensor
+rapporteert overlap, gemiste en extra bezette rastervakken, precision, recall
+en F1 per providerpaar. Deze scores zijn voorlopig diagnostisch en wijzigen
+geen operationele filtering.
+
 - actuele afstand tot elk target;
 - naderend, wegtrekkend, passerend of stationair;
 - bewegingsvector en snelheid;
@@ -224,7 +232,7 @@ zijn nog geen garantie dat de bijbehorende runtimeprovider bestaat. Tot hun
 implementatie gebruikt het systeem in die regio's alleen de hierboven als
 operationeel beschreven bronnen.
 
-## 10. Testdekking in 0.4.82
+## 10. Testdekking in 0.4.83
 
 De provider-audit omvat tests voor:
 

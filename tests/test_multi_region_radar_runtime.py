@@ -70,10 +70,7 @@ def test_moved_target_starts_radar_cycle_immediately():
     assert "hass.async_create_task(_poll_all())" in rendered
 
 
-def test_radar_cycle_binds_shared_calibration_observer_before_fallbacks():
+def test_radar_cycle_records_fallbacks_through_region_calibration_helper():
     inner = INIT_SOURCE.split("async def _poll_radar_inner", 1)[1]
-    before_hsaf = inner.split("if hsaf is not None and hsaf_regions", 1)[0]
-    assert (
-        'calibration_observer = hass.data[DOMAIN]["radar_calibration_observer"]'
-        in before_hsaf
-    )
+    assert '_record_calibration_frame(\n                            "hsaf_h40b"' in inner
+    assert '_record_calibration_frame(\n                        "noaa_goes_rrqpe"' in inner

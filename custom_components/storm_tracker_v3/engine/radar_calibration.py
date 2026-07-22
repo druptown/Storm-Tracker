@@ -1,4 +1,4 @@
-"""Passieve kruisvalidatie van operationele radar tegen beeldreferenties.
+"""Passieve regionale kruisvalidatie tussen operationele neerslagproviders.
 
 Deze eerste fase observeert uitsluitend. De scores wijzigen geen enkele
 operationele drempel en kunnen daardoor veilig langere tijd worden verzameld.
@@ -57,6 +57,9 @@ def _within_evaluation_area(observations: Sequence, center, radius_km) -> list:
 @dataclass(frozen=True, slots=True)
 class CalibrationSnapshot:
     timestamp: float
+    region_id: str
+    source_a: str
+    source_b: str
     reference_source: str
     primary_cells: int
     reference_cells: int
@@ -70,6 +73,10 @@ class CalibrationSnapshot:
     def as_dict(self) -> dict:
         return {
             "timestamp": self.timestamp,
+            "region_id": self.region_id,
+            "source_a": self.source_a,
+            "source_b": self.source_b,
+            "provider_pair": f"{self.source_a}<->{self.source_b}",
             "reference_source": self.reference_source,
             "primary_cells": self.primary_cells,
             "reference_cells": self.reference_cells,
@@ -99,48 +106,74 @@ class RadarCalibrationObserver:
         self._history: deque[CalibrationSnapshot] = deque(maxlen=history_size)
         self.evaluation_center = evaluation_center
         self.evaluation_radius_km = evaluation_radius_km
-        self._primary_frames: dict[int, tuple] = {}
-        self._reference_frames: dict[str, dict[int, tuple]] = {}
-        self._matched: set[tuple[str, int]] = set()
+        self._frames: dict[str, dict[str, dict[int, tuple]]] = {}
+        self._matched: set[tuple[str, str, str, int]] = set()
 
     @staticmethod
     def _nominal_minute(timestamp: float) -> int:
         return int(round(float(timestamp) / 60.0))
 
     def record_primary_frame(self, observations: Sequence, timestamp: float) -> int:
-        minute = self._nominal_minute(timestamp)
-        self._primary_frames[minute] = tuple(observations)
-        matched = self._match_minute(minute)
-        self._prune_frames(minute)
-        return matched
+        """Compatibiliteitswrapper voor de vroegere OPERA-hoofdbron."""
+        return self.record_frame(
+            observations, source="opera", timestamp=timestamp, region_id="legacy"
+        )
 
     def record_reference_frame(
         self, observations: Sequence, *, source: str, timestamp: float
     ) -> int:
+        """Compatibiliteitswrapper voor bestaande aanroepen en automations."""
+        return self.record_frame(
+            observations, source=source, timestamp=timestamp, region_id="legacy"
+        )
+
+    def record_frame(
+        self,
+        observations: Sequence,
+        *,
+        source: str,
+        timestamp: float,
+        region_id: str,
+        evaluation_center: tuple[float, float] | None = None,
+        evaluation_radius_km: float | None = None,
+    ) -> int:
+        """Registreer één bronframe en vergelijk het met alle gelijktijdige bronnen."""
         minute = self._nominal_minute(timestamp)
-        self._reference_frames.setdefault(source, {})[minute] = tuple(observations)
-        matched = self._match_minute(minute, source=source)
+        center = evaluation_center or self.evaluation_center
+        radius = (
+            evaluation_radius_km
+            if evaluation_radius_km is not None
+            else self.evaluation_radius_km
+        )
+        frame = tuple(_within_evaluation_area(observations, center, radius))
+        self._frames.setdefault(str(region_id), {}).setdefault(str(source), {})[
+            minute
+        ] = frame
+        matched = self._match_minute(str(region_id), minute, str(source))
         self._prune_frames(minute)
         return matched
 
-    def _match_minute(self, minute: int, source: str | None = None) -> int:
-        if minute not in self._primary_frames:
+    def _match_minute(self, region_id: str, minute: int, source: str) -> int:
+        region_frames = self._frames.get(region_id, {})
+        if minute not in region_frames.get(source, {}):
             return 0
-        sources = (source,) if source else tuple(self._reference_frames)
         matched = 0
-        for reference_source in sources:
-            key = (reference_source, minute)
-            frames = self._reference_frames.get(reference_source, {})
-            if minute not in frames or key in self._matched:
+        for other_source, frames in region_frames.items():
+            if other_source == source or minute not in frames:
+                continue
+            source_a, source_b = sorted((source, other_source))
+            key = (region_id, source_a, source_b, minute)
+            if key in self._matched:
                 continue
             frame_timestamp = minute * 60.0
             self.observe(
-                self._primary_frames[minute], frames[minute],
-                reference_source=reference_source,
+                region_frames[source_a][minute], region_frames[source_b][minute],
+                reference_source=source_b,
                 reference_timestamp=frame_timestamp,
-                evaluation_center=self.evaluation_center,
-                evaluation_radius_km=self.evaluation_radius_km,
                 now=frame_timestamp,
+                region_id=region_id,
+                source_a=source_a,
+                source_b=source_b,
             )
             self._matched.add(key)
             matched += 1
@@ -148,16 +181,19 @@ class RadarCalibrationObserver:
 
     def _prune_frames(self, newest_minute: int) -> None:
         cutoff = newest_minute - FRAME_HISTORY_MINUTES
-        self._primary_frames = {
-            minute: frame for minute, frame in self._primary_frames.items()
-            if minute >= cutoff
-        }
-        for source, frames in tuple(self._reference_frames.items()):
-            self._reference_frames[source] = {
-                minute: frame for minute, frame in frames.items()
-                if minute >= cutoff
+        for region_id, sources in tuple(self._frames.items()):
+            for source, frames in tuple(sources.items()):
+                sources[source] = {
+                    minute: frame for minute, frame in frames.items()
+                    if minute >= cutoff
+                }
+            self._frames[region_id] = {
+                source: frames for source, frames in sources.items() if frames
             }
-        self._matched = {key for key in self._matched if key[1] >= cutoff}
+        self._frames = {
+            region_id: sources for region_id, sources in self._frames.items() if sources
+        }
+        self._matched = {key for key in self._matched if key[3] >= cutoff}
 
     def observe(
         self,
@@ -169,6 +205,9 @@ class RadarCalibrationObserver:
         evaluation_center: tuple[float, float] | None = None,
         evaluation_radius_km: float | None = None,
         now: float | None = None,
+        region_id: str = "legacy",
+        source_a: str = "primary",
+        source_b: str | None = None,
     ) -> CalibrationSnapshot | None:
         """Vergelijk gelijktijdige nat/droog-bezetting op een gedeeld rooster."""
         current = time.time() if now is None else float(now)
@@ -205,6 +244,9 @@ class RadarCalibrationObserver:
 
         snapshot = CalibrationSnapshot(
             timestamp=current,
+            region_id=region_id,
+            source_a=source_a,
+            source_b=source_b or reference_source,
             reference_source=reference_source,
             primary_cells=len(primary_cells),
             reference_cells=len(reference_cells),
@@ -227,13 +269,18 @@ class RadarCalibrationObserver:
                 "status": "wacht_op_gelijktijdige_frames",
                 "grid_deg": self.grid_deg,
                 "synchronisatie": "exacte_nominale_minuut",
-                "pending_primary_frames": len(self._primary_frames),
-                "pending_reference_frames": sum(
-                    len(frames) for frames in self._reference_frames.values()
+                "pending_frames": sum(
+                    len(frames)
+                    for sources in self._frames.values()
+                    for frames in sources.values()
                 ),
             }
         latest = self._history[-1]
         comparable = [item for item in self._history if item.f1_score is not None]
+        pair_scores: dict[str, list[float]] = {}
+        for item in comparable:
+            pair = f"{item.source_a}<->{item.source_b}"
+            pair_scores.setdefault(pair, []).append(item.f1_score)
         return {
             "mode": "observerend",
             "samples": len(self._history),
@@ -241,10 +288,18 @@ class RadarCalibrationObserver:
             "status": "meting_beschikbaar",
             "grid_deg": self.grid_deg,
             "synchronisatie": "exacte_nominale_minuut",
-            "pending_primary_frames": len(self._primary_frames),
-            "pending_reference_frames": sum(
-                len(frames) for frames in self._reference_frames.values()
+            "pending_frames": sum(
+                len(frames)
+                for sources in self._frames.values()
+                for frames in sources.values()
             ),
+            "provider_pairs": {
+                pair: {
+                    "samples": len(scores),
+                    "mean_f1_score": round(sum(scores) / len(scores), 3),
+                }
+                for pair, scores in sorted(pair_scores.items())
+            },
             "latest": latest.as_dict(),
             "mean_precision": (
                 round(sum(item.precision for item in comparable) / len(comparable), 3)

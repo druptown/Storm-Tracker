@@ -81,4 +81,43 @@ def test_history_matches_when_reference_arrives_first(radar_calibration_module):
     observer = radar_calibration_module.RadarCalibrationObserver()
     observer.record_reference_frame([], source="kmi_image", timestamp=1_200)
     assert observer.record_primary_frame([_obs(51, 4)], 1_200) == 1
-    assert observer.diagnostics()["latest"]["false_positive_cells"] == 1
+    latest = observer.diagnostics()["latest"]
+    assert latest["missed_cells"] == 1
+    assert latest["provider_pair"] == "kmi_image<->opera"
+
+
+def test_multi_provider_frames_are_compared_per_region(radar_calibration_module):
+    observer = radar_calibration_module.RadarCalibrationObserver(grid_deg=0.1)
+    observer.record_frame(
+        [_obs(51.01, 4.01)], source="kmi", timestamp=1_200,
+        region_id="region-1",
+    )
+    assert observer.record_frame(
+        [_obs(51.02, 4.02)], source="rainviewer", timestamp=1_200,
+        region_id="region-1",
+    ) == 1
+    # Hetzelfde tijdstip in een andere regio mag nooit worden gekruist.
+    assert observer.record_frame(
+        [_obs(51.02, 4.02)], source="opera", timestamp=1_200,
+        region_id="region-2",
+    ) == 0
+    diagnostics = observer.diagnostics()
+    assert diagnostics["samples"] == 1
+    assert diagnostics["latest"]["region_id"] == "region-1"
+    assert diagnostics["provider_pairs"]["kmi<->rainviewer"] == {
+        "samples": 1, "mean_f1_score": 1.0,
+    }
+
+
+def test_three_sources_create_each_pair_once(radar_calibration_module):
+    observer = radar_calibration_module.RadarCalibrationObserver()
+    for source in ("kmi", "opera", "rainviewer"):
+        observer.record_frame(
+            [_obs(51, 4)], source=source, timestamp=1_200,
+            region_id="region-1",
+        )
+    diagnostics = observer.diagnostics()
+    assert diagnostics["samples"] == 3
+    assert set(diagnostics["provider_pairs"]) == {
+        "kmi<->opera", "kmi<->rainviewer", "opera<->rainviewer",
+    }
