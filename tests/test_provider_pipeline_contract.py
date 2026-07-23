@@ -41,10 +41,13 @@ def test_only_one_ordered_five_minute_provider_cycle_is_scheduled():
         "_poll_radar_comparison()"
     ) < cycle.index("_poll_radar()")
     assert "provider_cycle_lock" in cycle
-    assert cycle.count("_bounded_provider_stage") == 5
+    assert cycle.count("_bounded_provider_stage") == 6
     assert cycle.index("_poll_radar()") < cycle.index(
         "_flush_calibration_data()"
     )
+    assert cycle.index("_poll_radar()") < cycle.index(
+        "_flush_region_observation_batches()"
+    ) < cycle.index("_queue_home_verification_sample()")
     bounded = _function_source("_bounded_provider_stage")
     assert "asyncio.wait_for" in bounded
     assert "provider_stage_timeouts" in bounded

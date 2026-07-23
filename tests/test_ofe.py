@@ -157,6 +157,34 @@ def test_batch_is_flushed_after_batch_interval(ofe_module, observation_module):
     assert len(received[0]) == 2
 
 
+def test_pending_batch_can_be_flushed_deterministically(
+    ofe_module, observation_module,
+):
+    async def _run():
+        received = []
+
+        async def _on_batch(batch):
+            received.append(batch)
+
+        ofe = ofe_module.ObservationFusionEngine(on_batch=_on_batch)
+        observation = _obs(
+            observation_module,
+            observation_module.ObservationType.RADAR,
+            51.0,
+            4.0,
+        )
+        await ofe.add_observation(observation)
+        delivered = await ofe.async_flush_pending()
+        await asyncio.sleep(0)
+        return delivered, received, ofe
+
+    delivered, received, ofe = asyncio.run(_run())
+    assert delivered == 1
+    assert len(received) == 1
+    assert len(received[0]) == 1
+    assert ofe._pending == []
+
+
 def test_on_batch_exception_does_not_crash_engine(ofe_module, observation_module):
     """Een exception in de on_batch-callback mag de OFE niet laten crashen (alleen loggen)."""
     async def _failing_on_batch(batch):

@@ -925,6 +925,19 @@ class StormTellerSensor(StormTrackerBaseSensor):
                     "bewegingspunten": s.motion_sample_count,
                     "bewegingshistorie_min": round(s.motion_history_minutes, 1),
                     "bewegingsfit": round(s.motion_fit_quality, 3),
+                    "baanmodel": getattr(s, "motion_model", "none"),
+                    "bewegingsbasis": getattr(s, "motion_basis", "unknown"),
+                    "hindcastfout_km": getattr(
+                        s, "motion_prediction_error_km", None
+                    ),
+                    "modelwinst": getattr(s, "motion_model_gain", 0.0),
+                    "versnelling_kmh2": round(
+                        math.hypot(
+                            getattr(s, "acceleration_east_kmh2", 0.0),
+                            getattr(s, "acceleration_north_kmh2", 0.0),
+                        ),
+                        1,
+                    ),
                     "tracking_status": s.tracking_status,
                     "opeenvolgende_radarframes": s.consecutive_radar_frames,
                     "laatste_radarframe": _timestamp_iso(s.last_radar_timestamp),

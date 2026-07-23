@@ -1,5 +1,29 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.88
+
+- Vergelijk voor ieder bevestigd weersysteem een rechtlijnig traject met een
+  constant-versneld traject en kies de gebogen baan alleen wanneer een
+  rollende hindcast aantoonbaar beter is.
+- Gebruik uitsluitend radarcentroids voor de neerslagbaan zolang radarframes
+  beschikbaar zijn; bliksem blijft alleen een expliciete fallback en trekt de
+  regenbaan niet meer kunstmatig naar een actieve flank.
+- Projecteer de actuele tweedimensionale radarcontour over 90 minuten en
+  rapporteer afzonderlijk een exacte contour-ETA en een conservatieve ETA via
+  de groeiende onzekerheidscorridor.
+- Laat een gevalideerde gebogen passage als `naderend` gelden, ook wanneer de
+  laatste momentane snelheidsvector nog zijwaarts wijst.
+- Bewaar iedere vijf minuten de eigen thuisverwachting samen met de twee
+  Buienradar-neerslagverwachtingssensoren in de permanente
+  kalibratiedatabase.
+- Bewaar na een geslaagde notificatie een onveranderlijke waarschuwingssnapshot
+  met target, ETA-basis, passage, bron, intensiteit, baanmodel en hindcastfout,
+  zodat latere sensorupdates de historische melding niet vervormen.
+- Maak de Observation Fusion Engine voor verificatie deterministisch leeg
+  voordat de cyclus wordt opgeslagen; hierdoor bevat een verificatierecord
+  nooit onbedoeld de vorige providercyclus.
+- Breid de collectortellers uit met verificatie- en waarschuwingssamples.
+
 # 0.4.87
 
 - Scheidt de dichtstbijzijnde actuele buienrand van het systeem dat voor

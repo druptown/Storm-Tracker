@@ -711,8 +711,10 @@ async def _async_setup_runtime(
     hass.data[DOMAIN]["radar_calibration_store"] = calibration_store
     hass.data[DOMAIN]["radar_calibration_storage"] = {
         "status": "ready", "frames_written": 0,
-        "comparisons_written": 0, **calibration_stats,
+        "comparisons_written": 0, "verification_samples_written": 0,
+        **calibration_stats,
     }
+    hass.data[DOMAIN]["verification_samples_pending"] = []
     hass.data[DOMAIN]["radar_calibration"] = (
         hass.data[DOMAIN]["radar_calibration_observer"].diagnostics()
     )
@@ -1666,7 +1668,14 @@ async def _async_setup_runtime(
         """Schrijf de verzamelde kalibratiedata buiten de HA-eventloop weg."""
         observer = hass.data[DOMAIN]["radar_calibration_observer"]
         batch = observer.drain_collection_batch()
-        if not batch["frames"] and not batch["comparisons"]:
+        pending = hass.data[DOMAIN].get("verification_samples_pending", [])
+        hass.data[DOMAIN]["verification_samples_pending"] = []
+        batch["verification_samples"] = tuple(pending)
+        if (
+            not batch["frames"]
+            and not batch["comparisons"]
+            and not batch["verification_samples"]
+        ):
             return
         try:
             result = await hass.async_add_executor_job(
@@ -1674,6 +1683,9 @@ async def _async_setup_runtime(
             )
         except Exception as exc:
             observer.restore_collection_batch(batch)
+            hass.data[DOMAIN]["verification_samples_pending"][:0] = list(
+                batch.get("verification_samples", ())
+            )
             hass.data[DOMAIN]["radar_calibration_storage"] = {
                 "status": "error", "error": type(exc).__name__,
                 "path": str(calibration_store.path),
@@ -1690,6 +1702,150 @@ async def _async_setup_runtime(
             f"{DOMAIN}_calibration_update",
             {"samples": diagnostics["samples"]},
         )
+
+    def _numeric_state(entity_state):
+        if entity_state is None or entity_state.state in {
+            "unknown", "unavailable", "none", "",
+        }:
+            return None
+        try:
+            return float(entity_state.state)
+        except (TypeError, ValueError):
+            return None
+
+    def _snapshot_bool(value) -> bool:
+        """Normaliseer eventtemplates zonder de string 'false' als waar te zien."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def _queue_home_verification_sample() -> None:
+        """Leg Buienradar en de gelijktijdige STV3-thuisstatus samen vast."""
+        from .engine.nowcast import build_precipitation_status
+
+        observed_at = time.time()
+        nominal_minute = int(observed_at // 60)
+        home_target = hass.data[DOMAIN].get("targets", {}).get("home", {})
+        home_region = storm_manager.get_engine_for_target("zone.home")
+        engine_id = home_target.get("region_engine_id")
+        own_attrs = build_precipitation_status(
+            (
+                home_region.storm_engine.get_active_storms()
+                if home_region else []
+            ),
+            float(home_target.get("latitude", home_lat)),
+            float(home_target.get("longitude", home_lon)),
+            radar_source=(
+                (
+                    hass.data[DOMAIN]
+                    .get("radar_sources_by_engine", {})
+                    .get(engine_id, {})
+                ).get("source")
+            ),
+            pressure_trend=(
+                hass.data[DOMAIN]
+                .get("netatmo_pressure_trends_by_engine", {})
+                .get(engine_id)
+            ),
+        )
+        average = hass.states.get("sensor.neerslagverwachting_gemiddeld")
+        total = hass.states.get("sensor.neerslagverwachting_totaal")
+        eta = own_attrs.get("eta_minutes")
+        warning_candidate = None
+        if (
+            own_attrs.get("status") == "naderend"
+            and own_attrs.get("eta_reliable")
+            and own_attrs.get("passage_classification") in {"raak", "rand"}
+            and eta is not None
+        ):
+            eta_value = float(eta)
+            warning_candidate = (
+                "imminent" if eta_value <= 15
+                else "dichtbij" if eta_value <= 45
+                else "vroeg" if eta_value <= 90
+                else None
+            )
+        sample = {
+            "sample_key": f"cycle:home:{nominal_minute}",
+            "sample_type": "cycle",
+            "target_id": "home",
+            "nominal_minute": nominal_minute,
+            "observed_at": observed_at,
+            "latitude": home_lat,
+            "longitude": home_lon,
+            "buienradar_average_mm_h": _numeric_state(average),
+            "buienradar_total_mm": _numeric_state(total),
+            "own_status": own_attrs.get("status"),
+            "own_distance_km": own_attrs.get("distance_km"),
+            "own_eta_minutes": eta,
+            "own_passage": own_attrs.get("passage_classification"),
+            "own_confidence": own_attrs.get("motion_confidence"),
+            "own_forecast_available": own_attrs.get("forecast_available", False),
+            "warning_stage": warning_candidate,
+            "snapshot": {
+                "stv3": dict(own_attrs),
+                "buienradar": {
+                    "average_mm_h": _numeric_state(average),
+                    "total_mm": _numeric_state(total),
+                    "average_last_updated": (
+                        average.last_updated.isoformat() if average else None
+                    ),
+                    "total_last_updated": (
+                        total.last_updated.isoformat() if total else None
+                    ),
+                },
+                "warning_candidate": warning_candidate,
+            },
+        }
+        hass.data[DOMAIN]["verification_samples_pending"].append(sample)
+
+    @callback
+    def _record_warning_snapshot(event) -> None:
+        """Bewaar exact de snapshot waarmee een melding werd verzonden."""
+        data = dict(event.data)
+        observed_at = float(data.get("observed_at") or time.time())
+        target_id = str(data.get("target_id") or "unknown")
+        stage = str(data.get("warning_stage") or "unknown")
+        event_id = getattr(event.context, "id", None) or str(observed_at)
+        hass.data[DOMAIN]["verification_samples_pending"].append({
+            "sample_key": f"warning:{event_id}",
+            "sample_type": "warning_sent",
+            "target_id": target_id,
+            "nominal_minute": int(observed_at // 60),
+            "observed_at": observed_at,
+            "latitude": data.get("latitude"),
+            "longitude": data.get("longitude"),
+            "buienradar_average_mm_h": data.get("buienradar_average_mm_h"),
+            "buienradar_total_mm": data.get("buienradar_total_mm"),
+            "own_status": data.get("status"),
+            "own_distance_km": data.get("distance_km"),
+            "own_eta_minutes": data.get("eta_minutes"),
+            "own_passage": data.get("passage_classification"),
+            "own_confidence": data.get("motion_confidence"),
+            "own_forecast_available": _snapshot_bool(
+                data.get("forecast_available", False)
+            ),
+            "warning_stage": stage,
+            "snapshot": data,
+        })
+        hass.async_create_task(_flush_calibration_data())
+
+    hass.data[DOMAIN]["unsubscribers"].append(
+        hass.bus.async_listen(
+            f"{DOMAIN}_warning_sent", _record_warning_snapshot
+        )
+    )
+
+    async def _flush_region_observation_batches() -> int:
+        """Maak alle geplande OFE-adds zichtbaar vóór verificatie/opslag."""
+        await asyncio.sleep(0)
+        delivered = await asyncio.gather(*(
+            region.ofe.async_flush_pending()
+            for region in storm_manager.get_all_engines()
+        ))
+        return sum(delivered)
 
     async def _poll_all(now=None):
         """Voer een volledige providercyclus in vaste, racevrije volgorde uit."""
@@ -1712,6 +1868,10 @@ async def _async_setup_runtime(
                 asyncio.gather(_poll_netatmo(), _poll_open_meteo()),
                 30,
             )
+            await _bounded_provider_stage(
+                "observation_flush", _flush_region_observation_batches(), 15
+            )
+            _queue_home_verification_sample()
             await _bounded_provider_stage(
                 "calibration_storage", _flush_calibration_data(), 15
             )

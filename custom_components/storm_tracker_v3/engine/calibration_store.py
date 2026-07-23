@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import sqlite3
 import threading
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class CalibrationDataStore:
@@ -15,7 +16,10 @@ class CalibrationDataStore:
     def __init__(self, path: str) -> None:
         self.path = Path(path)
         self._lock = threading.Lock()
-        self._totals = {"frames": 0, "datapoints": 0, "comparisons": 0}
+        self._totals = {
+            "frames": 0, "datapoints": 0, "comparisons": 0,
+            "verification_samples": 0, "warning_samples": 0,
+        }
         self._sources: set[str] = set()
         self._regions: set[str] = set()
         self._oldest_timestamp: float | None = None
@@ -72,6 +76,30 @@ class CalibrationDataStore:
                     ON frames(region_key, nominal_minute);
                 CREATE INDEX IF NOT EXISTS idx_comparisons_pair_time
                     ON comparisons(source_a, source_b, nominal_minute);
+                CREATE TABLE IF NOT EXISTS forecast_verification_samples (
+                    id INTEGER PRIMARY KEY,
+                    sample_key TEXT NOT NULL UNIQUE,
+                    sample_type TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    nominal_minute INTEGER NOT NULL,
+                    observed_at REAL NOT NULL,
+                    latitude REAL,
+                    longitude REAL,
+                    buienradar_average_mm_h REAL,
+                    buienradar_total_mm REAL,
+                    own_status TEXT,
+                    own_distance_km REAL,
+                    own_eta_minutes REAL,
+                    own_passage TEXT,
+                    own_confidence TEXT,
+                    own_forecast_available INTEGER NOT NULL,
+                    warning_stage TEXT,
+                    snapshot_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_verification_target_time
+                    ON forecast_verification_samples(target_id, nominal_minute);
+                CREATE INDEX IF NOT EXISTS idx_verification_type_time
+                    ON forecast_verification_samples(sample_type, nominal_minute);
             """)
             db.execute(
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
@@ -84,6 +112,13 @@ class CalibrationDataStore:
                 ).fetchone()[0],
                 "comparisons": db.execute(
                     "SELECT count(*) FROM comparisons"
+                ).fetchone()[0],
+                "verification_samples": db.execute(
+                    "SELECT count(*) FROM forecast_verification_samples"
+                ).fetchone()[0],
+                "warning_samples": db.execute(
+                    "SELECT count(*) FROM forecast_verification_samples "
+                    "WHERE sample_type='warning_sent'"
                 ).fetchone()[0],
             }
             self._sources = {
@@ -101,6 +136,7 @@ class CalibrationDataStore:
     def write_batch(self, batch: dict) -> dict:
         frames = batch.get("frames", ())
         comparisons = batch.get("comparisons", ())
+        verification_samples = batch.get("verification_samples", ())
         with self._lock, self._connect() as db:
             for frame in frames:
                 existing = db.execute(
@@ -172,9 +208,60 @@ class CalibrationDataStore:
                     recall=excluded.recall,
                     f1_score=excluded.f1_score
                 """, comparison)
+            for sample in verification_samples:
+                existed = db.execute(
+                    "SELECT sample_type FROM forecast_verification_samples "
+                    "WHERE sample_key=?",
+                    (sample["sample_key"],),
+                ).fetchone()
+                payload = json.dumps(
+                    sample.get("snapshot", {}),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                )
+                db.execute("""
+                    INSERT INTO forecast_verification_samples(
+                        sample_key, sample_type, target_id, nominal_minute,
+                        observed_at, latitude, longitude,
+                        buienradar_average_mm_h, buienradar_total_mm,
+                        own_status, own_distance_km, own_eta_minutes,
+                        own_passage, own_confidence, own_forecast_available,
+                        warning_stage, snapshot_json
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(sample_key) DO UPDATE SET
+                        observed_at=excluded.observed_at,
+                        latitude=excluded.latitude,
+                        longitude=excluded.longitude,
+                        buienradar_average_mm_h=excluded.buienradar_average_mm_h,
+                        buienradar_total_mm=excluded.buienradar_total_mm,
+                        own_status=excluded.own_status,
+                        own_distance_km=excluded.own_distance_km,
+                        own_eta_minutes=excluded.own_eta_minutes,
+                        own_passage=excluded.own_passage,
+                        own_confidence=excluded.own_confidence,
+                        own_forecast_available=excluded.own_forecast_available,
+                        warning_stage=excluded.warning_stage,
+                        snapshot_json=excluded.snapshot_json
+                """, (
+                    sample["sample_key"], sample["sample_type"],
+                    sample.get("target_id", "home"), sample["nominal_minute"],
+                    sample["observed_at"], sample.get("latitude"),
+                    sample.get("longitude"), sample.get("buienradar_average_mm_h"),
+                    sample.get("buienradar_total_mm"), sample.get("own_status"),
+                    sample.get("own_distance_km"), sample.get("own_eta_minutes"),
+                    sample.get("own_passage"), sample.get("own_confidence"),
+                    int(bool(sample.get("own_forecast_available"))),
+                    sample.get("warning_stage"), payload,
+                ))
+                if existed is None:
+                    self._totals["verification_samples"] += 1
+                    if sample["sample_type"] == "warning_sent":
+                        self._totals["warning_samples"] += 1
         return {
             "frames_written": len(frames),
             "comparisons_written": len(comparisons),
+            "verification_samples_written": len(verification_samples),
             **self.statistics(),
         }
 
@@ -191,6 +278,8 @@ class CalibrationDataStore:
             "total_frames": self._totals["frames"],
             "total_datapoints": self._totals["datapoints"],
             "total_comparisons": self._totals["comparisons"],
+            "total_verification_samples": self._totals["verification_samples"],
+            "total_warning_samples": self._totals["warning_samples"],
             "sources": len(self._sources),
             "regions": len(self._regions),
             "oldest_timestamp": self._oldest_timestamp,

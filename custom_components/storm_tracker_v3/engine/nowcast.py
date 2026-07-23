@@ -28,14 +28,18 @@ def _target_forecast(storm, motion: dict, *, now_utc: datetime | None = None) ->
         "forecast_intensity_label": None,
         "intensity_trend_dbz_per_hour": None,
         "forecast_block_reason": None,
+        "forecast_motion_model": getattr(storm, "motion_model", "none"),
     }
     if storm.tracking_status != "bevestigd":
         return {**empty, "forecast_block_reason": "systeem_nog_niet_bevestigd"}
     if storm.confidence not in {"Matig", "Hoog"}:
         return {**empty, "forecast_block_reason": "bewegingsvector_onvoldoende_betrouwbaar"}
     minutes = motion.get("closest_pass_minutes")
-    if minutes is None or motion.get("passage_classification") is None:
+    passage_classification = motion.get("passage_classification")
+    if minutes is None or passage_classification is None:
         return {**empty, "forecast_block_reason": "passage_nog_niet_berekenbaar"}
+    if passage_classification == "mist":
+        return {**empty, "forecast_block_reason": "geen_passage_binnen_corridor"}
     if minutes < 0 or minutes > 90:
         return {**empty, "forecast_block_reason": "buiten_prognosehorizon"}
     if not any(cell.max_dbz is not None for cell in storm.radar_cells.values()):
@@ -74,6 +78,8 @@ def _target_forecast(storm, motion: dict, *, now_utc: datetime | None = None) ->
         "forecast_intensity_dbz": round(forecast_dbz, 1),
         "forecast_intensity_label": _intensity_label(forecast_dbz),
         "intensity_trend_dbz_per_hour": round(trend, 1),
+        "forecast_block_reason": None,
+        "forecast_motion_model": getattr(storm, "motion_model", "none"),
     }
 
 
@@ -144,6 +150,8 @@ def build_precipitation_status(
         "tracked_system_distance_km": None,
         "tracked_system_centroid_distance_km": None,
         "eta_reliable": False,
+        "eta_basis": None,
+        "footprint_pass_minutes": None,
         "forecast_available": False,
         "expected_passage_at": None,
         "forecast_horizon_minutes": None,
@@ -152,6 +160,7 @@ def build_precipitation_status(
         "forecast_intensity_label": None,
         "intensity_trend_dbz_per_hour": None,
         "forecast_block_reason": None,
+        "forecast_motion_model": None,
     }
     if not active:
         return base
@@ -194,8 +203,20 @@ def build_precipitation_status(
     tracking_status = storm.tracking_status
     status = "bevestigd" if tracking_status == "bevestigd" else "waargenomen"
     if tracking_status == "bevestigd" and storm.confidence in {"Matig", "Hoog"}:
+        # Een gebogen, gevalideerd traject kan het target raken terwijl de
+        # onmiddellijke snelheidsvector nog zijdelings of zelfs licht
+        # weggericht is. In dat geval is de volledige trajectprojectie
+        # betrouwbaarder dan de raaklijn van het laatste meetpunt.
+        trajectory_passage = (
+            motion.get("eta_minutes") is not None
+            and motion.get("passage_classification") in {"raak", "rand"}
+            and motion.get("closest_pass_minutes") is not None
+            and 0 <= float(motion["closest_pass_minutes"]) <= 90
+        )
         approach_speed = motion["approach_speed_kmh"]
-        if approach_speed is not None and approach_speed > 1.0:
+        if trajectory_passage:
+            status = "naderend"
+        elif approach_speed is not None and approach_speed > 1.0:
             status = "naderend"
         elif approach_speed is not None and approach_speed < -1.0:
             status = "wegtrekkend"
@@ -241,6 +262,7 @@ def build_precipitation_status(
         "approach_speed_kmh": motion["approach_speed_kmh"],
         "moving_towards": motion["moving_towards"],
         "eta_minutes": motion["eta_minutes"],
+        "eta_basis": motion.get("eta_basis"),
         "eta_reliable": (
             tracking_status == "bevestigd"
             and storm.confidence in {"Matig", "Hoog"}
@@ -249,11 +271,25 @@ def build_precipitation_status(
         "closest_pass_distance_km": motion["closest_pass_distance_km"],
         "closest_pass_minutes": motion["closest_pass_minutes"],
         "footprint_pass_distance_km": motion["footprint_pass_distance_km"],
+        "footprint_pass_minutes": motion.get("footprint_pass_minutes"),
         "passage_classification": motion["passage_classification"],
         "passage_uncertainty_km": motion["passage_uncertainty_km"],
         "motion_confidence": storm.confidence,
         "motion_sample_count": getattr(storm, "motion_sample_count", 0),
         "motion_history_minutes": getattr(storm, "motion_history_minutes", 0.0),
         "motion_fit_quality": getattr(storm, "motion_fit_quality", 0.0),
+        "motion_model": getattr(storm, "motion_model", "none"),
+        "motion_basis": getattr(storm, "motion_basis", "unknown"),
+        "motion_prediction_error_km": getattr(
+            storm, "motion_prediction_error_km", None
+        ),
+        "motion_model_gain": getattr(storm, "motion_model_gain", 0.0),
+        "motion_acceleration_kmh2": round(
+            math.hypot(
+                getattr(storm, "acceleration_east_kmh2", 0.0),
+                getattr(storm, "acceleration_north_kmh2", 0.0),
+            ),
+            1,
+        ),
         **forecast,
     }

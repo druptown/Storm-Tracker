@@ -157,6 +157,16 @@ def storm_module():
 
 
 @pytest.fixture(scope="session")
+def trajectory_module():
+    """Laadt de lichte adaptieve trajectschatter."""
+    _ensure_stub_package(f"{PKG_NAME}.engine")
+    return _load_module(
+        f"{PKG_NAME}.engine.trajectory",
+        PKG_ROOT / "engine" / "trajectory.py",
+    )
+
+
+@pytest.fixture(scope="session")
 def pressure_trend_module():
     _ensure_stub_package(f"{PKG_NAME}.engine")
     return _load_module(
@@ -203,7 +213,14 @@ def ofe_module(observation_module):
 
 
 @pytest.fixture(scope="session")
-def storm_engine_module(storm_module, bounding_box_module, hull_module, geocode_module, observation_module):
+def storm_engine_module(
+    storm_module,
+    trajectory_module,
+    bounding_box_module,
+    hull_module,
+    geocode_module,
+    observation_module,
+):
     """
     engine/storm_engine.py importeert relatief: .storm, ..geometry.bounding_box,
     ..geometry.hull, ..geometry.geocode — alle vier moeten al in sys.modules

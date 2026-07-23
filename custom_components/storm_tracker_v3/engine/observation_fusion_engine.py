@@ -27,6 +27,7 @@ Versiegeschiedenis:
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import logging
 import time
 from typing import Callable
@@ -106,6 +107,24 @@ class ObservationFusionEngine:
             self._pending.clear()
             self._batch_task = None
 
+    async def async_flush_pending(self) -> int:
+        """Verwerk de huidige batch onmiddellijk en wacht tot ze klaar is.
+
+        Providercycli gebruiken dit vóór ze een gelijktijdige
+        verificatiesnapshot nemen. De normale éénsecondebatching blijft gelden
+        voor losse pushobservaties.
+        """
+        task = self._batch_task
+        current = asyncio.current_task()
+        if task is not None and task is not current and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        delivered = await self._deliver_pending()
+        if self._batch_task is task:
+            self._batch_task = None
+        return delivered
+
     # ── Interne logica ────────────────────────────────────────────────────
 
     def _is_duplicate(self, obs: Observation) -> bool:
@@ -135,10 +154,17 @@ class ObservationFusionEngine:
         self._buffer = [o for o in self._buffer if o.timestamp >= cutoff]
 
     async def _flush_batch(self) -> None:
-        await asyncio.sleep(BATCH_INTERVAL_S)
+        try:
+            await asyncio.sleep(BATCH_INTERVAL_S)
+            await self._deliver_pending()
+        finally:
+            if self._batch_task is asyncio.current_task():
+                self._batch_task = None
+
+    async def _deliver_pending(self) -> int:
         async with self._lock:
             if not self._pending:
-                return
+                return 0
             batch = list(self._pending)
             self._pending.clear()
 
@@ -153,3 +179,5 @@ class ObservationFusionEngine:
             await self._on_batch(batch)
         except Exception:
             _LOGGER.exception("ObservationFusionEngine: fout bij verwerken batch")
+            return 0
+        return len(batch)

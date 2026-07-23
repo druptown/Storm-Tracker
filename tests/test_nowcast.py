@@ -113,6 +113,25 @@ def test_target_forecast_refuses_low_confidence_or_long_horizon(nowcast_module, 
     assert forecast["forecast_block_reason"] == "bewegingsvector_onvoldoende_betrouwbaar"
 
 
+def test_target_forecast_refuses_predicted_miss(nowcast_module, storm_module):
+    storm = storm_module.Storm(
+        storm_id="miss", centroid_lat=51.0, centroid_lon=4.0,
+        heading_deg=0.0, speed_kmh=45.0, confidence="Hoog",
+    )
+    _add_frame(storm_module, storm, "one", 1_000.0, dbz=35.0)
+    _add_frame(storm_module, storm, "two", 1_300.0, lat=51.1, dbz=36.0)
+
+    forecast = nowcast_module._target_forecast(
+        storm, {
+            "closest_pass_minutes": 30,
+            "passage_classification": "mist",
+        }
+    )
+
+    assert forecast["forecast_available"] is False
+    assert forecast["forecast_block_reason"] == "geen_passage_binnen_corridor"
+
+
 def test_confirmed_system_preferred_over_closer_single_echo(nowcast_module, storm_module):
     close_echo = storm_module.Storm(storm_id="close", centroid_lat=51.0, centroid_lon=4.9)
     _add_frame(storm_module, close_echo, "close-one", 1_000.0, lat=51.0, lon=4.9)
@@ -208,6 +227,38 @@ def test_confirmed_reliable_system_reports_away_and_lateral_motion(
     result = nowcast_module.build_precipitation_status([lateral], 51.0, 5.0)
     assert result["status"] == "langs_trekkend"
     assert abs(result["approach_speed_kmh"]) <= 1
+
+
+def test_curved_validated_track_can_approach_while_tangent_is_lateral(
+    nowcast_module, storm_module,
+):
+    """De volledige baan primeert op de momentane raaklijn."""
+    storm = storm_module.Storm(
+        storm_id="curved",
+        centroid_lat=51.0,
+        centroid_lon=4.0,
+        heading_deg=0.0,
+        speed_kmh=20.0,
+        confidence="Matig",
+        motion_model="constant_acceleration",
+        velocity_east_kmh=0.0,
+        velocity_north_kmh=20.0,
+        acceleration_east_kmh2=80.0,
+        acceleration_north_kmh2=-40.0,
+        motion_prediction_error_km=1.0,
+    )
+    _add_frame(storm_module, storm, "one", 1_000.0, lat=51.0, lon=4.0)
+    _add_frame(storm_module, storm, "two", 1_300.0, lat=51.0, lon=4.0)
+    target_lon = 4.0 + 40.0 / (111.32 * 0.6293)
+
+    result = nowcast_module.build_precipitation_status(
+        [storm], 51.0, target_lon
+    )
+
+    assert abs(result["approach_speed_kmh"]) <= 1.0
+    assert result["eta_minutes"] is not None
+    assert result["passage_classification"] in {"raak", "rand"}
+    assert result["status"] == "naderend"
 
 
 def test_low_confidence_vector_keeps_confirmed_status(nowcast_module, storm_module):

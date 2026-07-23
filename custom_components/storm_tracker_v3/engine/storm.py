@@ -119,6 +119,14 @@ class Storm:
     motion_sample_count: int = 0
     motion_history_minutes: float = 0.0
     motion_fit_quality: float = 0.0
+    motion_model: str = "none"
+    motion_basis: str = "unknown"
+    motion_prediction_error_km: Optional[float] = None
+    motion_model_gain: float = 0.0
+    velocity_east_kmh: Optional[float] = None
+    velocity_north_kmh: Optional[float] = None
+    acceleration_east_kmh2: float = 0.0
+    acceleration_north_kmh2: float = 0.0
 
     # Geometrie (gecachet)
     # Voorstel pagina 9: "Eerst bounding box. Pas daarna polygon." — de
@@ -567,6 +575,7 @@ class Storm:
                 "approach_speed_kmh": None,
                 "moving_towards": None,
                 "eta_minutes": None,
+                "eta_basis": None,
                 "closest_pass_distance_km": None,
                 "closest_pass_minutes": None,
                 "footprint_pass_distance_km": None,
@@ -574,46 +583,129 @@ class Storm:
                 "passage_uncertainty_km": None,
             }
 
-        angle = abs((self.heading_deg - bearing + 180.0) % 360.0 - 180.0)
-        approach_speed = self.speed_kmh * math.cos(math.radians(angle))
-        moving_towards = approach_speed > 1.0
-        eta_minutes = None
-        if moving_towards and self.confidence != "Onvoldoende data":
-            eta_minutes = distance / approach_speed * 60.0
-        centroid_distance = _haversine_km(
-            self.centroid_lat, self.centroid_lon, target_lat, target_lon
+        samples = self._trajectory_passage_samples(
+            target_lat,
+            target_lon,
+            current_edge_distance_km=distance,
         )
-        closest_pass_distance = None
-        closest_pass_minutes = None
-        footprint_pass_distance = None
-        passage_classification = None
-        passage_uncertainty = None
-        if moving_towards and self.confidence in {"Matig", "Hoog"}:
+        if not samples:
+            return {
+                "bearing_to_target_deg": round(bearing, 1),
+                "approach_speed_kmh": None,
+                "moving_towards": None,
+                "eta_minutes": None,
+                "eta_basis": None,
+                "closest_pass_distance_km": None,
+                "closest_pass_minutes": None,
+                "footprint_pass_distance_km": None,
+                "passage_classification": None,
+                "passage_uncertainty_km": None,
+            }
+
+        current = samples[0]
+        velocity_east = (
+            self.velocity_east_kmh
+            if self.velocity_east_kmh is not None
+            else self.speed_kmh * math.sin(math.radians(self.heading_deg))
+        )
+        velocity_north = (
+            self.velocity_north_kmh
+            if self.velocity_north_kmh is not None
+            else self.speed_kmh * math.cos(math.radians(self.heading_deg))
+        )
+        approach_speed = (
+            velocity_east * math.sin(math.radians(bearing))
+            + velocity_north * math.cos(math.radians(bearing))
+        )
+        moving_towards = approach_speed > 1.0
+
+        closest_centroid = min(
+            samples,
+            key=lambda item: (
+                item["centroid_distance_km"],
+                item["minutes"],
+            ),
+        )
+        closest_footprint = min(
+            samples,
+            key=lambda item: (
+                item["edge_distance_km"],
+                item["minutes"],
+            ),
+        )
+        exact_hits = [
+            item for item in samples if item["edge_distance_km"] <= 0.1
+        ]
+        envelope_hits = [
+            item for item in samples
+            if item["edge_distance_km"] <= item["uncertainty_km"]
+        ]
+        eta_minutes = None
+        eta_basis = None
+        reliable_vector = self.confidence in {"Matig", "Hoog"}
+        if reliable_vector and exact_hits:
+            eta_minutes = exact_hits[0]["minutes"]
+            eta_basis = "radarcontour"
+        elif reliable_vector and envelope_hits:
+            eta_minutes = envelope_hits[0]["minutes"]
+            eta_basis = "onzekerheidscorridor"
+
+        relevant_projection = reliable_vector and (
+            moving_towards or bool(exact_hits) or bool(envelope_hits)
+        )
+        closest_pass_distance = (
+            closest_centroid["centroid_distance_km"]
+            if relevant_projection else None
+        )
+        closest_pass_minutes = (
+            closest_centroid["minutes"] if relevant_projection else None
+        )
+        if (
+            relevant_projection
+            and not self.radar_cells
+            and self.motion_model != "constant_acceleration"
+        ):
+            # Behoud voor puntvormige, lineaire systemen de nauwkeurige
+            # grootcirkel-cross-trackberekening van het bestaande contract.
+            angle = abs(
+                (self.heading_deg - bearing + 180.0) % 360.0 - 180.0
+            )
+            centroid_distance = _haversine_km(
+                self.centroid_lat,
+                self.centroid_lon,
+                target_lat,
+                target_lon,
+            )
             closest_pass_distance = centroid_distance * abs(
                 math.sin(math.radians(angle))
             )
             along_track = centroid_distance * math.cos(math.radians(angle))
             closest_pass_minutes = along_track / self.speed_kmh * 60.0
-            travel_km = self.speed_kmh * closest_pass_minutes / 60.0
-            footprint_pass_distance = self._projected_footprint_distance(
-                target_lat, target_lon, travel_km
-            )
-            passage_uncertainty = max(
-                5.0 if self.confidence == "Hoog" else 12.0,
-                travel_km * (0.12 if self.confidence == "Hoog" else 0.25),
-            )
-            if footprint_pass_distance is not None:
-                if footprint_pass_distance <= 0.1:
-                    passage_classification = "raak"
-                elif footprint_pass_distance <= passage_uncertainty:
-                    passage_classification = "rand"
-                else:
-                    passage_classification = "mist"
+        footprint_pass_distance = (
+            closest_footprint["edge_distance_km"]
+            if relevant_projection else None
+        )
+        footprint_pass_minutes = (
+            closest_footprint["minutes"] if relevant_projection else None
+        )
+        passage_uncertainty = (
+            closest_footprint["uncertainty_km"]
+            if relevant_projection else None
+        )
+        if footprint_pass_distance is None:
+            passage_classification = None
+        elif footprint_pass_distance <= 0.1:
+            passage_classification = "raak"
+        elif footprint_pass_distance <= passage_uncertainty:
+            passage_classification = "rand"
+        else:
+            passage_classification = "mist"
         return {
             "bearing_to_target_deg": round(bearing, 1),
             "approach_speed_kmh": round(approach_speed, 1),
             "moving_towards": moving_towards,
             "eta_minutes": round(eta_minutes, 0) if eta_minutes is not None else None,
+            "eta_basis": eta_basis,
             "closest_pass_distance_km": (
                 round(closest_pass_distance, 1)
                 if closest_pass_distance is not None else None
@@ -626,6 +718,10 @@ class Storm:
                 round(footprint_pass_distance, 1)
                 if footprint_pass_distance is not None else None
             ),
+            "footprint_pass_minutes": (
+                round(footprint_pass_minutes, 0)
+                if footprint_pass_minutes is not None else None
+            ),
             "passage_classification": passage_classification,
             "passage_uncertainty_km": (
                 round(passage_uncertainty, 1)
@@ -633,10 +729,127 @@ class Storm:
             ),
         }
 
+    def _trajectory_passage_samples(
+        self,
+        target_lat: float,
+        target_lon: float,
+        *,
+        current_edge_distance_km: float,
+        horizon_minutes: int = 90,
+    ) -> list[dict]:
+        """Bemonster het gekozen traject en zijn groeiende onzekerheid."""
+        if self.heading_deg is None or self.speed_kmh is None:
+            return []
+        result = []
+        linear_east = self.speed_kmh * math.sin(math.radians(self.heading_deg))
+        linear_north = self.speed_kmh * math.cos(math.radians(self.heading_deg))
+        velocity_east = (
+            self.velocity_east_kmh
+            if self.velocity_east_kmh is not None else linear_east
+        )
+        velocity_north = (
+            self.velocity_north_kmh
+            if self.velocity_north_kmh is not None else linear_north
+        )
+        for minutes in range(0, horizon_minutes + 1):
+            hours = minutes / 60.0
+            east_km = (
+                velocity_east * hours
+                + 0.5 * self.acceleration_east_kmh2 * hours * hours
+            )
+            north_km = (
+                velocity_north * hours
+                + 0.5 * self.acceleration_north_kmh2 * hours * hours
+            )
+            edge_distance = self._projected_footprint_distance(
+                target_lat,
+                target_lon,
+                east_km=east_km,
+                north_km=north_km,
+            )
+            if edge_distance is None:
+                predicted_lat = self.centroid_lat + north_km / 110.574
+                predicted_lon = self.centroid_lon + east_km / (
+                    111.32 * max(
+                        0.05,
+                        math.cos(math.radians(self.centroid_lat)),
+                    )
+                )
+                edge_distance = _haversine_km(
+                    predicted_lat,
+                    predicted_lon,
+                    target_lat,
+                    target_lon,
+                )
+            if minutes == 0:
+                edge_distance = min(edge_distance, current_edge_distance_km)
+
+            predicted_lat = self.centroid_lat + north_km / 110.574
+            predicted_lon = self.centroid_lon + east_km / (
+                111.32 * max(0.05, math.cos(math.radians(self.centroid_lat)))
+            )
+            centroid_distance = _haversine_km(
+                predicted_lat,
+                predicted_lon,
+                target_lat,
+                target_lon,
+            )
+            if not self.radar_cells:
+                # Zonder expliciete polygonen kan distance_km nog steeds de
+                # bekende afstand tot de systeemrand zijn. Behoud die actuele
+                # rand-offset bij het verschuiven van het centroid.
+                current_centroid_distance = _haversine_km(
+                    self.centroid_lat,
+                    self.centroid_lon,
+                    target_lat,
+                    target_lon,
+                )
+                footprint_radius_towards_target = max(
+                    0.0,
+                    current_centroid_distance - current_edge_distance_km,
+                )
+                edge_distance = max(
+                    0.0,
+                    centroid_distance - footprint_radius_towards_target,
+                )
+            prediction_error = max(
+                0.5,
+                float(self.motion_prediction_error_km or 0.0),
+            )
+            base_uncertainty = 4.0 if self.confidence == "Hoog" else 8.0
+            if self.confidence not in {"Matig", "Hoog"}:
+                base_uncertainty = 15.0
+            growth = prediction_error * math.sqrt(max(minutes, 1.0) / 5.0)
+            acceleration_growth = (
+                math.hypot(
+                    self.acceleration_east_kmh2,
+                    self.acceleration_north_kmh2,
+                )
+                * hours
+                * hours
+                * 0.15
+            )
+            uncertainty = min(
+                60.0,
+                base_uncertainty + growth + acceleration_growth,
+            )
+            result.append({
+                "minutes": float(minutes),
+                "edge_distance_km": edge_distance,
+                "centroid_distance_km": centroid_distance,
+                "uncertainty_km": uncertainty,
+            })
+        return result
+
     def _projected_footprint_distance(
-        self, target_lat: float, target_lon: float, travel_km: float
+        self,
+        target_lat: float,
+        target_lon: float,
+        *,
+        east_km: float,
+        north_km: float,
     ) -> Optional[float]:
-        """Afstand van target tot de verschoven actuele radarcontour."""
+        """Afstand van target tot de 2D verschoven actuele radarcontour."""
         if not self.radar_cells or self.heading_deg is None:
             return None
         latest = max(cell.timestamp for cell in self.radar_cells.values())
@@ -644,8 +857,6 @@ class Storm:
             cell for cell in self.radar_cells.values()
             if latest - cell.timestamp <= 60.0
         ]
-        east_km = travel_km * math.sin(math.radians(self.heading_deg))
-        north_km = travel_km * math.cos(math.radians(self.heading_deg))
         best: Optional[float] = None
         for cell in cells:
             points = cell.footprint_points or ((cell.lat, cell.lon),)

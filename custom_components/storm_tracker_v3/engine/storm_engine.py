@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from .storm import Storm
+from .trajectory import fit_adaptive_trajectory
 from ..geometry.bounding_box import compute_bounding_box, bounding_box_changed
 from ..geometry.hull import convex_hull, hull_radius_km
 from ..geometry.geocode import nearest_place, PlaceEntry
@@ -425,31 +426,53 @@ class StormEngine:
 
     def _update_centroid(self, storm: Storm) -> None:
         """
-        Herbereken centroid op basis van recente LIGHTNING en RADAR
-        observaties (laatste 5 min), gewogen naar recentheid.
+        Bouw de trajecthistorie primair uit afzonderlijke radarframes.
 
-        Gebruikt de timestamp van de observaties zelf (niet verwerkingstijd)
-        als referentiepunt — maakt de regressie deterministisch en
-        replay-veilig (kritieke bug uit V2, hier bewust gefixeerd).
+        Bliksemposities zijn geen veilige proxy voor de verplaatsing van de
+        neerslagcontour: nieuwe ontladingen kunnen aan een andere flank
+        ontstaan. Daarom gebruikt de neerslagprognose radarcentroids zodra die
+        beschikbaar zijn; bliksem blijft alleen een fallback.
         """
-        # Lightning-posities (meest nauwkeurig, punt-precies)
-        lightning = storm.strikes_in_window(minutes=5)  # (ts, lat, lon)
-        # Radar-posities (minder nauwkeurig, grotere pixels)
-        radar_cutoff = time.time() - 5 * 60
-        radar = [(ts, lat, lon) for ts, lat, lon, intens
-                 in storm._radar_observations if ts >= radar_cutoff]
+        cutoff = time.time() - MAX_HISTORY_AGE_MIN * 60
+        grouped: dict[float, list[tuple[float, float, float]]] = {}
+        for cell in storm.radar_cells.values():
+            if cell.timestamp < cutoff:
+                continue
+            weight = max(float(cell.area_km2), 1.0)
+            grouped.setdefault(float(cell.timestamp), []).append(
+                (cell.lat, cell.lon, weight)
+            )
 
-        all_points = [(ts, lat, lon) for ts, lat, lon in lightning] + \
-                     [(ts, lat, lon) for ts, lat, lon in radar]
-        if not all_points:
+        hist = self._history.setdefault(storm.storm_id, [])
+        if grouped:
+            existing = {round(point.ts, 3): point for point in hist}
+            for timestamp, points in grouped.items():
+                total_weight = sum(weight for _, _, weight in points)
+                existing[round(timestamp, 3)] = CentroidPoint(
+                    lat=sum(lat * weight for lat, _, weight in points)
+                    / total_weight,
+                    lon=sum(lon * weight for _, lon, weight in points)
+                    / total_weight,
+                    ts=timestamp,
+                )
+            hist[:] = sorted(existing.values(), key=lambda point: point.ts)
+            self._prune_history(storm.storm_id)
+            hist = self._history[storm.storm_id]
+            latest = hist[-1]
+            storm.centroid_lat = latest.lat
+            storm.centroid_lon = latest.lon
+            storm.motion_basis = "radar_centroid"
             return
 
-        reference_ts = max(ts for ts, _, _ in all_points)
+        lightning = storm.strikes_in_window(minutes=5)
+        if not lightning:
+            return
+        reference_ts = max(ts for ts, _, _ in lightning)
         total_weight = 0.0
         lat_sum = 0.0
         lon_sum = 0.0
 
-        for ts, lat, lon in all_points:
+        for ts, lat, lon in lightning:
             age    = reference_ts - ts
             weight = max(0.1, 1.0 - age / 300)
             lat_sum      += lat * weight
@@ -460,7 +483,6 @@ class StormEngine:
             new_lat = lat_sum / total_weight
             new_lon = lon_sum / total_weight
 
-            hist = self._history.setdefault(storm.storm_id, [])
             point = CentroidPoint(lat=new_lat, lon=new_lon, ts=reference_ts)
             if hist and abs(hist[-1].ts - reference_ts) < 1.0:
                 hist[-1] = point
@@ -470,6 +492,7 @@ class StormEngine:
 
             storm.centroid_lat = new_lat
             storm.centroid_lon = new_lon
+            storm.motion_basis = "lightning_fallback"
 
     def _prune_history(self, storm_id: str) -> None:
         """Verwijder oude history punten."""
@@ -484,8 +507,11 @@ class StormEngine:
 
     def _update_movement(self, storm: Storm) -> None:
         """
-        Bereken richting en snelheid via lineaire regressie op centroid history.
-        Alleen als er genoeg punten zijn en de cache vervallen is.
+        Kies adaptief tussen constante snelheid en constante versnelling.
+
+        Het versnellingsmodel wordt alleen gekozen als een hindcast op de
+        laatste frames beter presteert. Zo blijft een voorspelbaar gebogen pad
+        bruikbaar, zonder elke centroidschommeling als bocht te interpreteren.
         """
         if not storm._dirty:
             return
@@ -495,13 +521,43 @@ class StormEngine:
             storm._dirty = False
             return
 
-        heading, speed = self._linear_regression(hist)
-        storm.heading_deg = heading
-        storm.speed_kmh   = speed
+        estimate = fit_adaptive_trajectory(hist)
+        if estimate is None:
+            storm._dirty = False
+            return
+        heading = estimate.heading_deg
+        speed = estimate.speed_kmh
+        if speed > 150.0 or estimate.speed_at(90.0) > 180.0:
+            _LOGGER.debug(
+                "Adaptief traject afgewezen: %.1f km/h nu, %.1f km/h op +90 min",
+                speed,
+                estimate.speed_at(90.0),
+            )
+            heading = None
+            speed = None
+        storm.heading_deg = round(heading, 1) if heading is not None else None
+        storm.speed_kmh = round(speed, 1) if speed is not None else None
         storm.motion_sample_count = len(hist)
         storm.motion_history_minutes = round((hist[-1].ts - hist[0].ts) / 60.0, 1)
-        storm.motion_fit_quality = self._fit_quality(hist)
-        storm.confidence  = self._calc_confidence(hist, heading, speed)
+        storm.motion_fit_quality = estimate.fit_quality
+        storm.motion_model = estimate.model
+        storm.motion_prediction_error_km = estimate.prediction_error_km
+        storm.motion_model_gain = round(estimate.model_gain, 3)
+        storm.velocity_east_kmh = round(estimate.velocity_east_kmh, 2)
+        storm.velocity_north_kmh = round(estimate.velocity_north_kmh, 2)
+        storm.acceleration_east_kmh2 = round(
+            estimate.acceleration_east_kmh2, 2
+        )
+        storm.acceleration_north_kmh2 = round(
+            estimate.acceleration_north_kmh2, 2
+        )
+        storm.confidence = self._calc_confidence(
+            hist,
+            heading,
+            speed,
+            fit_quality=estimate.fit_quality,
+            prediction_error_km=estimate.prediction_error_km,
+        )
         storm._dirty      = False
 
     def _linear_regression(
@@ -553,16 +609,29 @@ class StormEngine:
         hist: list[CentroidPoint],
         heading: Optional[float],
         speed: Optional[float],
+        *,
+        fit_quality: Optional[float] = None,
+        prediction_error_km: Optional[float] = None,
     ) -> str:
-        """Bereken confidence op basis van history lengte en consistentie."""
+        """Bereken confidence op basis van historie én echte hindcastfout."""
         n = len(hist)
         span_minutes = (hist[-1].ts - hist[0].ts) / 60.0 if n > 1 else 0.0
-        fit_quality = self._fit_quality(hist)
+        quality = (
+            self._fit_quality(hist) if fit_quality is None else fit_quality
+        )
+        error = math.inf if prediction_error_km is None else prediction_error_km
         if heading is None or n < MIN_HISTORY_POINTS or span_minutes < 5:
             return "Onvoldoende data"
-        if n >= 6 and span_minutes >= 15 and fit_quality >= 0.85 and speed and speed > 1:
+        if (
+            n >= 6
+            and span_minutes >= 15
+            and quality >= 0.80
+            and error <= 3.0
+            and speed
+            and speed > 1
+        ):
             return "Hoog"
-        if span_minutes >= 10 and fit_quality >= 0.60:
+        if span_minutes >= 10 and quality >= 0.55 and error <= 8.0:
             return "Matig"
         return "Laag"
 

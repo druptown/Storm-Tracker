@@ -52,3 +52,49 @@ def test_repeated_frame_is_replaced_not_duplicated(
         assert db.execute(
             "SELECT max_intensity FROM frame_points"
         ).fetchone()[0] == 5.0
+
+
+def test_store_persists_forecast_and_warning_verification_samples(
+    calibration_store_module, tmp_path,
+):
+    store = calibration_store_module.CalibrationDataStore(
+        str(tmp_path / "calibration.sqlite3")
+    )
+    store.initialize()
+    base = {
+        "target_id": "home",
+        "nominal_minute": 123,
+        "observed_at": 7380.0,
+        "latitude": 51.0,
+        "longitude": 4.0,
+        "buienradar_average_mm_h": 0.4,
+        "buienradar_total_mm": 1.2,
+        "own_status": "naderend",
+        "own_distance_km": 20.0,
+        "own_eta_minutes": 25.0,
+        "own_passage": "rand",
+        "own_confidence": "Matig",
+        "own_forecast_available": True,
+        "warning_stage": "dichtbij",
+        "snapshot": {"radar_source": "kmi", "eta_reliable": True},
+    }
+    result = store.write_batch({
+        "frames": (), "comparisons": (),
+        "verification_samples": (
+            {**base, "sample_key": "cycle:home:123", "sample_type": "cycle"},
+            {
+                **base,
+                "sample_key": "warning:home:123:dichtbij",
+                "sample_type": "warning_sent",
+            },
+        ),
+    })
+    assert result["total_verification_samples"] == 2
+    assert result["total_warning_samples"] == 1
+    with sqlite3.connect(store.path) as db:
+        row = db.execute(
+            "SELECT buienradar_average_mm_h, own_eta_minutes, snapshot_json "
+            "FROM forecast_verification_samples WHERE sample_type='cycle'"
+        ).fetchone()
+    assert row[0:2] == (0.4, 25.0)
+    assert '"eta_reliable":true' in row[2]
