@@ -1,15 +1,18 @@
-"""Targetgerichte Open-Meteo-modelverwachtingen voor Storm Tracker V3.
+"""Targetgerichte Open-Meteo-modelbegeleiding voor Storm Tracker V3.
 
-Open-Meteo is een weermodelprovider, geen radarbron. Deze provider vraagt
-uitsluitend de actuele targetlocaties op en levert per target een onafhankelijke
-90-minutencontrole. De resultaten mogen daarom niet als ruimtelijke
-radarobservaties naar de Observation Fusion Engine worden gestuurd.
+Open-Meteo is een weermodelprovider, geen radar- of grondwaarheidsbron. Deze
+provider vraagt uitsluitend de actuele targetlocaties op en levert per target
+compacte neerslag-, convectie-, druk- en windbegeleiding. De resultaten mogen
+daarom niet als ruimtelijke radarobservaties naar de Observation Fusion Engine
+worden gestuurd en mogen lokale radar- of bliksemwaarschuwingen niet
+onderdrukken.
 """
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import logging
+import math
 import time
 from typing import Any, AsyncIterator, Mapping, Optional
 
@@ -22,7 +25,44 @@ TIMEOUT_S = 15
 CACHE_TTL_S = 30 * 60
 INITIAL_BACKOFF_S = 30 * 60
 MAX_BACKOFF_S = 6 * 60 * 60
-FORECAST_STEPS_15M = 7
+FORECAST_STEPS_15M = 13
+OPERATIONAL_STEPS_15M = 7
+FORECAST_HOURS = 6
+
+# Negentien velden blijft bij het huidige targetaantal ruim onder de gratis
+# Open-Meteo-limieten, ook wanneer bewegende targets de cache om de vijf
+# minuten ongeldig maken. De bron blijft modelbegeleiding: ruwe waarden worden
+# opgeslagen, maar nog niet rechtstreeks in waarschuwingen gewogen.
+CURRENT_VARIABLES = (
+    "precipitation",
+)
+MINUTELY_15_VARIABLES = (
+    "precipitation",
+    "rain",
+    "showers",
+    "cape",
+    "lightning_potential",
+    "wind_gusts_10m",
+    "weather_code",
+    "freezing_level_height",
+)
+HOURLY_VARIABLES = (
+    "precipitation_probability",
+    "pressure_msl",
+    "lifted_index",
+    "convective_inhibition",
+    "wind_speed_850hPa",
+    "wind_direction_850hPa",
+    "wind_speed_700hPa",
+    "wind_direction_700hPa",
+    "relative_humidity_700hPa",
+    "cloud_cover",
+)
+REQUESTED_VARIABLE_COUNT = (
+    len(CURRENT_VARIABLES)
+    + len(MINUTELY_15_VARIABLES)
+    + len(HOURLY_VARIABLES)
+)
 
 
 def _utc_iso(timestamp: float | None) -> str | None:
@@ -36,6 +76,38 @@ def _float(value: Any, default: float = 0.0) -> float:
         return float(value if value is not None else default)
     except (TypeError, ValueError):
         return default
+
+
+def _optional_float(value: Any) -> float | None:
+    """Behoud ontbrekende modelwaarden als onbekend in plaats van droog/nul."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _series(
+    section: Mapping[str, Any],
+    key: str,
+    limit: int,
+) -> list[float | None]:
+    raw = section.get(key, ())
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [_optional_float(value) for value in raw[:limit]]
+
+
+def _available(series: list[float | None]) -> list[float]:
+    return [value for value in series if value is not None]
+
+
+def _first(series: list[float | None]) -> float | None:
+    return next((value for value in series if value is not None), None)
+
+
+def _rounded(value: float | None, digits: int = 2) -> float | None:
+    return round(value, digits) if value is not None else None
 
 
 def _coordinate_key(lat: float, lon: float) -> tuple[float, float]:
@@ -92,6 +164,8 @@ class OpenMeteoProvider:
         self._last_http_status: int | None = None
         self._consecutive_failures = 0
         self._last_error: str | None = None
+        self._last_targets_requested = 0
+        self._last_unique_locations = 0
 
     @staticmethod
     def _initial_result() -> dict:
@@ -115,6 +189,10 @@ class OpenMeteoProvider:
             "consecutive_failures": 0,
             "last_error": None,
             "next_retry_at": None,
+            "role": "model_guidance",
+            "requested_variable_count": REQUESTED_VARIABLE_COUNT,
+            "forecast_15m_steps": FORECAST_STEPS_15M,
+            "forecast_hours": FORECAST_HOURS,
         }
 
     def set_callback(self, cb) -> None:
@@ -140,6 +218,8 @@ class OpenMeteoProvider:
     ) -> dict:
         """Haal één compacte forecast op voor alle unieke targetlocaties."""
         coordinates, target_indices = _normalise_targets(targets)
+        self._last_targets_requested = len(target_indices)
+        self._last_unique_locations = len(coordinates)
         signature = tuple(_coordinate_key(lat, lon) for lat, lon in coordinates)
         now_mono = time.monotonic()
         now_ts = time.time()
@@ -166,9 +246,11 @@ class OpenMeteoProvider:
         params = {
             "latitude": ",".join(f"{lat:.5f}" for lat, _ in coordinates),
             "longitude": ",".join(f"{lon:.5f}" for _, lon in coordinates),
-            "current": "precipitation",
-            "minutely_15": "precipitation,rain,showers",
+            "current": ",".join(CURRENT_VARIABLES),
+            "minutely_15": ",".join(MINUTELY_15_VARIABLES),
             "forecast_minutely_15": str(FORECAST_STEPS_15M),
+            "hourly": ",".join(HOURLY_VARIABLES),
+            "forecast_hours": str(FORECAST_HOURS),
             "timezone": "UTC",
         }
 
@@ -235,9 +317,23 @@ class OpenMeteoProvider:
         forecast_values = [
             item["forecast_90m_max_mm"] for item in target_results.values()
         ]
-        max_precipitation = max(current_values + forecast_values, default=0.0)
-        wet_now = sum(value > 0 for value in current_values)
-        wet_forecast = sum(value > 0 for value in forecast_values)
+        known_current = [value for value in current_values if value is not None]
+        known_forecast = [
+            value for value in forecast_values if value is not None
+        ]
+        known_precipitation = known_current + known_forecast
+        max_precipitation = (
+            max(known_precipitation) if known_precipitation else None
+        )
+        wet_now = (
+            sum(value > 0 for value in known_current)
+            if known_current else None
+        )
+        wet_forecast = (
+            sum(value > 0 for value in known_forecast)
+            if known_forecast else None
+        )
+        any_wet = bool(wet_now or wet_forecast)
 
         self._fetch_sequence += 1
         self._last_success_ts = time.time()
@@ -248,30 +344,46 @@ class OpenMeteoProvider:
         self._consecutive_failures = 0
         self._last_error = None
         self._last_result = {
-            "is_raining": wet_now > 0,
-            "max_precipitation": round(max_precipitation, 2),
-            "wet_points": sum(
-                current > 0 or forecast > 0
-                for current, forecast in zip(current_values, forecast_values)
+            "is_raining": (
+                wet_now > 0 if wet_now is not None else None
+            ),
+            "max_precipitation": _rounded(max_precipitation),
+            "wet_points": (
+                sum(
+                    (current is not None and current > 0)
+                    or (forecast is not None and forecast > 0)
+                    for current, forecast in zip(
+                        current_values, forecast_values
+                    )
+                )
+                if known_precipitation else None
             ),
             "wet_now": wet_now,
             "wet_forecast_90m": wet_forecast,
             "total_points": len(coordinates),
             "targets_requested": len(target_indices),
             "targets_received": len(target_results),
-            "gear": "HIGH" if wet_now or wet_forecast else "LOW",
+            "gear": (
+                "HIGH" if any_wet
+                else "LOW" if known_precipitation
+                else "PARTIAL"
+            ),
             "provider_status": "ok",
             "target_results": target_results,
             "fetch_sequence": self._fetch_sequence,
+            "role": "model_guidance",
+            "requested_variable_count": REQUESTED_VARIABLE_COUNT,
+            "forecast_15m_steps": FORECAST_STEPS_15M,
+            "forecast_hours": FORECAST_HOURS,
         }
         _LOGGER.info(
             "Open-Meteo: %d targets via %d unieke locaties; nu %d nat; "
             "komende 90 min %d nat; max %.2f mm/15min",
             len(target_indices),
             len(coordinates),
-            wet_now,
-            wet_forecast,
-            max_precipitation,
+            wet_now or 0,
+            wet_forecast or 0,
+            max_precipitation or 0.0,
         )
         return self._runtime_result()
 
@@ -317,6 +429,12 @@ class OpenMeteoProvider:
             "last_http_status": self._last_http_status,
             "consecutive_failures": self._consecutive_failures,
             "last_error": self._last_error,
+            "role": "model_guidance",
+            "requested_variable_count": REQUESTED_VARIABLE_COUNT,
+            "forecast_15m_steps": FORECAST_STEPS_15M,
+            "forecast_hours": FORECAST_HOURS,
+            "targets_requested": self._last_targets_requested,
+            "total_points": self._last_unique_locations,
             "next_retry_at": (
                 _utc_iso(
                     time.time() + max(0.0, self._backoff_until - time.monotonic())
@@ -333,36 +451,184 @@ def _parse_location(
     requested_lat: float,
     requested_lon: float,
 ) -> dict:
-    current = _float(payload.get("current", {}).get("precipitation"))
+    current_section = payload.get("current", {})
+    if not isinstance(current_section, Mapping):
+        current_section = {}
+    current = _optional_float(current_section.get("precipitation"))
     minutely = payload.get("minutely_15", {})
-    precipitation = [
-        _float(value) for value in minutely.get("precipitation", [])
-    ][:FORECAST_STEPS_15M]
-    rain = [_float(value) for value in minutely.get("rain", [])][
-        :FORECAST_STEPS_15M
-    ]
-    showers = [_float(value) for value in minutely.get("showers", [])][
-        :FORECAST_STEPS_15M
-    ]
+    if not isinstance(minutely, Mapping):
+        minutely = {}
+    hourly = payload.get("hourly", {})
+    if not isinstance(hourly, Mapping):
+        hourly = {}
+
+    precipitation = _series(
+        minutely, "precipitation", FORECAST_STEPS_15M
+    )
+    rain = _series(minutely, "rain", FORECAST_STEPS_15M)
+    showers = _series(minutely, "showers", FORECAST_STEPS_15M)
+    cape = _series(minutely, "cape", FORECAST_STEPS_15M)
+    lightning_potential = _series(
+        minutely, "lightning_potential", FORECAST_STEPS_15M
+    )
+    gusts = _series(minutely, "wind_gusts_10m", FORECAST_STEPS_15M)
+    weather_code = _series(
+        minutely, "weather_code", FORECAST_STEPS_15M
+    )
+    freezing_level = _series(
+        minutely, "freezing_level_height", FORECAST_STEPS_15M
+    )
+
+    precipitation_probability = _series(
+        hourly, "precipitation_probability", FORECAST_HOURS
+    )
+    pressure_msl = _series(hourly, "pressure_msl", FORECAST_HOURS)
+    lifted_index = _series(hourly, "lifted_index", FORECAST_HOURS)
+    inhibition = _series(
+        hourly, "convective_inhibition", FORECAST_HOURS
+    )
+    wind_speed_850 = _series(hourly, "wind_speed_850hPa", FORECAST_HOURS)
+    wind_direction_850 = _series(
+        hourly, "wind_direction_850hPa", FORECAST_HOURS
+    )
+    wind_speed_700 = _series(hourly, "wind_speed_700hPa", FORECAST_HOURS)
+    wind_direction_700 = _series(
+        hourly, "wind_direction_700hPa", FORECAST_HOURS
+    )
+    relative_humidity_700 = _series(
+        hourly, "relative_humidity_700hPa", FORECAST_HOURS
+    )
+    cloud_cover = _series(hourly, "cloud_cover", FORECAST_HOURS)
+
+    precipitation_values = _available(precipitation)
+    operational_precipitation = precipitation[:OPERATIONAL_STEPS_15M]
     wet_indices = [
-        index for index, value in enumerate(precipitation) if value > 0
+        index
+        for index, value in enumerate(operational_precipitation)
+        if value is not None and value > 0
     ]
     first_wet_minutes = wet_indices[0] * 15 if wet_indices else None
+    available_variables = [
+        key for key, values in {
+            "precipitation": precipitation,
+            "rain": rain,
+            "showers": showers,
+            "cape": cape,
+            "lightning_potential": lightning_potential,
+            "wind_gusts_10m": gusts,
+            "weather_code": weather_code,
+            "freezing_level_height": freezing_level,
+            "precipitation_probability": precipitation_probability,
+            "pressure_msl": pressure_msl,
+            "lifted_index": lifted_index,
+            "convective_inhibition": inhibition,
+            "wind_speed_850hPa": wind_speed_850,
+            "wind_direction_850hPa": wind_direction_850,
+            "wind_speed_700hPa": wind_speed_700,
+            "wind_direction_700hPa": wind_direction_700,
+            "relative_humidity_700hPa": relative_humidity_700,
+            "cloud_cover": cloud_cover,
+        }.items()
+        if _available(values)
+    ]
+    operational_values = _available(operational_precipitation)
     return {
-        "current_precipitation_mm": round(current, 2),
-        "forecast_90m_max_mm": round(max(precipitation, default=0.0), 2),
-        "forecast_90m_total_mm": round(sum(precipitation), 2),
-        "forecast_90m_wet_steps": len(wet_indices),
+        "role": "model_guidance",
+        "current_precipitation_mm": _rounded(current),
+        "forecast_90m_max_mm": _rounded(
+            max(operational_values) if operational_values else None
+        ),
+        "forecast_90m_total_mm": _rounded(
+            sum(operational_values) if operational_values else None
+        ),
+        "forecast_90m_wet_steps": (
+            len(wet_indices) if operational_values else None
+        ),
         "forecast_90m_first_wet_minutes": first_wet_minutes,
         "forecast_90m_precipitation_mm": [
-            round(value, 2) for value in precipitation
+            _rounded(value) for value in operational_precipitation
         ],
-        "forecast_90m_rain_mm": [round(value, 2) for value in rain],
-        "forecast_90m_showers_mm": [round(value, 2) for value in showers],
+        "forecast_90m_rain_mm": [
+            _rounded(value) for value in rain[:OPERATIONAL_STEPS_15M]
+        ],
+        "forecast_90m_showers_mm": [
+            _rounded(value) for value in showers[:OPERATIONAL_STEPS_15M]
+        ],
+        "forecast_3h_max_mm": _rounded(
+            max(precipitation_values) if precipitation_values else None
+        ),
+        "forecast_3h_total_mm": _rounded(
+            sum(precipitation_values) if precipitation_values else None
+        ),
+        "forecast_3h_precipitation_mm": [
+            _rounded(value) for value in precipitation
+        ],
+        "precipitation_probability_max_6h_percent": _rounded(
+            max(_available(precipitation_probability))
+            if _available(precipitation_probability) else None,
+            1,
+        ),
+        "cape_max_3h_jkg": _rounded(
+            max(_available(cape)) if _available(cape) else None,
+            1,
+        ),
+        "lightning_potential_max_3h": _rounded(
+            max(_available(lightning_potential))
+            if _available(lightning_potential) else None,
+            1,
+        ),
+        "wind_gusts_max_3h_kmh": _rounded(
+            max(_available(gusts)) if _available(gusts) else None,
+            1,
+        ),
+        "freezing_level_min_3h_m": _rounded(
+            min(_available(freezing_level))
+            if _available(freezing_level) else None,
+            0,
+        ),
+        "pressure_msl_hpa": _rounded(_first(pressure_msl), 1),
+        "lifted_index_min_6h": _rounded(
+            min(_available(lifted_index))
+            if _available(lifted_index) else None,
+            1,
+        ),
+        "convective_inhibition_min_6h_jkg": _rounded(
+            min(_available(inhibition)) if _available(inhibition) else None,
+            1,
+        ),
+        "wind_850hpa_speed_kmh": _rounded(_first(wind_speed_850), 1),
+        "wind_850hpa_direction_deg": _rounded(
+            _first(wind_direction_850), 0
+        ),
+        "wind_700hpa_speed_kmh": _rounded(_first(wind_speed_700), 1),
+        "wind_700hpa_direction_deg": _rounded(
+            _first(wind_direction_700), 0
+        ),
+        "relative_humidity_700hpa_percent": _rounded(
+            _first(relative_humidity_700), 1
+        ),
+        "cloud_cover_percent": _rounded(_first(cloud_cover), 1),
+        "convective_guidance_available": any(
+            _available(values)
+            for values in (cape, lightning_potential, lifted_index, inhibition)
+        ),
+        "aloft_wind_guidance_available": bool(
+            _first(wind_speed_700) is not None
+            and _first(wind_direction_700) is not None
+        ),
+        "available_variables": available_variables,
+        "requested_variable_count": REQUESTED_VARIABLE_COUNT,
+        "forecast_15m_steps": FORECAST_STEPS_15M,
+        "forecast_hours": FORECAST_HOURS,
         "model_latitude": _float(payload.get("latitude"), requested_lat),
         "model_longitude": _float(payload.get("longitude"), requested_lon),
         "elevation": payload.get("elevation"),
         "timezone": payload.get("timezone", "UTC"),
+        "generation_time_ms": _optional_float(
+            payload.get("generationtime_ms")
+        ),
+        "model_selection": "best_match",
+        "fifteen_minute_data_may_be_interpolated": True,
     }
 
 

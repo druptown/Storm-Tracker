@@ -1535,9 +1535,14 @@ async def _async_setup_runtime(
                     "own_forecast_available": False,
                     "snapshot": {
                         "provider": "open_meteo",
+                        "role": "model_guidance",
+                        "guidance_schema_version": 2,
                         "provider_status": result.get("provider_status"),
                         "fetch_sequence": sequence,
                         "last_success_at": result.get("last_success_at"),
+                        "requested_variable_count": result.get(
+                            "requested_variable_count"
+                        ),
                         "region_engine_id": target.get("region_engine_id"),
                         "country_code": target.get("country_code"),
                         "forecast": dict(target_result),
@@ -1916,7 +1921,7 @@ async def _async_setup_runtime(
             )
             await _bounded_provider_stage("radar", _poll_radar(), 120)
             await _bounded_provider_stage(
-                "ground_validation",
+                "ground_and_model_guidance",
                 asyncio.gather(_poll_netatmo(), _poll_open_meteo()),
                 30,
             )

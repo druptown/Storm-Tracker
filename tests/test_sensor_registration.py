@@ -80,4 +80,7 @@ def test_target_status_exposes_open_meteo_as_model_context_only() -> None:
     assert "open_meteo_status" in helper
     assert "open_meteo_max_90m_mm" in helper
     assert "open_meteo_first_wet_minutes" in helper
+    assert "open_meteo_cape_max_3h_jkg" in helper
+    assert "open_meteo_wind_700hpa_speed_kmh" in helper
+    assert "open_meteo_pressure_msl_hpa" in helper
     assert "_open_meteo_update" in source

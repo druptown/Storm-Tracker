@@ -1,85 +1,101 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "default": {
     "radar": ["rainviewer", "hsaf_h40b"],
     "lightning": ["blitzortung", "satellite_by_longitude"],
-    "ground_validation": ["open_meteo"]
+    "ground_validation": [],
+    "model_guidance": ["open_meteo"]
   },
   "countries": {
     "BE": {
       "radar": ["kmi", "opera", "rainviewer", "hsaf_h40b"],
       "lightning": ["blitzortung", "eumetsat_li"],
-      "ground_validation": ["netatmo", "open_meteo"]
+      "ground_validation": ["netatmo"],
+      "model_guidance": ["open_meteo"]
     },
     "NL": {
       "radar": ["knmi", "opera", "rainviewer", "hsaf_h40b"],
       "lightning": ["blitzortung", "eumetsat_li"],
-      "ground_validation": ["netatmo", "open_meteo"]
+      "ground_validation": ["netatmo"],
+      "model_guidance": ["open_meteo"]
     },
     "DE": {
       "radar": ["dwd_radolan", "opera", "rainviewer", "hsaf_h40b"],
       "lightning": ["blitzortung", "eumetsat_li"],
-      "ground_validation": ["netatmo", "open_meteo"]
+      "ground_validation": ["netatmo"],
+      "model_guidance": ["open_meteo"]
     },
     "FR": {
       "radar": ["meteofrance_radar", "opera", "rainviewer", "hsaf_h40b"],
       "lightning": ["blitzortung", "eumetsat_li"],
-      "ground_validation": ["netatmo", "open_meteo"]
+      "ground_validation": ["netatmo"],
+      "model_guidance": ["open_meteo"]
     },
     "AT": {
       "radar": ["opera", "rainviewer", "hsaf_h40b"],
       "lightning": ["blitzortung", "eumetsat_li"],
-      "ground_validation": ["geosphere_at", "netatmo", "open_meteo"]
+      "ground_validation": ["netatmo"],
+      "model_guidance": ["geosphere_at", "open_meteo"]
     },
     "IT": {
       "radar": ["dpc_radar", "opera", "rainviewer", "hsaf_h40b"],
       "lightning": ["blitzortung", "eumetsat_li"],
-      "ground_validation": ["italiameteo", "netatmo", "open_meteo"]
+      "ground_validation": ["netatmo"],
+      "model_guidance": ["italiameteo", "open_meteo"]
     },
     "ES": {
       "radar": ["aemet_radar", "opera", "rainviewer", "hsaf_h40b"],
       "lightning": ["blitzortung", "eumetsat_li"],
-      "ground_validation": ["netatmo", "open_meteo"]
+      "ground_validation": ["netatmo"],
+      "model_guidance": ["open_meteo"]
     },
     "LU": {
       "radar": ["opera", "rainviewer", "hsaf_h40b"],
       "lightning": ["blitzortung", "eumetsat_li"],
-      "ground_validation": ["meteolux", "netatmo", "open_meteo"]
+      "ground_validation": ["netatmo"],
+      "model_guidance": ["meteolux", "open_meteo"]
     },
     "GB": {
       "radar": ["met_office_radar", "opera", "rainviewer", "hsaf_h40b"],
       "lightning": ["blitzortung", "eumetsat_li"],
-      "ground_validation": ["open_meteo"]
+      "ground_validation": [],
+      "model_guidance": ["open_meteo"]
     },
     "US": {
       "radar": ["noaa_mrms", "rainviewer", "noaa_goes_rrqpe"],
       "lightning": ["blitzortung", "noaa_goes_glm"],
-      "ground_validation": ["open_meteo"]
+      "ground_validation": [],
+      "model_guidance": ["open_meteo"]
     },
     "CA": {
       "radar": ["msc_geomet", "noaa_mrms", "rainviewer", "noaa_goes_rrqpe"],
       "lightning": ["blitzortung", "noaa_goes_glm"],
-      "ground_validation": ["open_meteo"]
+      "ground_validation": [],
+      "model_guidance": ["open_meteo"]
     },
     "AU": {
       "radar": ["bom", "rainviewer"],
       "lightning": ["blitzortung", "satellite_by_longitude"],
-      "ground_validation": ["open_meteo"]
+      "ground_validation": [],
+      "model_guidance": ["open_meteo"]
     },
     "JP": {
       "radar": ["jma", "rainviewer"],
       "lightning": ["blitzortung", "satellite_by_longitude"],
-      "ground_validation": ["open_meteo"]
+      "ground_validation": [],
+      "model_guidance": ["open_meteo"]
     },
     "TW": {
       "radar": ["cwa_tw", "rainviewer"],
       "lightning": ["blitzortung", "cwa_tw"],
-      "ground_validation": ["open_meteo"]
+      "ground_validation": [],
+      "model_guidance": ["open_meteo"]
     },
     "CO": {
       "radar": ["ideam", "rainviewer", "noaa_goes_rrqpe"],
       "lightning": ["blitzortung", "noaa_goes_glm"],
-      "ground_validation": ["open_meteo"]
+      "ground_validation": [],
+      "model_guidance": ["open_meteo"]
     }
   }
 }

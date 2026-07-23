@@ -1,7 +1,7 @@
-# Storm Tracker V3 — providerarchitectuur 0.4.90
+# Storm Tracker V3 — providerarchitectuur 0.4.91
 
 Dit document beschrijft de effectief geïmplementeerde providerstructuur van
-Storm Tracker V3 0.4.90. Het onderscheidt operationele radar, fallbackdata,
+Storm Tracker V3 0.4.91. Het onderscheidt operationele radar, fallbackdata,
 bliksem, validatiebronnen en bronnen die alleen beleidsmatig voor toekomstige
 uitbreiding zijn voorzien.
 
@@ -42,7 +42,8 @@ wordt overgeslagen wanneer de vorige nog loopt. De volgorde is bewust vast:
 5. per RegionEngine de beste gezonde neerslagbron kiezen;
 6. alleen waarnemingen van die gekozen bron naar de juiste engine routeren;
 7. de bijbehorende echte rasteroverlay publiceren;
-8. Netatmo per RegionEngine en Open-Meteo centraal per uniek target verwerken.
+8. Netatmo als grondvalidatie per RegionEngine verwerken;
+9. Open-Meteo centraal als modelbegeleiding per uniek target verwerken.
 
 De vaste volgorde voorkomt dat een fallback al gekozen wordt voordat een lokale
 bron klaar is. De provider-lifecycle zet een nationale provider alleen aan als
@@ -52,7 +53,7 @@ zonder toepasselijke engine gaat hij van cooldown naar sleeping.
 Elke nationale provideraanroep heeft bovendien een harde timeout van twintig
 seconden en onafhankelijke nationale providers worden parallel opgehaald. Ook
 de volledige fasen zijn begrensd: nationaal 25 seconden, radarvergelijking 60
-seconden, operationele radar 120 seconden en grondvalidatie 30 seconden. Eén
+seconden, operationele radar 120 seconden en grond-/modelcontext 30 seconden. Eén
 hangende TCP-verbinding kan de vijfminutencyclus daardoor niet onbeperkt
 vasthouden. EUMETSAT LI en GOES GLM hebben elk een aparte limiet van 30 seconden.
 
@@ -88,20 +89,22 @@ bepaald uit de werkelijke producttijd en niet uit het aantal gevonden buien of
 alleen het tijdstip van de HTTP-aanvraag. Een verouderd product kan daardoor
 niet onbeperkt een actuele fallback blokkeren.
 
-## 4. Validatie- en nowcastproviders
+## 4. Grondvalidatie en modelbegeleiding
 
 | Provider | Dekking | Data | Frequentie | Gebruik |
 |---|---|---|---:|---|
 | Netatmo | Wereldwijd waar publieke stations bestaan | Regen, luchtdruk, temperatuur, vochtigheid en wind | 5 min per RegionEngine | Grondbevestiging en regionale druktrend |
-| Open-Meteo | Wereldwijd | Actuele modelneerslag en zeven kwartierstappen per uniek target | cyclus elke 5 min, echte API-cache 30 min | Onafhankelijke modelvalidatie; nooit radar of celvorming |
-| MeteoLux | Luxemburg | Lokale nowcast/validatie | 5 min wanneer nodig | Validatie; nooit operationele radar |
-| GeoSphere Austria | Oostenrijk | INCA-puntnowcast in stappen van 15 minuten | 5 min wanneer nodig | Validatie/nowcast; nooit operationele radar |
-| ItaliaMeteo | Italië | ARPAE-modelverwachting en dagelijkse/historische radarcatalogus | 5 min wanneer nodig | Validatie/forecast; nooit realtime-radar |
+| Open-Meteo | Wereldwijd | 19 modelvelden: neerslag, kans, CAPE, LPI, CIN, Lifted Index, druk, wolken, vriesniveau en wind op 700/850 hPa | cyclus elke 5 min, echte API-cache 30 min | Modelbegeleiding en historische verificatie; nooit radar, grondwaarheid of celvorming |
+| MeteoLux | Luxemburg | Lokale nowcast/modelinformatie | 5 min wanneer nodig | Modelbegeleiding; nooit operationele radar |
+| GeoSphere Austria | Oostenrijk | INCA-puntnowcast in stappen van 15 minuten | 5 min wanneer nodig | Modelbegeleiding/nowcast; nooit operationele radar |
+| ItaliaMeteo | Italië | ARPAE-modelverwachting en dagelijkse/historische radarcatalogus | 5 min wanneer nodig | Modelbegeleiding; nooit realtime-radar |
 
 Netatmo is strikt per RegionEngine geïsoleerd. Open-Meteo gebruikt één gedeelde
 broker die targets op praktisch dezelfde modelcel dedupliceert. Het antwoord
 wordt daarna per target opgeslagen en nooit naar de Observation Fusion Engine
-gerouteerd. De bestaande globale Netatmo-luchtdruksensor blijft voor
+gerouteerd. Open-Meteo staat daarom in de beleidsmatrix onder
+`model_guidance`, niet onder `ground_validation`. De bestaande globale
+Netatmo-luchtdruksensor blijft voor
 compatibiliteit bestaan, maar toont uitsluitend de trend van `zone.home`.
 
 Bij een cold start zonder bruikbare opslaghistoriek meldt de druktrend
@@ -110,7 +113,11 @@ er wordt dus geen drukval of confidencewijziging verzonnen. De legacy-sensor
 behoudt dezelfde unique ID en blijft beschikbaar, maar heeft state `unknown`
 in plaats van een foutieve `0` totdat minstens drie stations een vergelijkbaar
 60-minutenvenster leveren. Open-Meteo publiceert vóór de eerste succesvolle
-respons `INITIALIZING`, met onbekende neerslagwaarden. HTTP 429, time-outs,
+respons `INITIALIZING`, met onbekende neerslagwaarden. De eerste zeven
+kwartierstappen behouden de bestaande 90-minutensamenvatting; dertien stappen
+leveren daarnaast drie uur modelcontext en de uurlijkse velden zes uur.
+Ontbrekende optionele velden blijven `unknown` en worden nooit als nul
+geïnterpreteerd. HTTP 429, time-outs,
 verouderde cache, laatste poging, laatste succes en dataleeftijd zijn apart
 zichtbaar. Daardoor kan ontbrekende modeldata nooit als droog worden gelezen.
 

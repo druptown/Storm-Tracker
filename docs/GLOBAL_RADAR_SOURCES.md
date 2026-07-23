@@ -14,7 +14,8 @@ Voorbeeld Duitsland:
 |---|---|---|---|
 | Neerslagradar | OPERA | DWD RADOLAN | RainViewer |
 | Bliksem | Blitzortung | — | EUMETSAT LI |
-| Grondvalidatie | Netatmo | — | Open-Meteo |
+| Grondvalidatie | Netatmo | — | — |
+| Modelbegeleiding | Open-Meteo | — | — |
 
 EUMETSAT LI is dus geen neerslagradar. Het is de overkoepelende optische
 bliksembron voor het relevante Europese lengtegraadgebied.

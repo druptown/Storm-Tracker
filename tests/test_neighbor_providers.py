@@ -57,7 +57,7 @@ def test_policy_uses_real_neighbor_provider_ids():
     policy = json.loads((Path(__file__).parents[1] / "custom_components/storm_tracker_v3/provider_policy.json").read_text())
     assert "meteofrance_radar" in policy["countries"]["FR"]["radar"]
     assert "met_office_radar" in policy["countries"]["GB"]["radar"]
-    assert "meteolux" in policy["countries"]["LU"]["ground_validation"]
+    assert "meteolux" in policy["countries"]["LU"]["model_guidance"]
 
 
 def test_austria_nowcast_summary(geosphere_at_module):

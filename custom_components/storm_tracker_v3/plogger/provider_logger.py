@@ -145,6 +145,32 @@ def log_open_meteo(
         "totaal_90min_mm":        result.get("forecast_90m_total_mm"),
         "natte_stappen_90min":    result.get("forecast_90m_wet_steps"),
         "eerste_regen_minuten":   result.get("forecast_90m_first_wet_minutes"),
+        "max_neerslag_3uur_mm":   result.get("forecast_3h_max_mm"),
+        "totaal_3uur_mm":         result.get("forecast_3h_total_mm"),
+        "neerslagkans_max_6uur":  result.get(
+            "precipitation_probability_max_6h_percent"
+        ),
+        "cape_max_3uur_jkg":      result.get("cape_max_3h_jkg"),
+        "lpi_max_3uur":           result.get(
+            "lightning_potential_max_3h"
+        ),
+        "lifted_index_min_6uur":  result.get("lifted_index_min_6h"),
+        "cin_min_6uur_jkg":       result.get(
+            "convective_inhibition_min_6h_jkg"
+        ),
+        "windstoot_max_3uur_kmh": result.get("wind_gusts_max_3h_kmh"),
+        "wind_850hpa_kmh":        result.get("wind_850hpa_speed_kmh"),
+        "wind_850hpa_graden":     result.get(
+            "wind_850hpa_direction_deg"
+        ),
+        "wind_700hpa_kmh":        result.get("wind_700hpa_speed_kmh"),
+        "wind_700hpa_graden":     result.get(
+            "wind_700hpa_direction_deg"
+        ),
+        "druk_msl_hpa":           result.get("pressure_msl_hpa"),
+        "beschikbare_variabelen": _json.dumps(
+            result.get("available_variables", [])
+        ),
         "model_lat":              result.get("model_latitude"),
         "model_lon":              result.get("model_longitude"),
         "kwartierwaarden": _json.dumps(

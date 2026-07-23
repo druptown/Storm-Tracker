@@ -20,11 +20,25 @@ def test_policy_is_valid_and_germany_separates_radar_from_lightning():
 
 def test_every_country_has_core_capability_lists():
     policy = json.loads(POLICY.read_text(encoding="utf-8"))
+    assert policy["schema_version"] == 2
     for country, config in policy["countries"].items():
         assert len(country) == 2
-        for capability in ("radar", "lightning", "ground_validation"):
+        for capability in (
+            "radar", "lightning", "ground_validation", "model_guidance"
+        ):
             assert isinstance(config[capability], list)
-            assert config[capability]
+        assert config["radar"]
+        assert config["lightning"]
+        assert config["model_guidance"]
+
+
+def test_open_meteo_is_model_guidance_not_ground_truth():
+    policy = json.loads(POLICY.read_text(encoding="utf-8"))
+    assert policy["default"]["model_guidance"] == ["open_meteo"]
+    assert "open_meteo" not in policy["default"]["ground_validation"]
+    for config in policy["countries"].values():
+        assert "open_meteo" in config["model_guidance"]
+        assert "open_meteo" not in config["ground_validation"]
 
 
 def test_italy_uses_dpc_before_composite_fallbacks():
