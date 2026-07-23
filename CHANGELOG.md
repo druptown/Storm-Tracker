@@ -1,5 +1,18 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.87
+
+- Scheidt de dichtstbijzijnde actuele buienrand van het systeem dat voor
+  beweging en prognose wordt gevolgd.
+- `distance_km` blijft de operationele veiligheidsafstand en verwijst nu altijd
+  naar de dichtstbijzijnde waargenomen neerslagrand.
+- Voegt afzonderlijke rand- en centrumafstanden toe voor de dichtstbijzijnde
+  neerslag en het gevolgde systeem.
+- Markeert een ETA pas als betrouwbaar bij een bevestigde bewegingsvector met
+  minstens matige betrouwbaarheid.
+- Rapporteert waarom een prognose geblokkeerd blijft en toont de onderliggende
+  hoeveelheid, tijdspanne en fitkwaliteit van de bewegingsmetingen.
+
 # 0.4.86
 
 - Detecteer expliciet wanneer de gevraagde RegionEngine-radius door de rand van

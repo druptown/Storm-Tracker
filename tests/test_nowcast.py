@@ -110,6 +110,7 @@ def test_target_forecast_refuses_low_confidence_or_long_horizon(nowcast_module, 
 
     assert forecast["forecast_available"] is False
     assert forecast["expected_passage_at"] is None
+    assert forecast["forecast_block_reason"] == "bewegingsvector_onvoldoende_betrouwbaar"
 
 
 def test_confirmed_system_preferred_over_closer_single_echo(nowcast_module, storm_module):
@@ -125,6 +126,16 @@ def test_confirmed_system_preferred_over_closer_single_echo(nowcast_module, stor
     )
 
     assert result["storm_id"] == "confirmed"
+    assert result["nearest_precipitation_storm_id"] == "close"
+    assert result["distance_km"] < 10
+    assert result["nearest_precipitation_distance_km"] == result["distance_km"]
+    assert result["nearest_precipitation_frames"] == 1
+    assert result["nearest_precipitation_max_dbz"] == 35.0
+    assert result["tracked_system_distance_km"] > result["distance_km"]
+    assert (
+        result["nearest_precipitation_centroid_distance_km"]
+        < result["tracked_system_centroid_distance_km"]
+    )
     assert result["status"] == "bevestigd"
     assert result["active_system_count"] == 2
 
@@ -210,3 +221,5 @@ def test_low_confidence_vector_keeps_confirmed_status(nowcast_module, storm_modu
     assert result["status"] == "bevestigd"
     assert result["moving_towards"] is True
     assert result["motion_confidence"] == "Laag"
+    assert result["eta_reliable"] is False
+    assert result["forecast_block_reason"] == "bewegingsvector_onvoldoende_betrouwbaar"

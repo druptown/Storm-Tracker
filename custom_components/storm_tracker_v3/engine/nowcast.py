@@ -27,17 +27,19 @@ def _target_forecast(storm, motion: dict, *, now_utc: datetime | None = None) ->
         "forecast_intensity_dbz": None,
         "forecast_intensity_label": None,
         "intensity_trend_dbz_per_hour": None,
+        "forecast_block_reason": None,
     }
+    if storm.tracking_status != "bevestigd":
+        return {**empty, "forecast_block_reason": "systeem_nog_niet_bevestigd"}
+    if storm.confidence not in {"Matig", "Hoog"}:
+        return {**empty, "forecast_block_reason": "bewegingsvector_onvoldoende_betrouwbaar"}
     minutes = motion.get("closest_pass_minutes")
-    if (
-        storm.tracking_status != "bevestigd"
-        or storm.confidence not in {"Matig", "Hoog"}
-        or minutes is None
-        or minutes < 0
-        or minutes > 90
-        or motion.get("passage_classification") is None
-    ):
-        return empty
+    if minutes is None or motion.get("passage_classification") is None:
+        return {**empty, "forecast_block_reason": "passage_nog_niet_berekenbaar"}
+    if minutes < 0 or minutes > 90:
+        return {**empty, "forecast_block_reason": "buiten_prognosehorizon"}
+    if not any(cell.max_dbz is not None for cell in storm.radar_cells.values()):
+        return {**empty, "forecast_block_reason": "intensiteit_onbekend"}
 
     cells = [cell for cell in storm.radar_cells.values() if cell.max_dbz is not None]
     if not cells:
@@ -134,6 +136,14 @@ def build_precipitation_status(
         "pressure_delta_60m_hpa": (pressure_trend or {}).get("delta_60m_hpa"),
         "rapid_pressure_fall": (pressure_trend or {}).get("rapid_fall", False),
         "selected_reason": None,
+        "nearest_precipitation_storm_id": None,
+        "nearest_precipitation_distance_km": None,
+        "nearest_precipitation_centroid_distance_km": None,
+        "nearest_precipitation_max_dbz": None,
+        "nearest_precipitation_frames": None,
+        "tracked_system_distance_km": None,
+        "tracked_system_centroid_distance_km": None,
+        "eta_reliable": False,
         "forecast_available": False,
         "expected_passage_at": None,
         "forecast_horizon_minutes": None,
@@ -141,6 +151,7 @@ def build_precipitation_status(
         "forecast_intensity_dbz": None,
         "forecast_intensity_label": None,
         "intensity_trend_dbz_per_hour": None,
+        "forecast_block_reason": None,
     }
     if not active:
         return base
@@ -158,8 +169,28 @@ def build_precipitation_status(
         rank, reason = _candidate_rank(point, storm, motion)
         candidates.append((rank, point, storm, motion, reason))
 
-    _, point, storm, motion, selected_reason = min(candidates, key=lambda item: item[0])
-    distance, impact_lat, impact_lon = point
+    _, tracked_point, storm, motion, selected_reason = min(
+        candidates, key=lambda item: item[0]
+    )
+    _, nearest_point, nearest_storm, _, _ = min(
+        candidates, key=lambda item: float(item[1][0])
+    )
+    nearest_distance, impact_lat, impact_lon = nearest_point
+    tracked_distance = float(tracked_point[0])
+    nearest_centroid_distance = _haversine_km(
+        target_lat,
+        target_lon,
+        nearest_storm.centroid_lat,
+        nearest_storm.centroid_lon,
+    )
+    tracked_centroid_distance = _haversine_km(
+        target_lat, target_lon, storm.centroid_lat, storm.centroid_lon
+    )
+    nearest_radar_dbz = [
+        cell.max_dbz
+        for cell in nearest_storm.radar_cells.values()
+        if cell.max_dbz is not None
+    ]
     tracking_status = storm.tracking_status
     status = "bevestigd" if tracking_status == "bevestigd" else "waargenomen"
     if tracking_status == "bevestigd" and storm.confidence in {"Matig", "Hoog"}:
@@ -180,9 +211,24 @@ def build_precipitation_status(
         **base,
         "status": status,
         "storm_id": storm.storm_id,
+        "nearest_precipitation_storm_id": nearest_storm.storm_id,
         "selected_reason": selected_reason,
         "tracking_status": tracking_status,
-        "distance_km": round(distance, 1),
+        # Backwards-compatible safety distance: always the nearest observed
+        # precipitation edge, irrespective of which system has the best motion track.
+        "distance_km": round(nearest_distance, 1),
+        "nearest_precipitation_distance_km": round(nearest_distance, 1),
+        "nearest_precipitation_centroid_distance_km": round(
+            nearest_centroid_distance, 1
+        ),
+        "nearest_precipitation_max_dbz": (
+            round(max(nearest_radar_dbz), 1) if nearest_radar_dbz else None
+        ),
+        "nearest_precipitation_frames": nearest_storm.consecutive_radar_frames,
+        "tracked_system_distance_km": round(tracked_distance, 1),
+        "tracked_system_centroid_distance_km": round(
+            tracked_centroid_distance, 1
+        ),
         "impact_lat": round(impact_lat, 4),
         "impact_lon": round(impact_lon, 4),
         "system_lat": round(storm.centroid_lat, 4),
@@ -195,11 +241,19 @@ def build_precipitation_status(
         "approach_speed_kmh": motion["approach_speed_kmh"],
         "moving_towards": motion["moving_towards"],
         "eta_minutes": motion["eta_minutes"],
+        "eta_reliable": (
+            tracking_status == "bevestigd"
+            and storm.confidence in {"Matig", "Hoog"}
+            and motion["eta_minutes"] is not None
+        ),
         "closest_pass_distance_km": motion["closest_pass_distance_km"],
         "closest_pass_minutes": motion["closest_pass_minutes"],
         "footprint_pass_distance_km": motion["footprint_pass_distance_km"],
         "passage_classification": motion["passage_classification"],
         "passage_uncertainty_km": motion["passage_uncertainty_km"],
         "motion_confidence": storm.confidence,
+        "motion_sample_count": getattr(storm, "motion_sample_count", 0),
+        "motion_history_minutes": getattr(storm, "motion_history_minutes", 0.0),
+        "motion_fit_quality": getattr(storm, "motion_fit_quality", 0.0),
         **forecast,
     }
