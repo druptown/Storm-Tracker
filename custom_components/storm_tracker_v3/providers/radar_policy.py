@@ -164,6 +164,8 @@ def _confirmed_footprint_points(
                 and reference_point not in confirmed
             ):
                 confirmed.append(reference_point)
+    if len(confirmed) >= 3 and confirmed[0] != confirmed[-1]:
+        confirmed.append(confirmed[0])
     return tuple(confirmed)
 
 
