@@ -229,9 +229,12 @@ async def _async_setup_runtime(
     )
     hass.data[DOMAIN]["netatmo_pressure_trends_by_engine"] = {}
     hass.data[DOMAIN]["netatmo_observations_by_engine"] = {}
-    hass.data[DOMAIN]["open_meteo_providers_by_engine"] = {}
-    hass.data[DOMAIN]["open_meteo_results_by_engine"] = {}
-    hass.data[DOMAIN]["open_meteo_processed_sequences_by_engine"] = {}
+    from .providers.open_meteo import OpenMeteoProvider
+    open_meteo_provider = OpenMeteoProvider(session=http_session)
+    hass.data[DOMAIN]["open_meteo"] = open_meteo_provider
+    hass.data[DOMAIN]["open_meteo_result"] = open_meteo_provider.last_result
+    hass.data[DOMAIN]["open_meteo_results_by_target"] = {}
+    hass.data[DOMAIN]["open_meteo_processed_sequence"] = 0
 
     # ── StormEngine + OFE aanmaken ────────────────────────────────────────
     mcs_store = McsHistoryStore(hass)
@@ -847,35 +850,16 @@ async def _async_setup_runtime(
                 )
             _pressure_tracker_for_region(region)
 
-    def _sync_region_open_meteo_providers() -> None:
-        """Houd het Open-Meteo-modelgrid strikt per RegionEngine gescheiden."""
-        from .providers.open_meteo import OpenMeteoProvider
-
-        providers = hass.data[DOMAIN]["open_meteo_providers_by_engine"]
-        regions = {region.engine_id: region for region in storm_manager.get_all_engines()}
-        for engine_id in tuple(providers):
-            if engine_id not in regions:
-                providers.pop(engine_id, None)
-                hass.data[DOMAIN]["open_meteo_results_by_engine"].pop(engine_id, None)
-                hass.data[DOMAIN]["open_meteo_processed_sequences_by_engine"].pop(
-                    engine_id, None
-                )
-        for engine_id, region in regions.items():
-            provider = providers.get(engine_id)
-            if (
-                provider is None
-                or abs(provider._lat - region.center_lat) > 0.01
-                or abs(provider._lon - region.center_lon) > 0.01
-            ):
-                providers[engine_id] = OpenMeteoProvider(
-                    region.center_lat, region.center_lon
-                )
-                _LOGGER.info(
-                    "Open-Meteo: %s gestart rond %.4f,%.4f",
-                    engine_id,
-                    region.center_lat,
-                    region.center_lon,
-                )
+    def _open_meteo_targets() -> dict[str, tuple[float, float]]:
+        """Geef uitsluitend beschikbare actuele targetlocaties aan de broker."""
+        locations = {}
+        for target_id, target in hass.data[DOMAIN].get("targets", {}).items():
+            lat = target.get("latitude")
+            lon = target.get("longitude")
+            if not target.get("available") or lat is None or lon is None:
+                continue
+            locations[target_id] = (float(lat), float(lon))
+        return locations
 
     def _sync_region_radar_providers() -> None:
         """Houd OPERA- en RainViewer-instanties gelijk aan actieve engines."""
@@ -1507,53 +1491,66 @@ async def _async_setup_runtime(
             storm_manager.route_observation(o)
 
     async def _poll_open_meteo(now=None):
-        _sync_region_open_meteo_providers()
-        providers = hass.data[DOMAIN].get("open_meteo_providers_by_engine", {})
-        if not providers:
-            return
-        engine_ids = tuple(providers)
-        results = await asyncio.gather(
-            *(providers[engine_id].fetch() for engine_id in engine_ids),
-            return_exceptions=True,
+        targets = _open_meteo_targets()
+        result = await open_meteo_provider.fetch(targets)
+        target_results = result.get("target_results", {})
+        hass.data[DOMAIN]["open_meteo_result"] = result
+        hass.data[DOMAIN]["open_meteo_results_by_target"] = target_results
+
+        sequence = int(result.get("fetch_sequence") or 0)
+        processed = int(
+            hass.data[DOMAIN].get("open_meteo_processed_sequence") or 0
         )
-        regions = {region.engine_id: region for region in storm_manager.get_all_engines()}
-        result_map = hass.data[DOMAIN]["open_meteo_results_by_engine"]
-        processed = hass.data[DOMAIN]["open_meteo_processed_sequences_by_engine"]
-        from .engine.observation import Observation, ObservationType
-        import time as _t
-        now_ts = _t.time()
-        for engine_id, result in zip(engine_ids, results):
-            if isinstance(result, Exception):
-                _LOGGER.error("Open-Meteo-poll voor %s mislukt: %s", engine_id, result)
-                continue
-            result_map[engine_id] = result
-            region = regions.get(engine_id)
-            if region is None:
-                continue
-            log_open_meteo(hass, result, region.center_lat, region.center_lon)
-            sequence = result.get("fetch_sequence", 0)
-            if not sequence or sequence == processed.get(engine_id):
-                continue
-            processed[engine_id] = sequence
-            for loc in result.get("wet_locations_now", []):
-                observation = Observation(
-                    obs_type=ObservationType.RAIN,
-                    lat=loc["lat"],
-                    lon=loc["lon"],
-                    timestamp=now_ts,
-                    rain_mm=loc["mm"],
-                    source="open_meteo",
+        if result.get("provider_status") == "ok" and sequence > processed:
+            hass.data[DOMAIN]["open_meteo_processed_sequence"] = sequence
+            observed_at = time.time()
+            nominal_minute = int(observed_at // 60)
+            target_runtime = hass.data[DOMAIN].get("targets", {})
+            for target_id, target_result in target_results.items():
+                target = target_runtime.get(target_id, {})
+                lat = float(target_result.get("requested_latitude"))
+                lon = float(target_result.get("requested_longitude"))
+                log_open_meteo(
+                    hass,
+                    {
+                        **target_result,
+                        "provider_status": result.get("provider_status"),
+                        "fetch_sequence": sequence,
+                        "last_success_at": result.get("last_success_at"),
+                    },
+                    lat,
+                    lon,
+                    target_id=target_id,
                 )
-                storm_manager.route_observation_to_engine(engine_id, observation)
-        home_region = storm_manager.get_engine_for_target("zone.home")
-        home_result = result_map.get(home_region.engine_id, {}) if home_region else {}
-        hass.data[DOMAIN]["open_meteo_result"] = home_result
-        hass.data[DOMAIN]["open_meteo"] = (
-            providers.get(home_region.engine_id) if home_region else None
-        )
+                hass.data[DOMAIN]["verification_samples_pending"].append({
+                    "sample_key": (
+                        f"open_meteo:{target_id}:{nominal_minute}"
+                    ),
+                    "sample_type": "open_meteo_forecast",
+                    "target_id": target_id,
+                    "nominal_minute": nominal_minute,
+                    "observed_at": observed_at,
+                    "latitude": lat,
+                    "longitude": lon,
+                    "own_forecast_available": False,
+                    "snapshot": {
+                        "provider": "open_meteo",
+                        "provider_status": result.get("provider_status"),
+                        "fetch_sequence": sequence,
+                        "last_success_at": result.get("last_success_at"),
+                        "region_engine_id": target.get("region_engine_id"),
+                        "country_code": target.get("country_code"),
+                        "forecast": dict(target_result),
+                    },
+                })
         hass.bus.async_fire(
             f"{DOMAIN}_open_meteo_update",
-            {"engines": sorted(result_map), **home_result},
+            {
+                "provider_status": result.get("provider_status"),
+                "gear": result.get("gear"),
+                "targets": sorted(target_results),
+                "fetch_sequence": sequence,
+            },
         )
 
     async def _poll_eumetsat_li(now=None):
@@ -1911,7 +1908,6 @@ async def _async_setup_runtime(
             return
         async with lock:
             _sync_region_radar_providers()
-            _sync_region_open_meteo_providers()
             await _bounded_provider_stage(
                 "national", _poll_national_providers(), 25
             )
@@ -2077,7 +2073,6 @@ async def _async_setup_runtime(
         hass.data[DOMAIN]["region_engines"] = storm_manager.get_all_engines()
         _sync_region_radar_providers()
         _sync_region_netatmo_providers()
-        _sync_region_open_meteo_providers()
         blitz.update_regions(_blitz_regions())
         hass.bus.async_fire(
             f"{DOMAIN}_targets_updated", {"targets": [spec.target_id]}

@@ -94,4 +94,4 @@ release notes.
 
 ## Versie
 
-De huidige integratieversie is **0.4.89**.
+De huidige integratieversie is **0.4.90**.

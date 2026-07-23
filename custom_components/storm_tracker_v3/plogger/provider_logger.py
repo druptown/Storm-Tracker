@@ -121,17 +121,33 @@ def log_netatmo(hass, obs_list: list, tracker_lat: float, tracker_lon: float) ->
     })
 
 
-def log_open_meteo(hass, result: dict, tracker_lat: float, tracker_lon: float) -> None:
+def log_open_meteo(
+    hass,
+    result: dict,
+    tracker_lat: float,
+    tracker_lon: float,
+    *,
+    target_id: str = "unknown",
+) -> None:
     import json as _json
-    _log(hass, "open_meteo.csv", {
+    # Nieuw doelgericht schema in een nieuw bestand; zo blijven historische
+    # 324-puntengridregels correct leesbaar in open_meteo.csv.
+    _log(hass, "open_meteo_targets.csv", {
         "timestamp":              datetime.now().isoformat(timespec="seconds"),
+        "target_id":              target_id,
         "tracker_lat":            round(tracker_lat, 4),
         "tracker_lon":            round(tracker_lon, 4),
-        "is_raining":             result.get("is_raining", False),
-        "natte_punten_nu":        result.get("wet_now", 0),
-        "natte_punten_90min":     result.get("wet_forecast_90m", 0),
-        "totaal_punten":          result.get("total_points", 0),
-        "max_neerslag_mm":        result.get("max_precipitation", 0),
-        "locaties_nu":            _json.dumps(result.get("wet_locations_now", [])),
-        "locaties_forecast":      _json.dumps(result.get("wet_locations_forecast", [])),
+        "provider_status":        result.get("provider_status"),
+        "fetch_sequence":         result.get("fetch_sequence"),
+        "last_success_at":        result.get("last_success_at"),
+        "neerslag_nu_mm":         result.get("current_precipitation_mm"),
+        "max_neerslag_90min_mm":  result.get("forecast_90m_max_mm"),
+        "totaal_90min_mm":        result.get("forecast_90m_total_mm"),
+        "natte_stappen_90min":    result.get("forecast_90m_wet_steps"),
+        "eerste_regen_minuten":   result.get("forecast_90m_first_wet_minutes"),
+        "model_lat":              result.get("model_latitude"),
+        "model_lon":              result.get("model_longitude"),
+        "kwartierwaarden": _json.dumps(
+            result.get("forecast_90m_precipitation_mm", [])
+        ),
     })

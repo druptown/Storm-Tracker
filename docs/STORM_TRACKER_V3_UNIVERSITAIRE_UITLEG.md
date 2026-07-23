@@ -2,7 +2,7 @@
 
 ## Van heterogene weerdata naar persoonsgebonden waarschuwingen
 
-**Versie van de integratie bij opmaak:** 0.4.89
+**Versie van de integratie bij opmaak:** 0.4.90
 **Datum:** 23 juli 2026
 
 ## Samenvatting
@@ -410,7 +410,9 @@ Na een Home Assistant-herstart blijft de druktrend daarom eerst `initializing`,
 als extreme drukval geïnterpreteerd.
 
 Open-Meteo en beschikbare nationale stationsbronnen worden als aanvullende
-validatie gebruikt. Ze vervangen een echte radar niet.
+validatie gebruikt. Eén centrale broker vraagt uitsluitend unieke
+targetlocaties op en bewaart per target zeven kwartierstappen. Open-Meteo wordt
+niet naar de radar-fusie gerouteerd en vervangt een echte radar niet.
 
 ## 13. Bliksem
 

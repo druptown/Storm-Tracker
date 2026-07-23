@@ -69,3 +69,15 @@ def test_home_status_uses_same_live_region_path_as_person_targets() -> None:
     assert "region.storm_engine.get_active_storms()" in rendered
     assert "data.get('storms', [])" not in rendered
     assert "_targets_updated" in rendered
+
+
+def test_target_status_exposes_open_meteo_as_model_context_only() -> None:
+    source = SENSOR_MODULE.read_text(encoding="utf-8")
+    helper = source.split("def _open_meteo_target_summary", 1)[1].split(
+        "def _cardinal_direction", 1
+    )[0]
+
+    assert "open_meteo_status" in helper
+    assert "open_meteo_max_90m_mm" in helper
+    assert "open_meteo_first_wet_minutes" in helper
+    assert "_open_meteo_update" in source

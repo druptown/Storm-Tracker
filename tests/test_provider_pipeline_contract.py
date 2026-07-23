@@ -57,7 +57,6 @@ def test_moved_target_runs_the_same_complete_cycle():
     update = _function_source("_update_secondary_target")
     assert "_sync_region_radar_providers()" in update
     assert "_sync_region_netatmo_providers()" in update
-    assert "_sync_region_open_meteo_providers()" in update
     assert "hass.async_create_task(_poll_all())" in update
 
 
@@ -66,11 +65,14 @@ def test_location_scoped_global_sources_are_region_aware():
     assert "for region in regions.values()" in radar_sync
     assert "KmiProviderFactory.supports" in radar_sync
     assert "KnmiProviderFactory.supports" in radar_sync
-    open_meteo_sync = _function_source("_sync_region_open_meteo_providers")
-    assert "for engine_id, region in regions.items()" in open_meteo_sync
+    open_meteo_targets = _function_source("_open_meteo_targets")
+    assert "target.get('available')" in open_meteo_targets
+    assert "target.get('latitude')" in open_meteo_targets
     open_meteo_poll = _function_source("_poll_open_meteo")
-    assert "route_observation_to_engine(engine_id, observation)" in open_meteo_poll
-    assert "open_meteo_results_by_engine" in open_meteo_poll
+    assert "open_meteo_provider.fetch(targets)" in open_meteo_poll
+    assert "open_meteo_results_by_target" in open_meteo_poll
+    assert "route_observation" not in open_meteo_poll
+    assert "open_meteo_forecast" in open_meteo_poll
 
 
 def test_knmi_health_uses_frame_time_even_when_frame_is_dry():

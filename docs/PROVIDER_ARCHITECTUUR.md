@@ -1,7 +1,7 @@
-# Storm Tracker V3 — providerarchitectuur 0.4.85
+# Storm Tracker V3 — providerarchitectuur 0.4.90
 
 Dit document beschrijft de effectief geïmplementeerde providerstructuur van
-Storm Tracker V3 0.4.85. Het onderscheidt operationele radar, fallbackdata,
+Storm Tracker V3 0.4.90. Het onderscheidt operationele radar, fallbackdata,
 bliksem, validatiebronnen en bronnen die alleen beleidsmatig voor toekomstige
 uitbreiding zijn voorzien.
 
@@ -22,11 +22,13 @@ eigen engine met een eigen:
 - radarbronkeuze;
 - OPERA- en RainViewer-provider;
 - Netatmo-stationset en luchtdrukhistoriek;
-- Open-Meteo-modelgrid en resultaat;
 - weersystemen, bewegingen, verwachtingen en targetprojecties.
 
 Hierdoor kunnen bijvoorbeeld België en Miami gelijktijdig worden bewaakt zonder
 dat waarnemingen, druktrends of modeldata tussen beide regio's worden vermengd.
+Open-Meteo is bewust centraal en targetgericht: één broker bundelt alle unieke
+targetlocaties, maar publiceert ieder antwoord weer uitsluitend bij het
+bijbehorende target.
 
 ## 2. Gecoördineerde providercyclus
 
@@ -40,7 +42,7 @@ wordt overgeslagen wanneer de vorige nog loopt. De volgorde is bewust vast:
 5. per RegionEngine de beste gezonde neerslagbron kiezen;
 6. alleen waarnemingen van die gekozen bron naar de juiste engine routeren;
 7. de bijbehorende echte rasteroverlay publiceren;
-8. Netatmo en Open-Meteo per RegionEngine verwerken.
+8. Netatmo per RegionEngine en Open-Meteo centraal per uniek target verwerken.
 
 De vaste volgorde voorkomt dat een fallback al gekozen wordt voordat een lokale
 bron klaar is. De provider-lifecycle zet een nationale provider alleen aan als
@@ -91,22 +93,26 @@ niet onbeperkt een actuele fallback blokkeren.
 | Provider | Dekking | Data | Frequentie | Gebruik |
 |---|---|---|---:|---|
 | Netatmo | Wereldwijd waar publieke stations bestaan | Regen, luchtdruk, temperatuur, vochtigheid en wind | 5 min per RegionEngine | Grondbevestiging en regionale druktrend |
-| Open-Meteo | Wereldwijd | Actuele neerslag en 90-minutenmodel rond een regionaal grid | cyclus elke 5 min, echte API-cache 30 min | Modelvalidatie en aanvullende regenwaarnemingen |
+| Open-Meteo | Wereldwijd | Actuele modelneerslag en zeven kwartierstappen per uniek target | cyclus elke 5 min, echte API-cache 30 min | Onafhankelijke modelvalidatie; nooit radar of celvorming |
 | MeteoLux | Luxemburg | Lokale nowcast/validatie | 5 min wanneer nodig | Validatie; nooit operationele radar |
 | GeoSphere Austria | Oostenrijk | INCA-puntnowcast in stappen van 15 minuten | 5 min wanneer nodig | Validatie/nowcast; nooit operationele radar |
 | ItaliaMeteo | Italië | ARPAE-modelverwachting en dagelijkse/historische radarcatalogus | 5 min wanneer nodig | Validatie/forecast; nooit realtime-radar |
 
-Netatmo en Open-Meteo zijn strikt per RegionEngine geïsoleerd. De bestaande
-globale Netatmo-luchtdruksensor blijft voor compatibiliteit bestaan, maar toont
-uitsluitend de trend van `zone.home`.
+Netatmo is strikt per RegionEngine geïsoleerd. Open-Meteo gebruikt één gedeelde
+broker die targets op praktisch dezelfde modelcel dedupliceert. Het antwoord
+wordt daarna per target opgeslagen en nooit naar de Observation Fusion Engine
+gerouteerd. De bestaande globale Netatmo-luchtdruksensor blijft voor
+compatibiliteit bestaan, maar toont uitsluitend de trend van `zone.home`.
 
 Bij een cold start zonder bruikbare opslaghistoriek meldt de druktrend
 `onvoldoende_data`. Delta's blijven leeg en `rapid_pressure_fall` blijft false;
 er wordt dus geen drukval of confidencewijziging verzonnen. De legacy-sensor
 behoudt dezelfde unique ID en blijft beschikbaar, maar heeft state `unknown`
 in plaats van een foutieve `0` totdat minstens drie stations een vergelijkbaar
-60-minutenvenster leveren. Een lege Open-Meteo-cache staat op `initializing`,
-bevat geen natte punten en wordt niet naar de fusion engine gerouteerd.
+60-minutenvenster leveren. Open-Meteo publiceert vóór de eerste succesvolle
+respons `INITIALIZING`, met onbekende neerslagwaarden. HTTP 429, time-outs,
+verouderde cache, laatste poging, laatste succes en dataleeftijd zijn apart
+zichtbaar. Daardoor kan ontbrekende modeldata nooit als droog worden gelezen.
 
 ## 5. Bliksemproviders
 

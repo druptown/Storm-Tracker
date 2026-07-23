@@ -1,5 +1,22 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.90
+
+- Vervang de 324-puntencirkel per RegionEngine door één centrale,
+  targetgerichte Open-Meteo-broker.
+- Dedupliceer personen op praktisch dezelfde locatie tot één modelpunt en
+  gebruik de gedocumenteerde multi-coordinate GET-interface.
+- Beperk de Open-Meteo-forecast werkelijk tot zeven kwartierstappen; de oude
+  code nam onbedoeld het maximum over de volledige standaardforecast.
+- Houd Open-Meteo volledig uit radarcelvorming en de Observation Fusion
+  Engine: het is modelcontext en verificatie, geen radarwaarneming.
+- Maak `initializing`, `rate_limited`, `stale`, time-outs, laatste poging,
+  laatste succes, dataleeftijd en fouttellers expliciet zichtbaar. Een nooit
+  opgehaalde beginwaarde kan daardoor niet meer als droog weer doorgaan.
+- Publiceer de modelverwachting per target in de bestaande neerslagstatussen
+  en bewaar iedere succesvolle targetforecast in CSV én de permanente
+  kalibratiedatabase.
+
 # 0.4.89
 
 - Maak in iedere targetstatus expliciet zichtbaar of de dichtstbijzijnde

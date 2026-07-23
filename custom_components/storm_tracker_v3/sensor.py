@@ -87,6 +87,24 @@ def _apply_source_transition(result: dict, transition: dict | None) -> None:
     result["forecast_confidence_percent"] = max(0, confidence - penalty)
 
 
+def _open_meteo_target_summary(data: dict, target_id: str) -> dict:
+    """Publiceer modelcontext zonder ze als radarwaarneming te behandelen."""
+    aggregate = data.get("open_meteo_result", {})
+    details = data.get("open_meteo_results_by_target", {}).get(target_id, {})
+    return {
+        "open_meteo_status": aggregate.get("provider_status", "initializing"),
+        "open_meteo_last_success": aggregate.get("last_success_at"),
+        "open_meteo_data_age_seconds": aggregate.get("data_age_seconds"),
+        "open_meteo_current_mm": details.get("current_precipitation_mm"),
+        "open_meteo_max_90m_mm": details.get("forecast_90m_max_mm"),
+        "open_meteo_total_90m_mm": details.get("forecast_90m_total_mm"),
+        "open_meteo_first_wet_minutes": details.get(
+            "forecast_90m_first_wet_minutes"
+        ),
+        "open_meteo_wet_steps_90m": details.get("forecast_90m_wet_steps"),
+    }
+
+
 def _cardinal_direction(heading):
     """Zet een koers in graden om naar een compacte windroosrichting."""
     if heading is None:
@@ -451,18 +469,48 @@ class OpenMeteoGearSensor(StormTrackerBaseSensor):
     @property
     def native_value(self):
         result = self.hass.data.get(DOMAIN, {}).get("open_meteo_result", {})
-        return result.get("gear", "LOW")
+        return result.get("gear", "INITIALIZING")
 
     @property
     def extra_state_attributes(self):
         result = self.hass.data.get(DOMAIN, {}).get("open_meteo_result", {})
+        target_results = result.get("target_results", {})
+        home = target_results.get("home", {})
         return {
-            "is_raining":        result.get("is_raining", False),
-            "max_precipitation": result.get("max_precipitation", 0),
-            "wet_points":        result.get("wet_points", 0),
-            "wet_now":           result.get("wet_now", 0),
-            "wet_forecast_90m":  result.get("wet_forecast_90m", 0),
-            "total_points":      result.get("total_points", 0),
+            "provider_status":       result.get("provider_status", "initializing"),
+            "is_raining":            result.get("is_raining"),
+            "max_precipitation":     result.get("max_precipitation"),
+            "wet_points":            result.get("wet_points"),
+            "wet_now":               result.get("wet_now"),
+            "wet_forecast_90m":      result.get("wet_forecast_90m"),
+            "total_points":          result.get("total_points", 0),
+            "targets_requested":     result.get("targets_requested", 0),
+            "targets_received":      result.get("targets_received", 0),
+            "fetch_sequence":        result.get("fetch_sequence", 0),
+            "last_attempt_at":       result.get("last_attempt_at"),
+            "last_success_at":       result.get("last_success_at"),
+            "data_age_seconds":      result.get("data_age_seconds"),
+            "last_http_status":      result.get("last_http_status"),
+            "consecutive_failures":  result.get("consecutive_failures", 0),
+            "last_error":            result.get("last_error"),
+            "next_retry_at":         result.get("next_retry_at"),
+            "home_current_mm":       home.get("current_precipitation_mm"),
+            "home_max_90m_mm":       home.get("forecast_90m_max_mm"),
+            "home_total_90m_mm":     home.get("forecast_90m_total_mm"),
+            "home_first_wet_minutes": home.get(
+                "forecast_90m_first_wet_minutes"
+            ),
+            "target_forecasts": {
+                target_id: {
+                    "current_mm": details.get("current_precipitation_mm"),
+                    "max_90m_mm": details.get("forecast_90m_max_mm"),
+                    "total_90m_mm": details.get("forecast_90m_total_mm"),
+                    "first_wet_minutes": details.get(
+                        "forecast_90m_first_wet_minutes"
+                    ),
+                }
+                for target_id, details in sorted(target_results.items())
+            },
         }
 
 
@@ -731,6 +779,7 @@ class PrecipitationStatusSensor(StormTrackerBaseSensor):
             f"{DOMAIN}_storms_updated",
             f"{DOMAIN}_radar_source_update",
             f"{DOMAIN}_netatmo_update",
+            f"{DOMAIN}_open_meteo_update",
             f"{DOMAIN}_lightning_update",
             f"{DOMAIN}_lightning_status_update",
         ]
@@ -778,6 +827,7 @@ class PrecipitationStatusSensor(StormTrackerBaseSensor):
             "location_address": target.get("location_address"),
             "country_code": target.get("country_code"),
             "location_accuracy_km": target.get("location_accuracy_km"),
+            **_open_meteo_target_summary(data, "home"),
         }
 
     @property
@@ -810,6 +860,7 @@ class TargetPrecipitationStatusSensor(StormTrackerBaseSensor):
             f"{DOMAIN}_radar_source_update",
             f"{DOMAIN}_storms_updated",
             f"{DOMAIN}_netatmo_update",
+            f"{DOMAIN}_open_meteo_update",
             f"{DOMAIN}_lightning_update",
             f"{DOMAIN}_lightning_status_update",
         ]
@@ -871,6 +922,9 @@ class TargetPrecipitationStatusSensor(StormTrackerBaseSensor):
             "location_address": target.get("location_address"),
             "country_code": target.get("country_code"),
             "location_accuracy_km": target.get("location_accuracy_km"),
+            **_open_meteo_target_summary(
+                domain_data, self._spec.target_id
+            ),
         }
 
     @property

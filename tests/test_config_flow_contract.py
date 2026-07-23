@@ -10,7 +10,7 @@ COMPONENT = ROOT / "custom_components" / "storm_tracker_v3"
 def test_config_flow_is_enabled_and_version_matches():
     manifest = json.loads((COMPONENT / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["config_flow"] is True
-    assert manifest["version"] == "0.4.89"
+    assert manifest["version"] == "0.4.90"
 
 
 def test_config_flow_and_translations_are_valid():
