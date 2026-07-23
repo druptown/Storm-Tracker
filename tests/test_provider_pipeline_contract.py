@@ -135,13 +135,16 @@ def test_regional_radar_fetches_are_parallel_and_individually_bounded():
         assert "return_exceptions=True" in poller
 
 
-def test_source_switch_publishes_ten_minute_transition_window():
+def test_source_switch_uses_persistent_directional_transition_profile():
     decisions = _function_source("_refresh_engine_radar_decisions")
     assert "radar_source_transitions" in decisions
     assert "active_until" in decisions
-    assert "now_ts + 10 * 60" in decisions
+    assert "select_transition_profile" in decisions
+    assert "transition_adjustment" in decisions
+    assert "transition_window_seconds" in decisions
     sensor_source = (
         COMPONENT / "sensor.py"
     ).read_text(encoding="utf-8")
     assert 'result["source_transition_active"] = True' in sensor_source
-    assert "max(0, confidence - 10)" in sensor_source
+    assert 'transition.get("confidence_penalty_percent", 10)' in sensor_source
+    assert "max(0, confidence - penalty)" in sensor_source

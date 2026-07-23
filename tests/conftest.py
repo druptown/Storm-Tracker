@@ -429,7 +429,15 @@ def radar_calibration_module():
 
 
 @pytest.fixture
-def calibration_store_module():
+def provider_bias_module():
+    return _load_module(
+        f"{PKG_NAME}.engine.provider_bias",
+        PKG_ROOT / "engine" / "provider_bias.py",
+    )
+
+
+@pytest.fixture
+def calibration_store_module(provider_bias_module):
     return _load_module(
         f"{PKG_NAME}.engine.calibration_store",
         PKG_ROOT / "engine" / "calibration_store.py",
