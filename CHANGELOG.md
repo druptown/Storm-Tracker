@@ -1,5 +1,18 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.93
+
+- Werk de veilige database-analyse voor `sample_types` en `target_samples`
+  onmiddellijk bij zodra een nieuwe verificatiesnapshot is opgeslagen. Daardoor
+  verschijnt ook de later geïnitialiseerde fictieve tracker meteen als achtste
+  target, zonder maximaal twaalf batches op de volgende volledige analyse te
+  wachten. Herhaalde upserts tellen niet dubbel.
+- Koppel de interne ItaliaMeteo ICON-2I-modelaanvraag aan dezelfde
+  `open_meteo_enabled`-optie als de centrale broker. Wanneer Open-Meteo uitstaat,
+  blijft alleen de officiële ItaliaMeteo-radarcatalogus actief en worden geen
+  verborgen Open-Meteo-verzoeken meer uitgevoerd; de lifecycle-diagnostiek
+  publiceert dan expliciet `forecast_status: disabled`.
+
 # 0.4.92
 
 - Voer schema v4 van de kalibratiedatabase in en wis bij de upgrade eenmalig

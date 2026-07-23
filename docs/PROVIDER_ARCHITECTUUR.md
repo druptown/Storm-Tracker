@@ -1,7 +1,7 @@
-# Storm Tracker V3 — providerarchitectuur 0.4.92
+# Storm Tracker V3 — providerarchitectuur 0.4.93
 
 Dit document beschrijft de effectief geïmplementeerde providerstructuur van
-Storm Tracker V3 0.4.92. Het onderscheidt operationele radar, fallbackdata,
+Storm Tracker V3 0.4.93. Het onderscheidt operationele radar, fallbackdata,
 bliksem, validatiebronnen en bronnen die alleen beleidsmatig voor toekomstige
 uitbreiding zijn voorzien.
 
@@ -98,7 +98,7 @@ niet onbeperkt een actuele fallback blokkeren.
 | Open-Meteo | Wereldwijd | 19 modelvelden: neerslag, kans, CAPE, LPI, CIN, Lifted Index, druk, wolken, vriesniveau en wind op 700/850 hPa | standaard uit; indien ingeschakeld cyclus elke 5 min met API-cache van 30 min | Optionele modelbegeleiding en historische verificatie; nooit radar, grondwaarheid of celvorming |
 | MeteoLux | Luxemburg | Lokale nowcast/modelinformatie | 5 min wanneer nodig | Modelbegeleiding; nooit operationele radar |
 | GeoSphere Austria | Oostenrijk | INCA-puntnowcast in stappen van 15 minuten | 5 min wanneer nodig | Modelbegeleiding/nowcast; nooit operationele radar |
-| ItaliaMeteo | Italië | ARPAE-modelverwachting en dagelijkse/historische radarcatalogus | 5 min wanneer nodig | Modelbegeleiding; nooit realtime-radar |
+| ItaliaMeteo | Italië | Dagelijkse/historische radarcatalogus; ARPAE ICON-2I alleen wanneer Open-Meteo expliciet aanstaat | 5 min wanneer nodig | Validatie en optionele modelbegeleiding; nooit realtime-radar |
 
 Netatmo is strikt per RegionEngine geïsoleerd. Open-Meteo gebruikt één gedeelde
 broker die targets op praktisch dezelfde modelcel dedupliceert. Het antwoord
@@ -277,7 +277,7 @@ regenkleur betekent ze bliksemactiviteit zonder bevestigde radarneerslag. De
 zone gebruikt inslagen tot vijf minuten oud, een buffer van twaalf kilometer
 en verandert nooit de geometrie of intensiteit van het radarraster.
 
-## 10. Testdekking in 0.4.92
+## 10. Testdekking in 0.4.93
 
 De provider-audit omvat tests voor:
 

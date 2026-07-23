@@ -101,3 +101,47 @@ def test_italiameteo_rejects_non_json_success_body(italiameteo_module):
     import pytest
     with pytest.raises(Exception):
         italiameteo_module.decode_json_response("upstream temporarily unavailable")
+
+
+def test_italiameteo_does_not_hide_open_meteo_poll_when_disabled(
+    italiameteo_module, base_module,
+):
+    class CatalogResponse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        async def json(self):
+            return [{
+                "date": "2026-07-23",
+                "filename": "radar_sri_dpc.grib",
+            }]
+
+    class Session:
+        def __init__(self):
+            self.urls = []
+
+        def get(self, url, **kwargs):
+            self.urls.append(url)
+            if url != italiameteo_module.CATALOG_URL:
+                raise AssertionError(f"verborgen netwerkrequest: {url}")
+            return CatalogResponse()
+
+    session = Session()
+    provider = italiameteo_module.ItaliaMeteoRadarProvider(
+        session,
+        model_guidance_enabled=False,
+    )
+    provider._areas = (base_module.CoverageArea(41.9, 12.5, 250),)
+
+    assert asyncio.run(provider.async_fetch()) == []
+    assert session.urls == [italiameteo_module.CATALOG_URL]
+    assert provider.diagnostics["model_guidance_enabled"] is False
+    assert provider.diagnostics["forecast_model"] is None
+    assert provider.diagnostics["forecast_status"] == "disabled"
+    assert provider.diagnostics["forecast_errors"] == []

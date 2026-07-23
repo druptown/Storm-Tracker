@@ -405,6 +405,11 @@ class CalibrationDataStore:
         comparisons = batch.get("comparisons", ())
         verification_samples = batch.get("verification_samples", ())
         with self._lock, self._connect() as db:
+            analysis_was_empty = not (
+                self._analysis_summary.get("sample_types")
+                or self._analysis_summary.get("source_frames")
+                or self._analysis_summary.get("provider_pairs")
+            )
             affected_bias_profiles: set[tuple[str, str, str]] = set()
             for frame in frames:
                 if len(frame) == 9:
@@ -547,6 +552,20 @@ class CalibrationDataStore:
                     self._totals["verification_samples"] += 1
                     if sample["sample_type"] == "warning_sent":
                         self._totals["warning_samples"] += 1
+                    sample_types = self._analysis_summary.setdefault(
+                        "sample_types", {}
+                    )
+                    sample_type = str(sample["sample_type"])
+                    sample_types[sample_type] = (
+                        int(sample_types.get(sample_type, 0)) + 1
+                    )
+                    target_samples = self._analysis_summary.setdefault(
+                        "target_samples", {}
+                    )
+                    target_id = str(sample.get("target_id", "home"))
+                    target_samples[target_id] = (
+                        int(target_samples.get(target_id, 0)) + 1
+                    )
             self._refresh_bias_profiles(db, affected_bias_profiles)
             self._totals["bias_samples"] = db.execute(
                 "SELECT count(*) FROM provider_bias_samples"
@@ -556,13 +575,8 @@ class CalibrationDataStore:
             ).fetchone()[0]
             profile_snapshot = self._load_bias_profiles(db)
             self._analysis_batches_since_refresh += 1
-            analysis_is_empty = not (
-                self._analysis_summary.get("sample_types")
-                or self._analysis_summary.get("source_frames")
-                or self._analysis_summary.get("provider_pairs")
-            )
             if (
-                analysis_is_empty
+                analysis_was_empty
                 or self._analysis_batches_since_refresh >= 12
             ):
                 self._analysis_summary = self._load_analysis_summary(db)

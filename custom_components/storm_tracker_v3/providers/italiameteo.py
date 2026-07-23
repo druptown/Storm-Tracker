@@ -30,8 +30,9 @@ class ItaliaMeteoRadarProvider:
     capabilities = frozenset({Capability.NOWCAST})
     priority = 100
 
-    def __init__(self, session):
+    def __init__(self, session, *, model_guidance_enabled: bool = False):
         self._session, self._areas = session, ()
+        self._model_guidance_enabled = bool(model_guidance_enabled)
         self.diagnostics = {}
 
     def supports(self, area):
@@ -52,33 +53,52 @@ class ItaliaMeteoRadarProvider:
         age_days = (datetime.now(timezone.utc).date() - bundle_date).days if bundle_date else None
         forecasts = []
         forecast_errors = []
-        for area in self._areas:
-            base_params = {
-                "latitude": area.center_lat, "longitude": area.center_lon,
-                "models": "italia_meteo_arpae_icon_2i",
-                "forecast_hours": 6, "timezone": "UTC",
-            }
-            forecast = None
-            for variables in ("precipitation,lightning_potential", "precipitation"):
-                try:
-                    async with self._session.get(
-                        FORECAST_URL, params={**base_params, "hourly": variables}
-                    ) as response:
-                        response.raise_for_status()
-                        forecast = decode_json_response(await response.text())
-                    break
-                except Exception as exc:
-                    forecast_errors.append(type(exc).__name__)
-            if forecast is None:
-                continue
-            hourly = forecast.get("hourly") or {}
-            precipitation = [float(value or 0) for value in hourly.get("precipitation", [])]
-            lightning = [float(value or 0) for value in hourly.get("lightning_potential", [])]
-            forecasts.append({
-                "rain_next_6h_mm": round(sum(precipitation), 2),
-                "max_hourly_mm": round(max(precipitation, default=0.0), 2),
-                "max_lightning_potential": round(max(lightning, default=0.0), 2),
-            })
+        if self._model_guidance_enabled:
+            for area in self._areas:
+                base_params = {
+                    "latitude": area.center_lat,
+                    "longitude": area.center_lon,
+                    "models": "italia_meteo_arpae_icon_2i",
+                    "forecast_hours": 6,
+                    "timezone": "UTC",
+                }
+                forecast = None
+                for variables in (
+                    "precipitation,lightning_potential",
+                    "precipitation",
+                ):
+                    try:
+                        async with self._session.get(
+                            FORECAST_URL,
+                            params={**base_params, "hourly": variables},
+                        ) as response:
+                            response.raise_for_status()
+                            forecast = decode_json_response(
+                                await response.text()
+                            )
+                        break
+                    except Exception as exc:
+                        forecast_errors.append(type(exc).__name__)
+                if forecast is None:
+                    continue
+                hourly = forecast.get("hourly") or {}
+                precipitation = [
+                    float(value or 0)
+                    for value in hourly.get("precipitation", [])
+                ]
+                lightning = [
+                    float(value or 0)
+                    for value in hourly.get("lightning_potential", [])
+                ]
+                forecasts.append({
+                    "rain_next_6h_mm": round(sum(precipitation), 2),
+                    "max_hourly_mm": round(
+                        max(precipitation, default=0.0), 2
+                    ),
+                    "max_lightning_potential": round(
+                        max(lightning, default=0.0), 2
+                    ),
+                })
         self.diagnostics = {
             "source_role": "forecast_and_historical_radar_validation",
             "latest_bundle_date": bundle_date.isoformat() if bundle_date else None,
@@ -86,12 +106,24 @@ class ItaliaMeteoRadarProvider:
             "age_days": age_days,
             "operational": age_days == 0,
             "fallback_reason": None if age_days == 0 else "bundel niet realtime; OPERA/RainViewer blijft operationeel",
-            "forecast_model": "ItaliaMeteo-ARPAE ICON-2I via Open-Meteo",
+            "model_guidance_enabled": self._model_guidance_enabled,
+            "forecast_model": (
+                "ItaliaMeteo-ARPAE ICON-2I via Open-Meteo"
+                if self._model_guidance_enabled else None
+            ),
+            "forecast_status": (
+                "ready" if forecasts
+                else "error" if forecast_errors
+                else "waiting" if self._model_guidance_enabled
+                else "disabled"
+            ),
             "forecast_areas": len(forecasts),
             "rain_next_6h_mm_max": max((item["rain_next_6h_mm"] for item in forecasts), default=0.0),
             "max_lightning_potential": max((item["max_lightning_potential"] for item in forecasts), default=0.0),
             "forecast_errors": forecast_errors,
-            "forecast_healthy": bool(forecasts),
+            "forecast_healthy": (
+                bool(forecasts) if self._model_guidance_enabled else None
+            ),
             "official_api": CATALOG_URL,
         }
         # De dagelijkse GRIB-bundel wordt bewust niet als actuele radar gevoed.

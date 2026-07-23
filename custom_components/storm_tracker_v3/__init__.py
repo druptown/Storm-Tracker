@@ -498,7 +498,13 @@ async def _async_setup_runtime(
     provider_lifecycle.register(MetOfficeRadarProvider(http_session), _national_context)
     provider_lifecycle.register(MeteoLuxProvider(http_session), _national_context)
     provider_lifecycle.register(GeoSphereAustriaProvider(http_session), _national_context)
-    provider_lifecycle.register(ItaliaMeteoRadarProvider(http_session), _national_context)
+    provider_lifecycle.register(
+        ItaliaMeteoRadarProvider(
+            http_session,
+            model_guidance_enabled=open_meteo_enabled,
+        ),
+        _national_context,
+    )
     provider_lifecycle.register(DpcRadarProvider(http_session), _national_context)
     provider_lifecycle.register(AemetRadarProvider(http_session), _national_context)
     if conf.get("meteofrance_api_token") or conf.get("meteofrance_application_id"):

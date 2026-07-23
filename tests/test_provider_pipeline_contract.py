@@ -85,6 +85,7 @@ def test_location_scoped_global_sources_are_region_aware():
     assert "route_observation" not in open_meteo_poll
     assert "open_meteo_forecast" in open_meteo_poll
     assert "open_meteo_enabled" in open_meteo_poll
+    assert "model_guidance_enabled=open_meteo_enabled" in INIT_SOURCE
 
 
 def test_knmi_health_uses_frame_time_even_when_frame_is_dry():

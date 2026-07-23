@@ -100,6 +100,65 @@ def test_store_persists_forecast_and_warning_verification_samples(
     assert '"eta_reliable":true' in row[2]
 
 
+def test_target_analysis_counts_refresh_on_every_new_sample(
+    calibration_store_module, tmp_path,
+):
+    store = calibration_store_module.CalibrationDataStore(
+        str(tmp_path / "calibration.sqlite3")
+    )
+    store.initialize()
+
+    def sample(target_id, minute):
+        return {
+            "sample_key": f"cycle:{target_id}:{minute}",
+            "sample_type": "target_cycle",
+            "target_id": target_id,
+            "nominal_minute": minute,
+            "observed_at": minute * 60.0,
+            "latitude": 51.0,
+            "longitude": 4.0,
+            "own_forecast_available": False,
+            "snapshot": {},
+        }
+
+    first_targets = (
+        "home",
+        "life360_elke_lavrysen",
+        "life360_jochem_lavrysen",
+        "life360_manuel_van_san",
+        "life360_marjolein_van_san",
+        "life360_nathan_lavrysen",
+        "life360_wim_van_san",
+    )
+    first = store.write_batch({
+        "verification_samples": tuple(
+            sample(target_id, 100) for target_id in first_targets
+        ),
+    })
+    assert first["analysis"]["target_samples"] == {
+        target_id: 1 for target_id in first_targets
+    }
+
+    all_targets = (*first_targets, "test_tracker")
+    second_samples = tuple(
+        sample(target_id, 101) for target_id in all_targets
+    )
+    second = store.write_batch({
+        "verification_samples": second_samples,
+    })
+    assert second["analysis"]["sample_types"]["target_cycle"] == 15
+    assert len(second["analysis"]["target_samples"]) == 8
+    assert second["analysis"]["target_samples"]["test_tracker"] == 1
+    for target_id in first_targets:
+        assert second["analysis"]["target_samples"][target_id] == 2
+
+    repeated = store.write_batch({
+        "verification_samples": second_samples,
+    })
+    assert repeated["analysis"]["sample_types"]["target_cycle"] == 15
+    assert repeated["analysis"]["target_samples"]["test_tracker"] == 1
+
+
 def test_store_builds_persistent_directional_provider_bias_profiles(
     calibration_store_module, tmp_path,
 ):
