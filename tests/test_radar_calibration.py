@@ -141,6 +141,62 @@ def test_collection_batch_keeps_dry_frames_and_grid_intensity(
     dry = next(frame for frame in batch["frames"] if frame[1] == "kmi")
     assert dry[6:8] == (0, 0)
     opera = next(frame for frame in batch["frames"] if frame[1] == "opera")
-    assert opera[8] == ((510, 40, 6.0, 0.8, 1),)
+    assert opera[13] == ((510, 40, 6.0, 0.8, 1),)
+    assert opera[12] == 1.0
     assert len(batch["comparisons"]) == 1
     assert observer.drain_collection_batch() == {"frames": (), "comparisons": ()}
+
+
+def test_frames_below_shared_coverage_threshold_are_not_compared(
+    radar_calibration_module,
+):
+    observer = radar_calibration_module.RadarCalibrationObserver(grid_deg=0.1)
+    center = (45.47, 9.19)
+    radius = 250.0
+    observer.record_frame(
+        [],
+        source="kmi",
+        timestamp=1_200,
+        region_id="milan",
+        evaluation_center=center,
+        evaluation_radius_km=radius,
+        coverage_bbox=(-2.5, 46.5, 10.5, 53.0),
+    )
+    matched = observer.record_frame(
+        [_obs(45.5, 9.2)],
+        source="dpc_radar",
+        timestamp=1_200,
+        region_id="milan",
+        evaluation_center=center,
+        evaluation_radius_km=radius,
+        coverage_bbox=(4.5, 35.0, 20.5, 48.0),
+    )
+    assert matched == 0
+    assert observer.diagnostics()["samples"] == 0
+
+
+def test_comparison_records_shared_coverage_fraction(
+    radar_calibration_module,
+):
+    observer = radar_calibration_module.RadarCalibrationObserver(grid_deg=0.1)
+    observer.record_frame(
+        [_obs(51.0, 4.0)],
+        source="kmi",
+        timestamp=1_200,
+        region_id="belgium",
+        evaluation_center=(51.0, 4.0),
+        evaluation_radius_km=100.0,
+        coverage_bbox=(-2.5, 46.5, 10.5, 53.0),
+    )
+    matched = observer.record_frame(
+        [_obs(51.0, 4.0)],
+        source="rainviewer",
+        timestamp=1_200,
+        region_id="belgium",
+        evaluation_center=(51.0, 4.0),
+        evaluation_radius_km=100.0,
+        coverage_bbox=(3.0, 50.0, 5.0, 52.0),
+    )
+    assert matched == 1
+    latest = observer.diagnostics()["latest"]
+    assert latest["shared_coverage_fraction"] >= 0.6

@@ -47,7 +47,7 @@ def test_only_one_ordered_five_minute_provider_cycle_is_scheduled():
     )
     assert cycle.index("_poll_radar()") < cycle.index(
         "_flush_region_observation_batches()"
-    ) < cycle.index("_queue_home_verification_sample()")
+    ) < cycle.index("_queue_target_verification_samples()")
     bounded = _function_source("_bounded_provider_stage")
     assert "asyncio.wait_for" in bounded
     assert "provider_stage_timeouts" in bounded
@@ -58,6 +58,17 @@ def test_moved_target_runs_the_same_complete_cycle():
     assert "_sync_region_radar_providers()" in update
     assert "_sync_region_netatmo_providers()" in update
     assert "hass.async_create_task(_poll_all())" in update
+
+
+def test_every_available_target_gets_its_own_verification_snapshot():
+    queue = _function_source("_queue_target_verification_samples")
+    assert "for target_id, target in target_runtime.items()" in queue
+    assert "storm_manager.get_engine_for_target(entity_id)" in queue
+    assert "'sample_type': 'target_cycle'" in queue
+    assert "'latitude': float(lat)" in queue
+    assert "'longitude': float(lon)" in queue
+    assert "'radar_source_decision': dict(source_decision)" in queue
+    assert "'scope': 'home_only'" in queue
 
 
 def test_location_scoped_global_sources_are_region_aware():
@@ -73,6 +84,7 @@ def test_location_scoped_global_sources_are_region_aware():
     assert "open_meteo_results_by_target" in open_meteo_poll
     assert "route_observation" not in open_meteo_poll
     assert "open_meteo_forecast" in open_meteo_poll
+    assert "open_meteo_enabled" in open_meteo_poll
 
 
 def test_knmi_health_uses_frame_time_even_when_frame_is_dry():

@@ -21,7 +21,8 @@
           "netatmo_client_secret": "Netatmo client secret",
           "netatmo_refresh_token": "Netatmo refresh-token",
           "netatmo_radius_km": "Netatmo-stationsradius",
-          "lightning_source_mode": "Bliksembron"
+          "lightning_source_mode": "Bliksembron",
+          "open_meteo_enabled": "Open-Meteo-modelbegeleiding inschakelen (optioneel)"
         }
       }
     },
@@ -51,7 +52,8 @@
           "netatmo_client_secret": "Netatmo client secret",
           "netatmo_refresh_token": "Netatmo refresh-token",
           "netatmo_radius_km": "Netatmo-stationsradius",
-          "lightning_source_mode": "Bliksembron"
+          "lightning_source_mode": "Bliksembron",
+          "open_meteo_enabled": "Open-Meteo-modelbegeleiding inschakelen (optioneel)"
         }
       }
     }

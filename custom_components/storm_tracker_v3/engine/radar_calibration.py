@@ -16,19 +16,96 @@ GRID_DEG = 0.10
 MAX_REFERENCE_AGE_S = 15 * 60
 HISTORY_SIZE = 96
 FRAME_HISTORY_MINUTES = 180
+MIN_SHARED_COVERAGE_FRACTION = 0.60
+
+CoverageBounds = tuple[float, float, float, float]
+
+
+def _evaluation_bbox(
+    center: tuple[float, float] | None,
+    radius_km: float | None,
+) -> CoverageBounds | None:
+    if center is None or radius_km is None:
+        return None
+    lat, lon = float(center[0]), float(center[1])
+    lat_delta = float(radius_km) / 110.574
+    lon_delta = float(radius_km) / (
+        111.320 * max(0.1, abs(math.cos(math.radians(lat))))
+    )
+    return (
+        lon - lon_delta,
+        lat - lat_delta,
+        lon + lon_delta,
+        lat + lat_delta,
+    )
+
+
+def _bbox_intersection(
+    first: CoverageBounds | None,
+    second: CoverageBounds | None,
+) -> CoverageBounds | None:
+    if first is None:
+        return second
+    if second is None:
+        return first
+    intersection = (
+        max(first[0], second[0]),
+        max(first[1], second[1]),
+        min(first[2], second[2]),
+        min(first[3], second[3]),
+    )
+    if intersection[0] >= intersection[2] or intersection[1] >= intersection[3]:
+        return None
+    return intersection
+
+
+def _bbox_fraction(
+    coverage: CoverageBounds | None,
+    evaluation: CoverageBounds | None,
+) -> float:
+    if evaluation is None:
+        return 1.0
+    intersection = _bbox_intersection(coverage, evaluation)
+    if intersection is None:
+        return 0.0
+    evaluation_area = (
+        (evaluation[2] - evaluation[0]) * (evaluation[3] - evaluation[1])
+    )
+    if evaluation_area <= 0:
+        return 0.0
+    intersection_area = (
+        (intersection[2] - intersection[0])
+        * (intersection[3] - intersection[1])
+    )
+    return min(1.0, max(0.0, intersection_area / evaluation_area))
+
+
+def _inside_bbox(lat: float, lon: float, bbox: CoverageBounds | None) -> bool:
+    return bbox is None or (
+        bbox[0] <= float(lon) <= bbox[2]
+        and bbox[1] <= float(lat) <= bbox[3]
+    )
 
 
 def _grid_cell(lat: float, lon: float, grid_deg: float) -> tuple[int, int]:
     return (math.floor(float(lat) / grid_deg), math.floor(float(lon) / grid_deg))
 
 
-def _occupied_cells(observations: Iterable, grid_deg: float) -> set[tuple[int, int]]:
+def _occupied_cells(
+    observations: Iterable,
+    grid_deg: float,
+    coverage_bbox: CoverageBounds | None = None,
+) -> set[tuple[int, int]]:
     cells: set[tuple[int, int]] = set()
     for observation in observations:
         points = tuple(getattr(observation, "footprint_points", ()) or ())
         if not points:
             points = ((observation.lat, observation.lon),)
-        cells.update(_grid_cell(lat, lon, grid_deg) for lat, lon in points)
+        cells.update(
+            _grid_cell(lat, lon, grid_deg)
+            for lat, lon in points
+            if _inside_bbox(lat, lon, coverage_bbox)
+        )
     return cells
 
 
@@ -69,6 +146,7 @@ class CalibrationSnapshot:
     precision: float | None
     recall: float | None
     f1_score: float | None
+    shared_coverage_fraction: float
 
     def as_dict(self) -> dict:
         return {
@@ -86,7 +164,15 @@ class CalibrationSnapshot:
             "precision": self.precision,
             "recall": self.recall,
             "f1_score": self.f1_score,
+            "shared_coverage_fraction": self.shared_coverage_fraction,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class _CalibrationFrame:
+    observations: tuple
+    coverage_bbox: CoverageBounds | None
+    evaluation_bbox: CoverageBounds | None
 
 
 class RadarCalibrationObserver:
@@ -106,7 +192,7 @@ class RadarCalibrationObserver:
         self._history: deque[CalibrationSnapshot] = deque(maxlen=history_size)
         self.evaluation_center = evaluation_center
         self.evaluation_radius_km = evaluation_radius_km
-        self._frames: dict[str, dict[str, dict[int, tuple]]] = {}
+        self._frames: dict[str, dict[str, dict[int, _CalibrationFrame]]] = {}
         self._matched: set[tuple[str, str, str, int]] = set()
         self._collection_frames: dict[tuple[str, str, int], tuple] = {}
         self._collection_comparisons: list[tuple] = []
@@ -138,6 +224,7 @@ class RadarCalibrationObserver:
         region_id: str,
         evaluation_center: tuple[float, float] | None = None,
         evaluation_radius_km: float | None = None,
+        coverage_bbox: CoverageBounds | None = None,
     ) -> int:
         """Registreer één bronframe en vergelijk het met alle gelijktijdige bronnen."""
         minute = self._nominal_minute(timestamp)
@@ -147,7 +234,24 @@ class RadarCalibrationObserver:
             if evaluation_radius_km is not None
             else self.evaluation_radius_km
         )
-        frame = tuple(_within_evaluation_area(observations, center, radius))
+        evaluation_bbox = _evaluation_bbox(center, radius)
+        effective_coverage = (
+            tuple(float(value) for value in coverage_bbox)
+            if coverage_bbox is not None
+            else evaluation_bbox
+        )
+        coverage_fraction = _bbox_fraction(
+            effective_coverage, evaluation_bbox
+        )
+        frame = tuple(
+            observation
+            for observation in _within_evaluation_area(
+                observations, center, radius
+            )
+            if _inside_bbox(
+                observation.lat, observation.lon, effective_coverage
+            )
+        )
         points: dict[tuple[int, int], list[float | int | None]] = {}
         for observation in frame:
             footprint = tuple(getattr(observation, "footprint_points", ()) or ())
@@ -156,6 +260,8 @@ class RadarCalibrationObserver:
             intensity = getattr(observation, "intensity", None)
             quality = getattr(observation, "quality", None)
             for lat, lon in footprint:
+                if not _inside_bbox(lat, lon, effective_coverage):
+                    continue
                 cell = _grid_cell(lat, lon, self.grid_deg)
                 current = points.setdefault(cell, [None, None, 0])
                 if intensity is not None:
@@ -167,12 +273,24 @@ class RadarCalibrationObserver:
         self._collection_frames[(str(region_id), str(source), minute)] = (
             str(region_id), str(source), minute, float(timestamp), collected_at,
             self.grid_deg, len(frame), len(points),
-            tuple((lat, lon, values[0], values[1], values[2])
-                  for (lat, lon), values in points.items()),
+            *(
+                effective_coverage
+                if effective_coverage is not None
+                else (None, None, None, None)
+            ),
+            round(coverage_fraction, 6),
+            tuple(
+                (lat, lon, values[0], values[1], values[2])
+                for (lat, lon), values in points.items()
+            ),
         )
         self._frames.setdefault(str(region_id), {}).setdefault(str(source), {})[
             minute
-        ] = frame
+        ] = _CalibrationFrame(
+            observations=frame,
+            coverage_bbox=effective_coverage,
+            evaluation_bbox=evaluation_bbox,
+        )
         matched = self._match_minute(str(region_id), minute, str(source))
         self._prune_frames(minute)
         return matched
@@ -190,17 +308,31 @@ class RadarCalibrationObserver:
             if key in self._matched:
                 continue
             frame_timestamp = minute * 60.0
-            self.observe(
-                region_frames[source_a][minute], region_frames[source_b][minute],
+            frame_a = region_frames[source_a][minute]
+            frame_b = region_frames[source_b][minute]
+            evaluation_bbox = (
+                frame_a.evaluation_bbox or frame_b.evaluation_bbox
+            )
+            shared_bbox = _bbox_intersection(
+                frame_a.coverage_bbox, frame_b.coverage_bbox
+            )
+            shared_fraction = _bbox_fraction(
+                shared_bbox, evaluation_bbox
+            )
+            snapshot = self.observe(
+                frame_a.observations, frame_b.observations,
                 reference_source=source_b,
                 reference_timestamp=frame_timestamp,
                 now=frame_timestamp,
                 region_id=region_id,
                 source_a=source_a,
                 source_b=source_b,
+                comparison_bbox=shared_bbox,
+                shared_coverage_fraction=shared_fraction,
             )
             self._matched.add(key)
-            matched += 1
+            if snapshot is not None:
+                matched += 1
         return matched
 
     def _prune_frames(self, newest_minute: int) -> None:
@@ -232,6 +364,8 @@ class RadarCalibrationObserver:
         region_id: str = "legacy",
         source_a: str = "primary",
         source_b: str | None = None,
+        comparison_bbox: CoverageBounds | None = None,
+        shared_coverage_fraction: float = 1.0,
     ) -> CalibrationSnapshot | None:
         """Vergelijk gelijktijdige nat/droog-bezetting op een gedeeld rooster."""
         current = time.time() if now is None else float(now)
@@ -239,18 +373,25 @@ class RadarCalibrationObserver:
             return None
         if abs(current - float(reference_timestamp)) > self.max_reference_age_s:
             return None
+        if (
+            float(shared_coverage_fraction)
+            < MIN_SHARED_COVERAGE_FRACTION
+        ):
+            return None
 
         primary_cells = _occupied_cells(
             _within_evaluation_area(
                 primary, evaluation_center, evaluation_radius_km
             ),
             self.grid_deg,
+            comparison_bbox,
         )
         reference_cells = _occupied_cells(
             _within_evaluation_area(
                 reference, evaluation_center, evaluation_radius_km
             ),
             self.grid_deg,
+            comparison_bbox,
         )
         overlap = primary_cells & reference_cells
         false_positive = primary_cells - reference_cells
@@ -280,6 +421,9 @@ class RadarCalibrationObserver:
             precision=round(precision, 3) if precision is not None else None,
             recall=round(recall, 3) if recall is not None else None,
             f1_score=round(f1, 3) if f1 is not None else None,
+            shared_coverage_fraction=round(
+                float(shared_coverage_fraction), 3
+            ),
         )
         self._history.append(snapshot)
         self._collection_comparisons.append((
@@ -288,7 +432,7 @@ class RadarCalibrationObserver:
             snapshot.primary_cells, snapshot.reference_cells,
             snapshot.overlap_cells, snapshot.false_positive_cells,
             snapshot.missed_cells, snapshot.precision, snapshot.recall,
-            snapshot.f1_score,
+            snapshot.f1_score, snapshot.shared_coverage_fraction,
         ))
         return snapshot
 
@@ -321,6 +465,9 @@ class RadarCalibrationObserver:
                     len(frames)
                     for sources in self._frames.values()
                     for frames in sources.values()
+                ),
+                "minimum_shared_coverage_fraction": (
+                    MIN_SHARED_COVERAGE_FRACTION
                 ),
             }
         latest = self._history[-1]
@@ -362,4 +509,7 @@ class RadarCalibrationObserver:
                 if comparable else None
             ),
             "changes_filtering": False,
+            "minimum_shared_coverage_fraction": (
+                MIN_SHARED_COVERAGE_FRACTION
+            ),
         }

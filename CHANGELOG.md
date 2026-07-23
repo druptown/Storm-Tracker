@@ -1,5 +1,28 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.92
+
+- Voer schema v4 van de kalibratiedatabase in en wis bij de upgrade eenmalig
+  alle oudere frames, vergelijkingen, verificaties en afgeleide biasprofielen.
+  De oude dataset kon provideractivatiemarges met echte radardekking
+  verwarren en was daardoor niet wetenschappelijk zuiver herstelbaar.
+- Bewaar per bronframe de expliciete geografische dekking en vergelijk twee
+  providers alleen nog binnen minstens zestig procent gemeenschappelijk
+  RegionEngine-gebied. Een lege KMI-rand bij Milaan kan daardoor niet meer als
+  een gemiste Italiaanse bui worden gescoord.
+- Leg iedere vijf minuten voor elk beschikbaar target een afzonderlijke
+  verificatiesnapshot vast op de actuele GPS-coördinaten, inclusief eigen
+  verwachting, ETA, passage, confidence, bronbeslissing en kandidaatmelding.
+  De twee Buienradar-verificaties blijven correct beperkt tot thuis.
+- Publiceer veilige database-analyses per sampletype, target, bron en
+  providerpaar, plus schemaversie, laatste resetreden en resetmoment.
+- Zet Open-Meteo standaard uit. De broker doet dan geen netwerkverzoeken en
+  publiceert expliciet `DISABLED`; inschakelen blijft optioneel via de
+  integratie-opties.
+- Laat `STV3 Actieve Storms` alle RegionEngines tellen in plaats van alleen de
+  thuisengine en geef bij een gezond leeg KMI-frame `droog` weer in plaats van
+  het misleidende `geen data`.
+
 # 0.4.91
 
 - Classificeer Open-Meteo expliciet als `model_guidance` in plaats van

@@ -26,6 +26,7 @@ CONF_NETATMO_CLIENT_ID = "netatmo_client_id"
 CONF_NETATMO_CLIENT_SECRET = "netatmo_client_secret"
 CONF_NETATMO_REFRESH_TOKEN = "netatmo_refresh_token"
 CONF_NETATMO_RADIUS = "netatmo_radius_km"
+CONF_OPEN_METEO_ENABLED = "open_meteo_enabled"
 
 
 def _schema(defaults: dict) -> vol.Schema:
@@ -121,6 +122,10 @@ def _schema(defaults: dict) -> vol.Schema:
             mode=selector.SelectSelectorMode.DROPDOWN,
             translation_key="lightning_source_mode",
         )),
+        vol.Optional(
+            CONF_OPEN_METEO_ENABLED,
+            default=defaults.get(CONF_OPEN_METEO_ENABLED, False),
+        ): selector.BooleanSelector(),
     }
     test_selector = selector.EntitySelector(selector.EntitySelectorConfig(
         domain="device_tracker",

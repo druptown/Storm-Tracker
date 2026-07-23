@@ -99,6 +99,7 @@ CONFIG_SCHEMA = vol.Schema({
         vol.Optional("hsaf_username"): cv.string,
         vol.Optional("hsaf_password"): cv.string,
         vol.Optional("lightning_source_mode", default="auto"): vol.In({"auto", "satellite_test"}),
+        vol.Optional("open_meteo_enabled", default=False): cv.boolean,
     })
 }, extra=vol.ALLOW_EXTRA)
 
@@ -142,6 +143,7 @@ async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
         "netatmo_refresh_token": raw.get("netatmo_refresh_token"),
         "netatmo_radius_km": raw.get("netatmo_radius_km", 175.0),
         "lightning_source_mode": raw.get("lightning_source_mode", "auto"),
+        "open_meteo_enabled": raw.get("open_meteo_enabled", False),
     }
     if raw.get("test_tracker_entity"):
         conf["fictieve_tracker_entity"] = raw["test_tracker_entity"]
@@ -149,9 +151,24 @@ async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
     if setup_ok:
         async def _async_options_updated(hass: HomeAssistant, updated_entry) -> None:
             """Pas provideropties live toe zonder Home Assistant te herstarten."""
+            updated_config = {
+                **updated_entry.data,
+                **updated_entry.options,
+            }
             setter = hass.data.get(DOMAIN, {}).get("set_lightning_source_mode")
             if setter is not None:
-                await setter(updated_entry.options.get("lightning_source_mode", "auto"))
+                await setter(
+                    updated_config.get("lightning_source_mode", "auto")
+                )
+            configured_open_meteo = bool(
+                updated_config.get("open_meteo_enabled", False)
+            )
+            if configured_open_meteo != bool(
+                hass.data.get(DOMAIN, {}).get(
+                    "open_meteo_enabled", False
+                )
+            ):
+                await hass.config_entries.async_reload(updated_entry.entry_id)
 
         entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     return setup_ok
@@ -177,9 +194,11 @@ async def _async_setup_runtime(
     radar_radius    = conf.get("radar_radius_km", 200.0)
     sharing_distance = conf.get("engine_sharing_distance_km", 150.0)
     lightning_source_mode = conf.get("lightning_source_mode", "auto")
+    open_meteo_enabled = bool(conf.get("open_meteo_enabled", False))
     hsaf_username = conf.get("hsaf_username")
     hsaf_password = conf.get("hsaf_password")
     hass.data[DOMAIN]["lightning_source_mode"] = lightning_source_mode
+    hass.data[DOMAIN]["open_meteo_enabled"] = open_meteo_enabled
     target_specs = build_target_specs(
         home_lat,
         home_lon,
@@ -232,7 +251,17 @@ async def _async_setup_runtime(
     from .providers.open_meteo import OpenMeteoProvider
     open_meteo_provider = OpenMeteoProvider(session=http_session)
     hass.data[DOMAIN]["open_meteo"] = open_meteo_provider
-    hass.data[DOMAIN]["open_meteo_result"] = open_meteo_provider.last_result
+    hass.data[DOMAIN]["open_meteo_result"] = (
+        open_meteo_provider.last_result
+        if open_meteo_enabled
+        else {
+            "gear": "DISABLED",
+            "role": "optional_model_guidance",
+            "provider_status": "disabled",
+            "enabled": False,
+            "target_results": {},
+        }
+    )
     hass.data[DOMAIN]["open_meteo_results_by_target"] = {}
     hass.data[DOMAIN]["open_meteo_processed_sequence"] = 0
 
@@ -756,6 +785,71 @@ async def _async_setup_runtime(
     }
     hass.data[DOMAIN]["radar_calibration"] = initial_diagnostics
 
+    calibration_coverage_bounds = {
+        "kmi": (-2.5, 46.5, 10.5, 53.0),
+        "knmi": (0.0, 48.895, 10.856, 55.974),
+        "dwd_radolan": (1.0, 45.5, 19.0, 56.0),
+        "met_office_radar": (-12.0, 48.0, 4.0, 62.0),
+        "meteofrance_radar": (-6.0, 40.5, 10.0, 52.0),
+        "dpc_radar": (4.5, 35.0, 20.5, 48.0),
+        "aemet_radar": (-12.2, 33.0, 6.2, 46.5),
+    }
+    minimum_calibration_coverage_fraction = 0.60
+
+    def _region_bounds(region) -> tuple[float, float, float, float]:
+        lat_delta = region.observation_radius_km / 110.574
+        lon_delta = region.observation_radius_km / (
+            111.320
+            * max(0.1, abs(math.cos(math.radians(region.center_lat))))
+        )
+        return (
+            region.center_lon - lon_delta,
+            region.center_lat - lat_delta,
+            region.center_lon + lon_delta,
+            region.center_lat + lat_delta,
+        )
+
+    def _coverage_fraction(
+        coverage: tuple[float, float, float, float],
+        region_bounds: tuple[float, float, float, float],
+    ) -> float:
+        intersection = (
+            max(coverage[0], region_bounds[0]),
+            max(coverage[1], region_bounds[1]),
+            min(coverage[2], region_bounds[2]),
+            min(coverage[3], region_bounds[3]),
+        )
+        if (
+            intersection[0] >= intersection[2]
+            or intersection[1] >= intersection[3]
+        ):
+            return 0.0
+        region_area = (
+            (region_bounds[2] - region_bounds[0])
+            * (region_bounds[3] - region_bounds[1])
+        )
+        intersection_area = (
+            (intersection[2] - intersection[0])
+            * (intersection[3] - intersection[1])
+        )
+        return min(1.0, max(0.0, intersection_area / region_area))
+
+    def _calibration_coverage(source: str, region):
+        region_bounds = _region_bounds(region)
+        if source == "opera":
+            provider = hass.data[DOMAIN].get(
+                "opera_providers_by_engine", {}
+            ).get(region.engine_id)
+            if provider is not None:
+                return tuple(float(value) for value in provider._bbox())
+        if source in {
+            "rainviewer",
+            "hsaf_h40b",
+            "noaa_goes_rrqpe",
+        }:
+            return region_bounds
+        return calibration_coverage_bounds.get(source)
+
     def _record_calibration_frame(
         source: str,
         observations,
@@ -774,6 +868,17 @@ async def _async_setup_runtime(
         for region in storm_manager.get_all_engines():
             if engine_id is not None and region.engine_id != engine_id:
                 continue
+            coverage_bbox = _calibration_coverage(source, region)
+            if coverage_bbox is None:
+                continue
+            coverage_fraction = _coverage_fraction(
+                coverage_bbox, _region_bounds(region)
+            )
+            if (
+                coverage_fraction
+                < minimum_calibration_coverage_fraction
+            ):
+                continue
             regional = [
                 item for item in observations
                 if region.accepts_observation(item.lat, item.lon)
@@ -789,6 +894,7 @@ async def _async_setup_runtime(
                 region_id=f"{region.engine_id}@{region.storage_key}",
                 evaluation_center=(region.center_lat, region.center_lon),
                 evaluation_radius_km=region.observation_radius_km,
+                coverage_bbox=coverage_bbox,
             )
         diagnostics = observer.diagnostics()
         diagnostics["storage"] = hass.data[DOMAIN].get(
@@ -1491,6 +1597,26 @@ async def _async_setup_runtime(
             storm_manager.route_observation(o)
 
     async def _poll_open_meteo(now=None):
+        if not hass.data[DOMAIN].get("open_meteo_enabled", False):
+            result = {
+                "gear": "DISABLED",
+                "role": "optional_model_guidance",
+                "provider_status": "disabled",
+                "enabled": False,
+                "target_results": {},
+            }
+            hass.data[DOMAIN]["open_meteo_result"] = result
+            hass.data[DOMAIN]["open_meteo_results_by_target"] = {}
+            hass.bus.async_fire(
+                f"{DOMAIN}_open_meteo_update",
+                {
+                    "provider_status": "disabled",
+                    "gear": "DISABLED",
+                    "targets": [],
+                    "fetch_sequence": 0,
+                },
+            )
+            return
         targets = _open_meteo_targets()
         result = await open_meteo_provider.fetch(targets)
         target_results = result.get("target_results", {})
@@ -1779,85 +1905,132 @@ async def _async_setup_runtime(
             return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
 
-    def _queue_home_verification_sample() -> None:
-        """Leg Buienradar en de gelijktijdige STV3-thuisstatus samen vast."""
+    def _queue_target_verification_samples() -> None:
+        """Leg de gelijktijdige STV3-status van elk actueel target vast."""
         from .engine.nowcast import build_precipitation_status
 
         observed_at = time.time()
         nominal_minute = int(observed_at // 60)
-        home_target = hass.data[DOMAIN].get("targets", {}).get("home", {})
-        home_region = storm_manager.get_engine_for_target("zone.home")
-        engine_id = home_target.get("region_engine_id")
-        own_attrs = build_precipitation_status(
-            (
-                home_region.storm_engine.get_active_storms()
-                if home_region else []
-            ),
-            float(home_target.get("latitude", home_lat)),
-            float(home_target.get("longitude", home_lon)),
-            radar_source=(
-                (
-                    hass.data[DOMAIN]
-                    .get("radar_sources_by_engine", {})
-                    .get(engine_id, {})
-                ).get("source")
-            ),
-            pressure_trend=(
-                hass.data[DOMAIN]
-                .get("netatmo_pressure_trends_by_engine", {})
-                .get(engine_id)
-            ),
-        )
         average = hass.states.get("sensor.neerslagverwachting_gemiddeld")
         total = hass.states.get("sensor.neerslagverwachting_totaal")
-        eta = own_attrs.get("eta_minutes")
-        warning_candidate = None
-        if (
-            own_attrs.get("status") == "naderend"
-            and own_attrs.get("eta_reliable")
-            and own_attrs.get("passage_classification") in {"raak", "rand"}
-            and eta is not None
-        ):
-            eta_value = float(eta)
-            warning_candidate = (
-                "imminent" if eta_value <= 15
-                else "dichtbij" if eta_value <= 45
-                else "vroeg" if eta_value <= 90
-                else None
+        target_runtime = hass.data[DOMAIN].get("targets", {})
+        radar_sources = hass.data[DOMAIN].get(
+            "radar_sources_by_engine", {}
+        )
+        pressure_trends = hass.data[DOMAIN].get(
+            "netatmo_pressure_trends_by_engine", {}
+        )
+        for target_id, target in target_runtime.items():
+            lat = target.get("latitude")
+            lon = target.get("longitude")
+            entity_id = target.get("entity_id")
+            if (
+                not target.get("available")
+                or lat is None
+                or lon is None
+                or not entity_id
+            ):
+                continue
+            region = storm_manager.get_engine_for_target(entity_id)
+            engine_id = (
+                region.engine_id if region is not None
+                else target.get("region_engine_id")
             )
-        sample = {
-            "sample_key": f"cycle:home:{nominal_minute}",
-            "sample_type": "cycle",
-            "target_id": "home",
-            "nominal_minute": nominal_minute,
-            "observed_at": observed_at,
-            "latitude": home_lat,
-            "longitude": home_lon,
-            "buienradar_average_mm_h": _numeric_state(average),
-            "buienradar_total_mm": _numeric_state(total),
-            "own_status": own_attrs.get("status"),
-            "own_distance_km": own_attrs.get("distance_km"),
-            "own_eta_minutes": eta,
-            "own_passage": own_attrs.get("passage_classification"),
-            "own_confidence": own_attrs.get("motion_confidence"),
-            "own_forecast_available": own_attrs.get("forecast_available", False),
-            "warning_stage": warning_candidate,
-            "snapshot": {
-                "stv3": dict(own_attrs),
-                "buienradar": {
-                    "average_mm_h": _numeric_state(average),
-                    "total_mm": _numeric_state(total),
-                    "average_last_updated": (
-                        average.last_updated.isoformat() if average else None
-                    ),
-                    "total_last_updated": (
-                        total.last_updated.isoformat() if total else None
-                    ),
+            source_decision = radar_sources.get(engine_id, {})
+            own_attrs = build_precipitation_status(
+                (
+                    region.storm_engine.get_active_storms()
+                    if region else []
+                ),
+                float(lat),
+                float(lon),
+                radar_source=source_decision.get("source"),
+                pressure_trend=pressure_trends.get(engine_id),
+            )
+            if not target.get("radar_covered", False):
+                own_attrs["status"] = "onvoldoende_data"
+            eta = own_attrs.get("eta_minutes")
+            warning_candidate = None
+            if (
+                own_attrs.get("status") == "naderend"
+                and own_attrs.get("eta_reliable")
+                and own_attrs.get("passage_classification")
+                in {"raak", "rand"}
+                and eta is not None
+            ):
+                eta_value = float(eta)
+                warning_candidate = (
+                    "imminent" if eta_value <= 15
+                    else "dichtbij" if eta_value <= 45
+                    else "vroeg" if eta_value <= 90
+                    else None
+                )
+            is_home = target_id == "home"
+            buienradar_snapshot = {
+                "average_mm_h": (
+                    _numeric_state(average) if is_home else None
+                ),
+                "total_mm": _numeric_state(total) if is_home else None,
+                "average_last_updated": (
+                    average.last_updated.isoformat()
+                    if is_home and average else None
+                ),
+                "total_last_updated": (
+                    total.last_updated.isoformat()
+                    if is_home and total else None
+                ),
+                "scope": "home_only",
+            }
+            hass.data[DOMAIN]["verification_samples_pending"].append({
+                "sample_key": f"cycle:{target_id}:{nominal_minute}",
+                "sample_type": "target_cycle",
+                "target_id": target_id,
+                "nominal_minute": nominal_minute,
+                "observed_at": observed_at,
+                "latitude": float(lat),
+                "longitude": float(lon),
+                "buienradar_average_mm_h": (
+                    buienradar_snapshot["average_mm_h"]
+                ),
+                "buienradar_total_mm": (
+                    buienradar_snapshot["total_mm"]
+                ),
+                "own_status": own_attrs.get("status"),
+                "own_distance_km": own_attrs.get("distance_km"),
+                "own_eta_minutes": eta,
+                "own_passage": own_attrs.get(
+                    "passage_classification"
+                ),
+                "own_confidence": own_attrs.get(
+                    "motion_confidence"
+                ),
+                "own_forecast_available": own_attrs.get(
+                    "forecast_available", False
+                ),
+                "warning_stage": warning_candidate,
+                "snapshot": {
+                    "schema_version": 2,
+                    "stv3": dict(own_attrs),
+                    "target": {
+                        "id": target_id,
+                        "name": target.get("name"),
+                        "entity_id": entity_id,
+                        "latitude": float(lat),
+                        "longitude": float(lon),
+                        "region_engine_id": engine_id,
+                        "radar_covered": bool(
+                            target.get("radar_covered", False)
+                        ),
+                        "location_place": target.get(
+                            "location_place"
+                        ),
+                        "country_code": target.get("country_code"),
+                    },
+                    "radar_source_decision": dict(source_decision),
+                    "buienradar": buienradar_snapshot,
+                    "warning_candidate": warning_candidate,
                 },
-                "warning_candidate": warning_candidate,
-            },
-        }
-        hass.data[DOMAIN]["verification_samples_pending"].append(sample)
+            })
 
     @callback
     def _record_warning_snapshot(event) -> None:
@@ -1928,7 +2101,7 @@ async def _async_setup_runtime(
             await _bounded_provider_stage(
                 "observation_flush", _flush_region_observation_batches(), 15
             )
-            _queue_home_verification_sample()
+            _queue_target_verification_samples()
             await _bounded_provider_stage(
                 "calibration_storage", _flush_calibration_data(), 15
             )

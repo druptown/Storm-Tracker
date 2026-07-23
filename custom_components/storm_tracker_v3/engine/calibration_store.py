@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timezone
 import json
 import sqlite3
 import threading
@@ -9,7 +10,7 @@ import threading
 from .provider_bias import profile_confidence, scope_from_region_key
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class CalibrationDataStore:
@@ -27,6 +28,10 @@ class CalibrationDataStore:
         self._regions: set[str] = set()
         self._oldest_timestamp: float | None = None
         self._newest_timestamp: float | None = None
+        self._last_reset_at: str | None = None
+        self._reset_reason: str | None = None
+        self._analysis_summary: dict = {}
+        self._analysis_batches_since_refresh = 0
 
     def initialize(self) -> dict:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -45,6 +50,11 @@ class CalibrationDataStore:
                     grid_deg REAL NOT NULL,
                     observation_count INTEGER NOT NULL,
                     grid_point_count INTEGER NOT NULL,
+                    coverage_lon_min REAL,
+                    coverage_lat_min REAL,
+                    coverage_lon_max REAL,
+                    coverage_lat_max REAL,
+                    coverage_fraction REAL NOT NULL DEFAULT 1.0,
                     UNIQUE(region_key, source, nominal_minute)
                 );
                 CREATE TABLE IF NOT EXISTS frame_points (
@@ -71,6 +81,7 @@ class CalibrationDataStore:
                     precision REAL,
                     recall REAL,
                     f1_score REAL,
+                    shared_coverage_fraction REAL NOT NULL DEFAULT 1.0,
                     UNIQUE(region_key, source_a, source_b, nominal_minute)
                 );
                 CREATE INDEX IF NOT EXISTS idx_frames_source_time
@@ -155,8 +166,23 @@ class CalibrationDataStore:
                 int(stored_schema[0]) if stored_schema is not None else 0
             )
             if stored_schema_version < SCHEMA_VERSION:
-                self._backfill_bias_samples(db)
-                self._rebuild_all_bias_profiles(db)
+                self._reset_for_schema_v4(
+                    db,
+                    previous_version=stored_schema_version,
+                    existing_database=(
+                        stored_schema is not None
+                        or bool(
+                            db.execute(
+                                "SELECT count(*) FROM frames"
+                            ).fetchone()[0]
+                        )
+                        or bool(
+                            db.execute(
+                                "SELECT count(*) FROM comparisons"
+                            ).fetchone()[0]
+                        )
+                    ),
+                )
             elif (
                 db.execute(
                     "SELECT count(*) FROM provider_bias_samples"
@@ -171,6 +197,14 @@ class CalibrationDataStore:
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
             )
+            reset_at = db.execute(
+                "SELECT value FROM metadata WHERE key='last_reset_at'"
+            ).fetchone()
+            reset_reason = db.execute(
+                "SELECT value FROM metadata WHERE key='last_reset_reason'"
+            ).fetchone()
+            self._last_reset_at = reset_at[0] if reset_at else None
+            self._reset_reason = reset_reason[0] if reset_reason else None
             self._totals = {
                 "frames": db.execute("SELECT count(*) FROM frames").fetchone()[0],
                 "datapoints": db.execute(
@@ -203,7 +237,168 @@ class CalibrationDataStore:
                 "SELECT min(product_timestamp), max(product_timestamp) FROM frames"
             ).fetchone()
             self._oldest_timestamp, self._newest_timestamp = bounds
+            self._analysis_summary = self._load_analysis_summary(db)
         return self.statistics()
+
+    def _reset_for_schema_v4(
+        self,
+        db: sqlite3.Connection,
+        *,
+        previous_version: int,
+        existing_database: bool,
+    ) -> None:
+        """Start een wetenschappelijk schone dataset met dekking per frame.
+
+        Schema v3 bevat vergelijkingen waarbij de activatiemarge van een
+        provider ten onrechte als volledige radardekking kon gelden. Die data
+        kan niet betrouwbaar achteraf worden hersteld en wordt daarom eenmalig
+        transactioneel verwijderd.
+        """
+        db.executescript("""
+            BEGIN IMMEDIATE;
+            DROP TABLE IF EXISTS provider_bias_profiles;
+            DROP TABLE IF EXISTS provider_bias_samples;
+            DROP TABLE IF EXISTS forecast_verification_samples;
+            DROP TABLE IF EXISTS comparisons;
+            DROP TABLE IF EXISTS frame_points;
+            DROP TABLE IF EXISTS frames;
+
+            CREATE TABLE frames (
+                id INTEGER PRIMARY KEY,
+                region_key TEXT NOT NULL,
+                source TEXT NOT NULL,
+                nominal_minute INTEGER NOT NULL,
+                product_timestamp REAL NOT NULL,
+                collected_at REAL NOT NULL,
+                grid_deg REAL NOT NULL,
+                observation_count INTEGER NOT NULL,
+                grid_point_count INTEGER NOT NULL,
+                coverage_lon_min REAL,
+                coverage_lat_min REAL,
+                coverage_lon_max REAL,
+                coverage_lat_max REAL,
+                coverage_fraction REAL NOT NULL,
+                UNIQUE(region_key, source, nominal_minute)
+            );
+            CREATE TABLE frame_points (
+                frame_id INTEGER NOT NULL
+                    REFERENCES frames(id) ON DELETE CASCADE,
+                grid_lat INTEGER NOT NULL,
+                grid_lon INTEGER NOT NULL,
+                max_intensity REAL,
+                max_quality REAL,
+                observation_count INTEGER NOT NULL,
+                PRIMARY KEY(frame_id, grid_lat, grid_lon)
+            ) WITHOUT ROWID;
+            CREATE TABLE comparisons (
+                id INTEGER PRIMARY KEY,
+                region_key TEXT NOT NULL,
+                source_a TEXT NOT NULL,
+                source_b TEXT NOT NULL,
+                nominal_minute INTEGER NOT NULL,
+                compared_at REAL NOT NULL,
+                primary_cells INTEGER NOT NULL,
+                reference_cells INTEGER NOT NULL,
+                overlap_cells INTEGER NOT NULL,
+                false_positive_cells INTEGER NOT NULL,
+                missed_cells INTEGER NOT NULL,
+                precision REAL,
+                recall REAL,
+                f1_score REAL,
+                shared_coverage_fraction REAL NOT NULL,
+                UNIQUE(region_key, source_a, source_b, nominal_minute)
+            );
+            CREATE INDEX idx_frames_source_time
+                ON frames(source, nominal_minute);
+            CREATE INDEX idx_frames_region_time
+                ON frames(region_key, nominal_minute);
+            CREATE INDEX idx_comparisons_pair_time
+                ON comparisons(source_a, source_b, nominal_minute);
+            CREATE TABLE forecast_verification_samples (
+                id INTEGER PRIMARY KEY,
+                sample_key TEXT NOT NULL UNIQUE,
+                sample_type TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                nominal_minute INTEGER NOT NULL,
+                observed_at REAL NOT NULL,
+                latitude REAL,
+                longitude REAL,
+                buienradar_average_mm_h REAL,
+                buienradar_total_mm REAL,
+                own_status TEXT,
+                own_distance_km REAL,
+                own_eta_minutes REAL,
+                own_passage TEXT,
+                own_confidence TEXT,
+                own_forecast_available INTEGER NOT NULL,
+                warning_stage TEXT,
+                snapshot_json TEXT NOT NULL
+            );
+            CREATE INDEX idx_verification_target_time
+                ON forecast_verification_samples(target_id, nominal_minute);
+            CREATE INDEX idx_verification_type_time
+                ON forecast_verification_samples(sample_type, nominal_minute);
+            CREATE TABLE provider_bias_samples (
+                id INTEGER PRIMARY KEY,
+                region_key TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                from_source TEXT NOT NULL,
+                to_source TEXT NOT NULL,
+                nominal_minute INTEGER NOT NULL,
+                compared_at REAL NOT NULL,
+                from_cells INTEGER NOT NULL,
+                to_cells INTEGER NOT NULL,
+                overlap_cells INTEGER NOT NULL,
+                detection_ratio REAL,
+                extra_fraction REAL,
+                wet_area_ratio REAL,
+                f1_score REAL,
+                intensity_bias REAL,
+                shift_lat_cells REAL,
+                shift_lon_cells REAL,
+                latency_seconds REAL,
+                UNIQUE(
+                    region_key, from_source, to_source, nominal_minute
+                )
+            );
+            CREATE INDEX idx_bias_samples_pair_scope
+                ON provider_bias_samples(
+                    from_source, to_source, scope_key, nominal_minute
+                );
+            CREATE TABLE provider_bias_profiles (
+                scope_key TEXT NOT NULL,
+                from_source TEXT NOT NULL,
+                to_source TEXT NOT NULL,
+                sample_count INTEGER NOT NULL,
+                mean_detection_ratio REAL,
+                mean_extra_fraction REAL,
+                mean_wet_area_ratio REAL,
+                mean_f1_score REAL,
+                mean_intensity_bias REAL,
+                mean_shift_lat_cells REAL,
+                mean_shift_lon_cells REAL,
+                mean_latency_seconds REAL,
+                confidence TEXT NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(scope_key, from_source, to_source)
+            ) WITHOUT ROWID;
+            COMMIT;
+        """)
+        if existing_database:
+            reset_at = datetime.now(timezone.utc).isoformat()
+            reason = (
+                "schema_v4_coverage_contract_clean_reset"
+                f"_from_v{previous_version}"
+            )
+            db.executemany(
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)",
+                (
+                    ("last_reset_at", reset_at),
+                    ("last_reset_reason", reason),
+                ),
+            )
+            self._last_reset_at = reset_at
+            self._reset_reason = reason
 
     def write_batch(self, batch: dict) -> dict:
         frames = batch.get("frames", ())
@@ -212,6 +407,13 @@ class CalibrationDataStore:
         with self._lock, self._connect() as db:
             affected_bias_profiles: set[tuple[str, str, str]] = set()
             for frame in frames:
+                if len(frame) == 9:
+                    # Compatibiliteit voor oude interne test-/toolcallers.
+                    frame = (
+                        *frame[:8],
+                        None, None, None, None, 1.0,
+                        frame[8],
+                    )
                 existing = db.execute(
                     "SELECT id, grid_point_count FROM frames "
                     "WHERE region_key=? AND source=? AND nominal_minute=?",
@@ -220,14 +422,21 @@ class CalibrationDataStore:
                 db.execute("""
                     INSERT INTO frames(
                         region_key, source, nominal_minute, product_timestamp,
-                        collected_at, grid_deg, observation_count, grid_point_count
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                        collected_at, grid_deg, observation_count,
+                        grid_point_count, coverage_lon_min, coverage_lat_min,
+                        coverage_lon_max, coverage_lat_max, coverage_fraction
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(region_key, source, nominal_minute) DO UPDATE SET
                         product_timestamp=excluded.product_timestamp,
                         collected_at=excluded.collected_at,
                         observation_count=excluded.observation_count,
-                        grid_point_count=excluded.grid_point_count
-                """, frame[:8])
+                        grid_point_count=excluded.grid_point_count,
+                        coverage_lon_min=excluded.coverage_lon_min,
+                        coverage_lat_min=excluded.coverage_lat_min,
+                        coverage_lon_max=excluded.coverage_lon_max,
+                        coverage_lat_max=excluded.coverage_lat_max,
+                        coverage_fraction=excluded.coverage_fraction
+                """, frame[:13])
                 frame_id = db.execute(
                     "SELECT id FROM frames WHERE region_key=? AND source=? AND nominal_minute=?",
                     frame[:3],
@@ -254,8 +463,10 @@ class CalibrationDataStore:
                         frame_id, grid_lat, grid_lon, max_intensity,
                         max_quality, observation_count
                     ) VALUES(?, ?, ?, ?, ?, ?)
-                """, ((frame_id, *point) for point in frame[8]))
+                """, ((frame_id, *point) for point in frame[13]))
             for comparison in comparisons:
+                if len(comparison) == 13:
+                    comparison = (*comparison, 1.0)
                 exists = db.execute(
                     "SELECT 1 FROM comparisons WHERE region_key=? AND source_a=? "
                     "AND source_b=? AND nominal_minute=?",
@@ -268,7 +479,8 @@ class CalibrationDataStore:
                     region_key, source_a, source_b, nominal_minute, compared_at,
                     primary_cells, reference_cells, overlap_cells,
                     false_positive_cells, missed_cells, precision, recall, f1_score
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    , shared_coverage_fraction
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(region_key, source_a, source_b, nominal_minute)
                 DO UPDATE SET
                     compared_at=excluded.compared_at,
@@ -279,7 +491,8 @@ class CalibrationDataStore:
                     missed_cells=excluded.missed_cells,
                     precision=excluded.precision,
                     recall=excluded.recall,
-                    f1_score=excluded.f1_score
+                    f1_score=excluded.f1_score,
+                    shared_coverage_fraction=excluded.shared_coverage_fraction
                 """, comparison)
                 affected_bias_profiles.update(
                     self._upsert_bias_samples_for_comparison(db, comparison)
@@ -342,6 +555,18 @@ class CalibrationDataStore:
                 "SELECT count(*) FROM provider_bias_profiles"
             ).fetchone()[0]
             profile_snapshot = self._load_bias_profiles(db)
+            self._analysis_batches_since_refresh += 1
+            analysis_is_empty = not (
+                self._analysis_summary.get("sample_types")
+                or self._analysis_summary.get("source_frames")
+                or self._analysis_summary.get("provider_pairs")
+            )
+            if (
+                analysis_is_empty
+                or self._analysis_batches_since_refresh >= 12
+            ):
+                self._analysis_summary = self._load_analysis_summary(db)
+                self._analysis_batches_since_refresh = 0
         return {
             "frames_written": len(frames),
             "comparisons_written": len(comparisons),
@@ -371,12 +596,76 @@ class CalibrationDataStore:
             "regions": len(self._regions),
             "oldest_timestamp": self._oldest_timestamp,
             "newest_timestamp": self._newest_timestamp,
+            "schema_version": SCHEMA_VERSION,
+            "last_reset_at": self._last_reset_at,
+            "last_reset_reason": self._reset_reason,
+            "analysis": self._analysis_summary,
         }
 
     def load_bias_profiles(self) -> list[dict]:
         """Lees de compacte profielen voor de runtime zonder ruwe frames."""
         with self._lock, self._connect() as db:
             return self._load_bias_profiles(db)
+
+    @staticmethod
+    def _load_analysis_summary(db: sqlite3.Connection) -> dict:
+        """Geef begrensde, veilige analysetellers zonder ruwe data te lekken."""
+        sample_types = {
+            str(sample_type): int(count)
+            for sample_type, count in db.execute(
+                "SELECT sample_type, count(*) "
+                "FROM forecast_verification_samples "
+                "GROUP BY sample_type ORDER BY count(*) DESC"
+            )
+        }
+        target_samples = {
+            str(target_id): int(count)
+            for target_id, count in db.execute(
+                "SELECT target_id, count(*) "
+                "FROM forecast_verification_samples "
+                "GROUP BY target_id ORDER BY count(*) DESC LIMIT 30"
+            )
+        }
+        source_frames = {
+            str(source): int(count)
+            for source, count in db.execute(
+                "SELECT source, count(*) FROM frames "
+                "GROUP BY source ORDER BY count(*) DESC"
+            )
+        }
+        provider_pairs = [
+            {
+                "pair": f"{source_a}<->{source_b}",
+                "samples": int(samples),
+                "comparable": int(comparable),
+                "mean_f1_score": (
+                    round(float(mean_f1), 3)
+                    if mean_f1 is not None else None
+                ),
+                "mean_shared_coverage_fraction": round(
+                    float(mean_coverage), 3
+                ),
+            }
+            for (
+                source_a,
+                source_b,
+                samples,
+                comparable,
+                mean_f1,
+                mean_coverage,
+            ) in db.execute(
+                "SELECT source_a, source_b, count(*), count(f1_score), "
+                "avg(f1_score), avg(shared_coverage_fraction) "
+                "FROM comparisons GROUP BY source_a, source_b "
+                "ORDER BY count(*) DESC LIMIT 30"
+            )
+        ]
+        return {
+            "sample_types": sample_types,
+            "target_samples": target_samples,
+            "source_frames": source_frames,
+            "provider_pairs": provider_pairs,
+        }
 
     def _backfill_bias_samples(self, db: sqlite3.Connection) -> None:
         """Migreer bestaande v2-vergelijkingen zonder zware puntenscan."""
@@ -442,7 +731,7 @@ class CalibrationDataStore:
         (
             region_key, source_a, source_b, minute, compared_at,
             cells_a, cells_b, overlap, _false_positive, _missed,
-            _precision, _recall, f1_score,
+            _precision, _recall, f1_score, _shared_coverage_fraction,
         ) = comparison
         frame_rows = db.execute("""
             SELECT id, source, product_timestamp

@@ -89,6 +89,11 @@ def _apply_source_transition(result: dict, transition: dict | None) -> None:
 
 def _open_meteo_target_summary(data: dict, target_id: str) -> dict:
     """Publiceer modelbegeleiding zonder ze als radarwaarneming te behandelen."""
+    if not data.get("open_meteo_enabled", False):
+        return {
+            "open_meteo_enabled": False,
+            "open_meteo_status": "disabled",
+        }
     aggregate = data.get("open_meteo_result", {})
     details = data.get("open_meteo_results_by_target", {}).get(target_id, {})
     return {
@@ -411,16 +416,38 @@ class KmiObservatieSensor(StormTrackerBaseSensor):
 
     @property
     def extra_state_attributes(self):
-        obs_list = self.hass.data.get(DOMAIN, {}).get("last_kmi_observations", [])
+        data = self.hass.data.get(DOMAIN, {})
+        obs_list = data.get("last_kmi_observations", [])
+        provider = data.get("kmi_provider")
+        frame_timestamp = getattr(
+            provider, "last_frame_timestamp", None
+        ) if provider is not None else None
+        frame_age_minutes = (
+            round((time.time() - float(frame_timestamp)) / 60, 1)
+            if frame_timestamp is not None else None
+        )
         if not obs_list:
-            return {"status": "geen data"}
+            return {
+                "status": (
+                    "niet_actief" if provider is None
+                    else "wacht_op_frame" if frame_timestamp is None
+                    else "droog" if frame_age_minutes <= 30
+                    else "verouderd"
+                ),
+                "aantal": 0,
+                "laatste_frame": _timestamp_iso(frame_timestamp),
+                "frame_leeftijd_minuten": frame_age_minutes,
+            }
         intens = [o.intensity for o in obs_list if o.intensity]
         return {
+            "status": "neerslag",
             "aantal": len(obs_list),
             "gem_intensiteit": round(sum(intens) / len(intens), 1) if intens else 0,
             "max_intensiteit": max(intens) if intens else 0,
             "eerste_lat": obs_list[0].lat,
             "eerste_lon": obs_list[0].lon,
+            "laatste_frame": _timestamp_iso(frame_timestamp),
+            "frame_leeftijd_minuten": frame_age_minutes,
         }
 
 
@@ -508,12 +535,23 @@ class OpenMeteoGearSensor(StormTrackerBaseSensor):
 
     @property
     def native_value(self):
-        result = self.hass.data.get(DOMAIN, {}).get("open_meteo_result", {})
+        data = self.hass.data.get(DOMAIN, {})
+        if not data.get("open_meteo_enabled", False):
+            return "DISABLED"
+        result = data.get("open_meteo_result", {})
         return result.get("gear", "INITIALIZING")
 
     @property
     def extra_state_attributes(self):
-        result = self.hass.data.get(DOMAIN, {}).get("open_meteo_result", {})
+        data = self.hass.data.get(DOMAIN, {})
+        if not data.get("open_meteo_enabled", False):
+            return {
+                "enabled": False,
+                "role": "optional_model_guidance",
+                "provider_status": "disabled",
+                "reason": "uitgeschakeld_in_integratieopties",
+            }
+        result = data.get("open_meteo_result", {})
         target_results = result.get("target_results", {})
         home = target_results.get("home", {})
         return {
@@ -1017,7 +1055,7 @@ class TargetPrecipitationStatusSensor(StormTrackerBaseSensor):
 
 
 class StormTellerSensor(StormTrackerBaseSensor):
-    """Toont het aantal actieve storms in de StormEngine."""
+    """Toont het aantal actieve storms over alle RegionEngines."""
     _attr_name      = "STV3 Actieve Storms"
     _attr_unique_id = "stv3_storm_teller"
     _attr_icon      = "mdi:weather-lightning-rainy"
@@ -1034,17 +1072,32 @@ class StormTellerSensor(StormTrackerBaseSensor):
     def available(self) -> bool:
         return True
 
+    def _storms(self):
+        manager = self.hass.data.get(DOMAIN, {}).get("storm_manager")
+        if manager is None:
+            return [
+                (None, storm)
+                for storm in self.hass.data.get(DOMAIN, {}).get(
+                    "storms", []
+                )
+            ]
+        return [
+            (engine.engine_id, storm)
+            for engine in manager.get_all_engines()
+            for storm in engine.storm_engine.get_active_storms()
+        ]
+
     @property
     def native_value(self):
-        storms = self.hass.data.get(DOMAIN, {}).get("storms", [])
-        return len(storms)
+        return len(self._storms())
 
     @property
     def extra_state_attributes(self):
-        storms = self.hass.data.get(DOMAIN, {}).get("storms", [])
+        storms = self._storms()
         return {
             "storms": [
                 {
+                    "region_engine": engine_id,
                     "id":          s.storm_id,
                     "lat":         round(s.centroid_lat, 4),
                     "lon":         round(s.centroid_lon, 4),
@@ -1080,8 +1133,9 @@ class StormTellerSensor(StormTrackerBaseSensor):
                     "mcs_duur_min": getattr(s, "mcs_duration_minutes", 0.0),
                     "convectieve_span_km": getattr(s, "mcs_convective_span_km", 0.0),
                 }
-                for s in storms
-            ]
+                for engine_id, s in storms
+            ],
+            "scope": "alle_region_engines",
         }
 
 

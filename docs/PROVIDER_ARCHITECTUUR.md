@@ -1,7 +1,7 @@
-# Storm Tracker V3 — providerarchitectuur 0.4.91
+# Storm Tracker V3 — providerarchitectuur 0.4.92
 
 Dit document beschrijft de effectief geïmplementeerde providerstructuur van
-Storm Tracker V3 0.4.91. Het onderscheidt operationele radar, fallbackdata,
+Storm Tracker V3 0.4.92. Het onderscheidt operationele radar, fallbackdata,
 bliksem, validatiebronnen en bronnen die alleen beleidsmatig voor toekomstige
 uitbreiding zijn voorzien.
 
@@ -26,9 +26,10 @@ eigen engine met een eigen:
 
 Hierdoor kunnen bijvoorbeeld België en Miami gelijktijdig worden bewaakt zonder
 dat waarnemingen, druktrends of modeldata tussen beide regio's worden vermengd.
-Open-Meteo is bewust centraal en targetgericht: één broker bundelt alle unieke
-targetlocaties, maar publiceert ieder antwoord weer uitsluitend bij het
-bijbehorende target.
+Open-Meteo staat standaard uit. Wanneer deze optionele modelbegeleiding
+expliciet is ingeschakeld, bundelt één centrale broker alle unieke
+targetlocaties en publiceert ieder antwoord uitsluitend bij het bijbehorende
+target.
 
 ## 2. Gecoördineerde providercyclus
 
@@ -94,7 +95,7 @@ niet onbeperkt een actuele fallback blokkeren.
 | Provider | Dekking | Data | Frequentie | Gebruik |
 |---|---|---|---:|---|
 | Netatmo | Wereldwijd waar publieke stations bestaan | Regen, luchtdruk, temperatuur, vochtigheid en wind | 5 min per RegionEngine | Grondbevestiging en regionale druktrend |
-| Open-Meteo | Wereldwijd | 19 modelvelden: neerslag, kans, CAPE, LPI, CIN, Lifted Index, druk, wolken, vriesniveau en wind op 700/850 hPa | cyclus elke 5 min, echte API-cache 30 min | Modelbegeleiding en historische verificatie; nooit radar, grondwaarheid of celvorming |
+| Open-Meteo | Wereldwijd | 19 modelvelden: neerslag, kans, CAPE, LPI, CIN, Lifted Index, druk, wolken, vriesniveau en wind op 700/850 hPa | standaard uit; indien ingeschakeld cyclus elke 5 min met API-cache van 30 min | Optionele modelbegeleiding en historische verificatie; nooit radar, grondwaarheid of celvorming |
 | MeteoLux | Luxemburg | Lokale nowcast/modelinformatie | 5 min wanneer nodig | Modelbegeleiding; nooit operationele radar |
 | GeoSphere Austria | Oostenrijk | INCA-puntnowcast in stappen van 15 minuten | 5 min wanneer nodig | Modelbegeleiding/nowcast; nooit operationele radar |
 | ItaliaMeteo | Italië | ARPAE-modelverwachting en dagelijkse/historische radarcatalogus | 5 min wanneer nodig | Modelbegeleiding; nooit realtime-radar |
@@ -201,17 +202,27 @@ sprongen zonder een kunstmatige neerslagfootprint te tekenen.
 De passieve kalibratie is multi-provider en regionaal. Elk beschikbaar frame
 van KMI, KNMI, DWD, Météo-France, Met Office, DPC, AEMET, OPERA, RainViewer,
 H SAF of GOES wordt alleen gekoppeld aan een andere bron met exact dezelfde
-nominale minuut én dezelfde geografische RegionEngine-sleutel. De sensor
-rapporteert overlap, gemiste en extra bezette rastervakken, precision, recall
-en F1 per providerpaar. Deze scores zijn voorlopig diagnostisch en wijzigen
-geen operationele filtering.
+nominale minuut én dezelfde geografische RegionEngine-sleutel. Vanaf schema v4
+draagt ieder frame zijn werkelijke geografische dekkingsgrens. Twee bronnen
+worden alleen vergeleken wanneer minstens zestig procent van het
+RegionEngine-gebied door beide wordt gedekt. De sensor rapporteert overlap,
+gemiste en extra bezette rastervakken, precision, recall, F1 en de gedeelde
+dekkingsfractie per providerpaar. Deze scores zijn voorlopig diagnostisch en
+wijzigen geen operationele filtering.
 
 Alle invoer voor latere kalibratie wordt onbeperkt bewaard in
 `.storage/storm_tracker_v3_calibration.sqlite3`. De database bevat afzonderlijke
-tabellen voor bronframes, hun bezette 0,10-gradenrasterpunten en paarsgewijze
-vergelijkingsresultaten. Ook droge frames worden opgeslagen. SQLite gebruikt
-WAL en transactionele batches buiten de Home Assistant-eventloop; er is bewust
-geen retentie, aggregatie of automatische filteraanpassing actief.
+tabellen voor bronframes met dekkingsgrens, hun bezette
+0,10-gradenrasterpunten, paarsgewijze vergelijkingen en
+targetverificaties. Ook droge frames worden opgeslagen wanneer de bron het
+gebied aantoonbaar dekt. Iedere vijf minuten wordt voor elk beschikbaar target
+op zijn actuele coördinaten de eigen verwachting, ETA, passage, confidence,
+bronbeslissing en kandidaatwaarschuwing vastgelegd. Bij de overgang naar
+schema v4 wordt de pre-v4-dataset eenmalig gewist, omdat de ontbrekende
+historische dekkingsinformatie niet betrouwbaar kan worden hersteld. SQLite
+gebruikt WAL en transactionele batches buiten de Home
+Assistant-eventloop; er is bewust geen retentie, aggregatie of automatische
+filteraanpassing actief.
 
 - actuele afstand tot elk target;
 - naderend, wegtrekkend, passerend of stationair;
@@ -254,9 +265,10 @@ operationeel beschreven bronnen.
 
 De technische weergave van de multi-targetkaart toont de actuele
 databasegrootte, aantallen frames, rasterdatapunten, vergelijkingen, bronnen en
-regio's, plus de laatste schrijfbatch. Deze tellers worden incrementeel
-bijgehouden zodat een grote database niet iedere vijf minuten volledig wordt
-gescand.
+regio's, plus de laatste schrijfbatch. Ook schemaversie, resetreden en
+begrensde tellingen per target, sampletype, bron en providerpaar zijn
+zichtbaar. De basistellers worden incrementeel bijgehouden zodat een grote
+database niet iedere vijf minuten volledig wordt gescand.
 
 Recente bliksem wordt daarnaast als een afzonderlijke geclusterde envelop
 gepubliceerd. Deze rode zone pulseert onafhankelijk van de neerslagpixels:
@@ -265,7 +277,7 @@ regenkleur betekent ze bliksemactiviteit zonder bevestigde radarneerslag. De
 zone gebruikt inslagen tot vijf minuten oud, een buffer van twaalf kilometer
 en verandert nooit de geometrie of intensiteit van het radarraster.
 
-## 10. Testdekking in 0.4.85
+## 10. Testdekking in 0.4.92
 
 De provider-audit omvat tests voor:
 

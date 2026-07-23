@@ -37,7 +37,10 @@ def test_options_updates_are_wired_to_live_runtime_setter():
     source = INIT_FILE.read_text(encoding="utf-8")
     assert "entry.add_update_listener(_async_options_updated)" in source
     assert 'hass.data[DOMAIN]["set_lightning_source_mode"]' in source
-    assert 'await setter(updated_entry.options.get("lightning_source_mode", "auto"))' in source
+    assert "updated_config = {" in source
+    assert "**updated_entry.data" in source
+    assert "**updated_entry.options" in source
+    assert 'updated_config.get("lightning_source_mode", "auto")' in source
 
 
 def test_runtime_mode_is_not_captured_by_provider_callbacks():

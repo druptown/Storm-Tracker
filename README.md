@@ -15,8 +15,8 @@ ProjectionTargets -> StormManager -> dynamische RegionEngine(s)
 ```
 
 De huidige providers omvatten onder andere Blitzortung, OPERA/EUMETNET,
-KMI, KNMI, RainViewer, H SAF H40B, NOAA GOES-18/19 RRQPE, Netatmo en
-Open-Meteo. OPERA-cellen met lage
+KMI, KNMI, RainViewer, H SAF H40B, NOAA GOES-18/19 RRQPE en Netatmo.
+Open-Meteo is optionele modelbegeleiding en staat standaard uit. OPERA-cellen met lage
 bronkwaliteit worden alleen operationeel gebruikt wanneer KMI, KNMI of
 RainViewer ze geografisch en temporeel bevestigt.
 
@@ -60,6 +60,7 @@ storm_tracker_v3:
   knmi_wms_api_key: !secret knmi_wms_api_key
   hsaf_username: !secret hsaf_username
   hsaf_password: !secret hsaf_password
+  open_meteo_enabled: false
 ```
 
 KNMI-, H SAF- en Netatmo-instellingen zijn optioneel. Bewaar echte tokens en sleutels
@@ -94,4 +95,4 @@ release notes.
 
 ## Versie
 
-De huidige integratieversie is **0.4.91**.
+De huidige integratieversie is **0.4.92**.

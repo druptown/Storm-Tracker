@@ -191,7 +191,7 @@ def test_bias_samples_are_upserted_not_double_counted(
     )
 
 
-def test_schema_v2_history_is_backfilled_into_directional_profiles(
+def test_pre_v4_history_is_cleanly_reset_for_coverage_contract(
     calibration_store_module, tmp_path,
 ):
     path = tmp_path / "calibration.sqlite3"
@@ -256,11 +256,23 @@ def test_schema_v2_history_is_backfilled_into_directional_profiles(
         """, (region,))
     store = calibration_store_module.CalibrationDataStore(str(path))
     stats = store.initialize()
-    assert stats["total_bias_samples"] == 2
-    profiles = store.load_bias_profiles()
-    assert any(
-        profile["from_source"] == "kmi"
-        and profile["to_source"] == "opera"
-        and profile["mean_latency_seconds"] == 30.0
-        for profile in profiles
-    )
+    assert stats["schema_version"] == 4
+    assert stats["total_frames"] == 0
+    assert stats["total_datapoints"] == 0
+    assert stats["total_comparisons"] == 0
+    assert stats["total_verification_samples"] == 0
+    assert stats["total_bias_samples"] == 0
+    assert stats["last_reset_at"]
+    assert "coverage_contract_clean_reset" in stats["last_reset_reason"]
+    assert store.load_bias_profiles() == []
+    with sqlite3.connect(path) as db:
+        frame_columns = {
+            row[1] for row in db.execute("PRAGMA table_info(frames)")
+        }
+        comparison_columns = {
+            row[1] for row in db.execute(
+                "PRAGMA table_info(comparisons)"
+            )
+        }
+    assert "coverage_fraction" in frame_columns
+    assert "shared_coverage_fraction" in comparison_columns

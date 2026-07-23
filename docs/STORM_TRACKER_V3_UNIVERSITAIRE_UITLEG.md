@@ -2,7 +2,7 @@
 
 ## Van heterogene weerdata naar persoonsgebonden waarschuwingen
 
-**Versie van de integratie bij opmaak:** 0.4.91
+**Versie van de integratie bij opmaak:** 0.4.92
 **Datum:** 23 juli 2026
 
 ## Samenvatting
@@ -124,7 +124,8 @@ De algemene bronregel is:
 | Wereldwijde aggregator | RainViewer | Operationele fallback waar lokale radar of OPERA ontbreekt |
 | Satellietneerslag | H SAF H40B, GOES RRQPE | Aanvullen waar grondradar ontbreekt of onvoldoende dekking heeft |
 | Bliksem | Blitzortung, EUMETSAT LI, GOES GLM | Elektrische activiteit; nooit rechtstreeks als neerslagradar |
-| Grondvalidatie | Netatmo, Open-Meteo en nationale meetnetten | Controleren of radarwaarnemingen meteorologisch aannemelijk zijn |
+| Grondvalidatie | Netatmo en nationale meetnetten | Controleren of radarwaarnemingen meteorologisch aannemelijk zijn |
+| Modelbegeleiding | Open-Meteo (optioneel, standaard uit) | Context voor langere verwachtingen; nooit grondwaarheid of radar |
 
 Voorbeelden van de geografische volgorde:
 
@@ -409,10 +410,12 @@ Na een Home Assistant-herstart blijft de druktrend daarom eerst `initializing`,
 `unknown` of `onvoldoende_data`. Zo worden twee toevallige eerste waarden niet
 als extreme drukval geïnterpreteerd.
 
-Open-Meteo en beschikbare nationale stationsbronnen worden als aanvullende
-validatie gebruikt. Eén centrale broker vraagt uitsluitend unieke
-targetlocaties op en bewaart per target zeven kwartierstappen. Open-Meteo wordt
-niet naar de radar-fusie gerouteerd en vervangt een echte radar niet.
+Beschikbare nationale stationsbronnen worden als aanvullende validatie
+gebruikt. Open-Meteo is uitsluitend optionele modelbegeleiding en staat
+standaard uit. Wanneer het expliciet wordt ingeschakeld, vraagt één centrale
+broker uitsluitend unieke targetlocaties op en bewaart per target zeven
+kwartierstappen. Open-Meteo wordt nooit naar de radar-fusie gerouteerd,
+geldt niet als grondwaarheid en vervangt een echte radar niet.
 
 ## 13. Bliksem
 
@@ -533,11 +536,13 @@ recall    = TP / (TP + FN)
 F1        = 2 × precision × recall / (precision + recall)
 ```
 
-Vergelijkingen gebeuren alleen wanneer observaties geografisch relevant zijn
-en hetzelfde nominale tijdstip vertegenwoordigen.
+Vergelijkingen gebeuren alleen wanneer observaties hetzelfde nominale tijdstip
+vertegenwoordigen en beide providers minstens zestig procent van hetzelfde
+RegionEngine-gebied werkelijk dekken. Provideractivatie op basis van een ruime
+marge is dus niet langer hetzelfde als geldige kalibratiedekking.
 
 De database observeert nog steeds de ruwe providerkwaliteit, maar gebruikt
-vanaf schema v3 één beperkt en omkeerbaar resultaat operationeel:
+vanaf schema v4 één beperkt en omkeerbaar resultaat operationeel:
 bronwisselprofielen sturen uitsluitend de tijdelijke betrouwbaarheidsmarge.
 Ze veranderen geen officiële pixels, intensiteiten of afstanden.
 
@@ -574,6 +579,13 @@ De database bevindt zich in:
 ```text
 .storage/storm_tracker_v3_calibration.sqlite3
 ```
+
+Bij de overgang naar schema v4 wordt de pre-v4-dataset eenmalig verwijderd.
+Die gegevens bevatten geen betrouwbare providerdekkingsgrenzen en kunnen dus
+niet wetenschappelijk zuiver worden herberekend. Vanaf dat moment wordt per
+beschikbaar target om de vijf minuten een eigen verificatiesnapshot op de
+actuele GPS-positie opgeslagen; radarpixels blijven efficiënt per
+RegionEngine gedeeld.
 
 Ze gebruikt SQLite met WAL-transacties. Grote hoeveelheden historische data
 worden op schijf opgeslagen en niet permanent in het werkgeheugen gehouden.
