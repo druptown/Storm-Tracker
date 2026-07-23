@@ -143,12 +143,16 @@ def build_precipitation_status(
         "rapid_pressure_fall": (pressure_trend or {}).get("rapid_fall", False),
         "selected_reason": None,
         "nearest_precipitation_storm_id": None,
+        "tracked_system_storm_id": None,
+        "nearest_precipitation_is_tracked_system": None,
+        "distance_system_relation": None,
         "nearest_precipitation_distance_km": None,
         "nearest_precipitation_centroid_distance_km": None,
         "nearest_precipitation_max_dbz": None,
         "nearest_precipitation_frames": None,
         "tracked_system_distance_km": None,
         "tracked_system_centroid_distance_km": None,
+        "tracked_system_frames": None,
         "eta_reliable": False,
         "eta_basis": None,
         "footprint_pass_minutes": None,
@@ -232,7 +236,16 @@ def build_precipitation_status(
         **base,
         "status": status,
         "storm_id": storm.storm_id,
+        "tracked_system_storm_id": storm.storm_id,
         "nearest_precipitation_storm_id": nearest_storm.storm_id,
+        "nearest_precipitation_is_tracked_system": (
+            nearest_storm.storm_id == storm.storm_id
+        ),
+        "distance_system_relation": (
+            "zelfde_systeem"
+            if nearest_storm.storm_id == storm.storm_id
+            else "verschillende_systemen"
+        ),
         "selected_reason": selected_reason,
         "tracking_status": tracking_status,
         # Backwards-compatible safety distance: always the nearest observed
@@ -250,6 +263,7 @@ def build_precipitation_status(
         "tracked_system_centroid_distance_km": round(
             tracked_centroid_distance, 1
         ),
+        "tracked_system_frames": storm.consecutive_radar_frames,
         "impact_lat": round(impact_lat, 4),
         "impact_lon": round(impact_lon, 4),
         "system_lat": round(storm.centroid_lat, 4),

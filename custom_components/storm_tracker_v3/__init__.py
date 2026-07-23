@@ -594,6 +594,10 @@ async def _async_setup_runtime(
         return states
 
     def _refresh_engine_radar_decisions():
+        from .engine.provider_bias import (
+            select_transition_profile,
+            transition_adjustment,
+        )
         from .providers.engine_radar_policy import (
             apply_echo_availability,
             select_engine_radar_source,
@@ -639,11 +643,21 @@ async def _async_setup_runtime(
                 previous_decisions.get(region.engine_id) or {}
             ).get("source")
             if previous_source and decision.source and previous_source != decision.source:
+                bias_profile = select_transition_profile(
+                    hass.data[DOMAIN].get("radar_bias_profile_index", {}),
+                    region_key=region.storage_key,
+                    from_source=previous_source,
+                    to_source=decision.source,
+                )
+                adjustment = transition_adjustment(bias_profile)
                 transitions[region.engine_id] = {
                     "from": previous_source,
                     "to": decision.source,
                     "started_at": now_ts,
-                    "active_until": now_ts + 10 * 60,
+                    "active_until": (
+                        now_ts + adjustment["transition_window_seconds"]
+                    ),
+                    **adjustment,
                 }
             transition = transitions.get(region.engine_id)
             if transition and now_ts >= transition["active_until"]:
@@ -698,6 +712,7 @@ async def _async_setup_runtime(
         return routed
     from .engine.radar_calibration import RadarCalibrationObserver
     from .engine.calibration_store import CalibrationDataStore
+    from .engine.provider_bias import build_profile_index
     hass.data[DOMAIN]["radar_calibration_observer"] = RadarCalibrationObserver(
         evaluation_center=(home_lat, home_lon),
         evaluation_radius_km=radar_radius,
@@ -708,16 +723,35 @@ async def _async_setup_runtime(
     calibration_stats = await hass.async_add_executor_job(
         calibration_store.initialize
     )
+    bias_profiles = await hass.async_add_executor_job(
+        calibration_store.load_bias_profiles
+    )
     hass.data[DOMAIN]["radar_calibration_store"] = calibration_store
+    hass.data[DOMAIN]["radar_bias_profiles"] = bias_profiles
+    hass.data[DOMAIN]["radar_bias_profile_index"] = build_profile_index(
+        bias_profiles
+    )
     hass.data[DOMAIN]["radar_calibration_storage"] = {
         "status": "ready", "frames_written": 0,
         "comparisons_written": 0, "verification_samples_written": 0,
         **calibration_stats,
     }
     hass.data[DOMAIN]["verification_samples_pending"] = []
-    hass.data[DOMAIN]["radar_calibration"] = (
+    initial_diagnostics = (
         hass.data[DOMAIN]["radar_calibration_observer"].diagnostics()
     )
+    initial_diagnostics["storage"] = hass.data[DOMAIN][
+        "radar_calibration_storage"
+    ]
+    initial_diagnostics["bias_profiles"] = {
+        "total": len(bias_profiles),
+        "operational": sum(
+            1 for profile in bias_profiles
+            if profile.get("confidence") != "insufficient"
+        ),
+        "profiles": bias_profiles[:20],
+    }
+    hass.data[DOMAIN]["radar_calibration"] = initial_diagnostics
 
     def _record_calibration_frame(
         source: str,
@@ -757,6 +791,15 @@ async def _async_setup_runtime(
         diagnostics["storage"] = hass.data[DOMAIN].get(
             "radar_calibration_storage", {}
         )
+        profiles = hass.data[DOMAIN].get("radar_bias_profiles", [])
+        diagnostics["bias_profiles"] = {
+            "total": len(profiles),
+            "operational": sum(
+                1 for profile in profiles
+                if profile.get("confidence") != "insufficient"
+            ),
+            "profiles": profiles[:20],
+        }
         hass.data[DOMAIN]["radar_calibration"] = diagnostics
         hass.bus.async_fire(
             f"{DOMAIN}_calibration_update",
@@ -1692,11 +1735,24 @@ async def _async_setup_runtime(
             }
             _LOGGER.exception("Kalibratiedatabase schrijven mislukt")
             return
+        profiles = result.pop("_bias_profiles", [])
+        hass.data[DOMAIN]["radar_bias_profiles"] = profiles
+        hass.data[DOMAIN]["radar_bias_profile_index"] = build_profile_index(
+            profiles
+        )
         hass.data[DOMAIN]["radar_calibration_storage"] = {
             "status": "ready", **result,
         }
         diagnostics = observer.diagnostics()
         diagnostics["storage"] = hass.data[DOMAIN]["radar_calibration_storage"]
+        diagnostics["bias_profiles"] = {
+            "total": len(profiles),
+            "operational": sum(
+                1 for profile in profiles
+                if profile.get("confidence") != "insufficient"
+            ),
+            "profiles": profiles[:20],
+        }
         hass.data[DOMAIN]["radar_calibration"] = diagnostics
         hass.bus.async_fire(
             f"{DOMAIN}_calibration_update",

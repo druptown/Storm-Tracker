@@ -6,8 +6,10 @@ import json
 import sqlite3
 import threading
 
+from .provider_bias import profile_confidence, scope_from_region_key
 
-SCHEMA_VERSION = 2
+
+SCHEMA_VERSION = 3
 
 
 class CalibrationDataStore:
@@ -19,6 +21,7 @@ class CalibrationDataStore:
         self._totals = {
             "frames": 0, "datapoints": 0, "comparisons": 0,
             "verification_samples": 0, "warning_samples": 0,
+            "bias_samples": 0, "bias_profiles": 0,
         }
         self._sources: set[str] = set()
         self._regions: set[str] = set()
@@ -100,7 +103,70 @@ class CalibrationDataStore:
                     ON forecast_verification_samples(target_id, nominal_minute);
                 CREATE INDEX IF NOT EXISTS idx_verification_type_time
                     ON forecast_verification_samples(sample_type, nominal_minute);
+                CREATE TABLE IF NOT EXISTS provider_bias_samples (
+                    id INTEGER PRIMARY KEY,
+                    region_key TEXT NOT NULL,
+                    scope_key TEXT NOT NULL,
+                    from_source TEXT NOT NULL,
+                    to_source TEXT NOT NULL,
+                    nominal_minute INTEGER NOT NULL,
+                    compared_at REAL NOT NULL,
+                    from_cells INTEGER NOT NULL,
+                    to_cells INTEGER NOT NULL,
+                    overlap_cells INTEGER NOT NULL,
+                    detection_ratio REAL,
+                    extra_fraction REAL,
+                    wet_area_ratio REAL,
+                    f1_score REAL,
+                    intensity_bias REAL,
+                    shift_lat_cells REAL,
+                    shift_lon_cells REAL,
+                    latency_seconds REAL,
+                    UNIQUE(
+                        region_key, from_source, to_source, nominal_minute
+                    )
+                );
+                CREATE INDEX IF NOT EXISTS idx_bias_samples_pair_scope
+                    ON provider_bias_samples(
+                        from_source, to_source, scope_key, nominal_minute
+                    );
+                CREATE TABLE IF NOT EXISTS provider_bias_profiles (
+                    scope_key TEXT NOT NULL,
+                    from_source TEXT NOT NULL,
+                    to_source TEXT NOT NULL,
+                    sample_count INTEGER NOT NULL,
+                    mean_detection_ratio REAL,
+                    mean_extra_fraction REAL,
+                    mean_wet_area_ratio REAL,
+                    mean_f1_score REAL,
+                    mean_intensity_bias REAL,
+                    mean_shift_lat_cells REAL,
+                    mean_shift_lon_cells REAL,
+                    mean_latency_seconds REAL,
+                    confidence TEXT NOT NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY(scope_key, from_source, to_source)
+                ) WITHOUT ROWID;
             """)
+            stored_schema = db.execute(
+                "SELECT value FROM metadata WHERE key='schema_version'"
+            ).fetchone()
+            stored_schema_version = (
+                int(stored_schema[0]) if stored_schema is not None else 0
+            )
+            if stored_schema_version < SCHEMA_VERSION:
+                self._backfill_bias_samples(db)
+                self._rebuild_all_bias_profiles(db)
+            elif (
+                db.execute(
+                    "SELECT count(*) FROM provider_bias_samples"
+                ).fetchone()[0]
+                and not db.execute(
+                    "SELECT count(*) FROM provider_bias_profiles"
+                ).fetchone()[0]
+            ):
+                # Zelfherstel na een uitzonderlijke onderbroken profielopbouw.
+                self._rebuild_all_bias_profiles(db)
             db.execute(
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -120,6 +186,12 @@ class CalibrationDataStore:
                     "SELECT count(*) FROM forecast_verification_samples "
                     "WHERE sample_type='warning_sent'"
                 ).fetchone()[0],
+                "bias_samples": db.execute(
+                    "SELECT count(*) FROM provider_bias_samples"
+                ).fetchone()[0],
+                "bias_profiles": db.execute(
+                    "SELECT count(*) FROM provider_bias_profiles"
+                ).fetchone()[0],
             }
             self._sources = {
                 row[0] for row in db.execute("SELECT DISTINCT source FROM frames")
@@ -138,6 +210,7 @@ class CalibrationDataStore:
         comparisons = batch.get("comparisons", ())
         verification_samples = batch.get("verification_samples", ())
         with self._lock, self._connect() as db:
+            affected_bias_profiles: set[tuple[str, str, str]] = set()
             for frame in frames:
                 existing = db.execute(
                     "SELECT id, grid_point_count FROM frames "
@@ -208,6 +281,9 @@ class CalibrationDataStore:
                     recall=excluded.recall,
                     f1_score=excluded.f1_score
                 """, comparison)
+                affected_bias_profiles.update(
+                    self._upsert_bias_samples_for_comparison(db, comparison)
+                )
             for sample in verification_samples:
                 existed = db.execute(
                     "SELECT sample_type FROM forecast_verification_samples "
@@ -258,10 +334,19 @@ class CalibrationDataStore:
                     self._totals["verification_samples"] += 1
                     if sample["sample_type"] == "warning_sent":
                         self._totals["warning_samples"] += 1
+            self._refresh_bias_profiles(db, affected_bias_profiles)
+            self._totals["bias_samples"] = db.execute(
+                "SELECT count(*) FROM provider_bias_samples"
+            ).fetchone()[0]
+            self._totals["bias_profiles"] = db.execute(
+                "SELECT count(*) FROM provider_bias_profiles"
+            ).fetchone()[0]
+            profile_snapshot = self._load_bias_profiles(db)
         return {
             "frames_written": len(frames),
             "comparisons_written": len(comparisons),
             "verification_samples_written": len(verification_samples),
+            "_bias_profiles": profile_snapshot,
             **self.statistics(),
         }
 
@@ -280,11 +365,383 @@ class CalibrationDataStore:
             "total_comparisons": self._totals["comparisons"],
             "total_verification_samples": self._totals["verification_samples"],
             "total_warning_samples": self._totals["warning_samples"],
+            "total_bias_samples": self._totals["bias_samples"],
+            "total_bias_profiles": self._totals["bias_profiles"],
             "sources": len(self._sources),
             "regions": len(self._regions),
             "oldest_timestamp": self._oldest_timestamp,
             "newest_timestamp": self._newest_timestamp,
         }
+
+    def load_bias_profiles(self) -> list[dict]:
+        """Lees de compacte profielen voor de runtime zonder ruwe frames."""
+        with self._lock, self._connect() as db:
+            return self._load_bias_profiles(db)
+
+    def _backfill_bias_samples(self, db: sqlite3.Connection) -> None:
+        """Migreer bestaande v2-vergelijkingen zonder zware puntenscan."""
+        rows = db.execute("""
+            SELECT
+                c.region_key, c.source_a, c.source_b, c.nominal_minute,
+                c.compared_at, c.primary_cells, c.reference_cells,
+                c.overlap_cells, c.f1_score,
+                frame_a.product_timestamp, frame_b.product_timestamp
+            FROM comparisons AS c
+            LEFT JOIN frames AS frame_a
+              ON frame_a.region_key=c.region_key
+             AND frame_a.source=c.source_a
+             AND frame_a.nominal_minute=c.nominal_minute
+            LEFT JOIN frames AS frame_b
+              ON frame_b.region_key=c.region_key
+             AND frame_b.source=c.source_b
+             AND frame_b.nominal_minute=c.nominal_minute
+        """).fetchall()
+        for row in rows:
+            (
+                region_key, source_a, source_b, minute, compared_at,
+                cells_a, cells_b, overlap, f1_score, timestamp_a, timestamp_b,
+            ) = row
+            latency_ab = (
+                float(timestamp_b) - float(timestamp_a)
+                if timestamp_a is not None and timestamp_b is not None
+                else None
+            )
+            self._insert_directional_bias_sample(
+                db,
+                region_key=region_key,
+                from_source=source_a,
+                to_source=source_b,
+                nominal_minute=minute,
+                compared_at=compared_at,
+                from_cells=cells_a,
+                to_cells=cells_b,
+                overlap_cells=overlap,
+                f1_score=f1_score,
+                latency_seconds=latency_ab,
+            )
+            self._insert_directional_bias_sample(
+                db,
+                region_key=region_key,
+                from_source=source_b,
+                to_source=source_a,
+                nominal_minute=minute,
+                compared_at=compared_at,
+                from_cells=cells_b,
+                to_cells=cells_a,
+                overlap_cells=overlap,
+                f1_score=f1_score,
+                latency_seconds=-latency_ab if latency_ab is not None else None,
+            )
+
+    def _upsert_bias_samples_for_comparison(
+        self,
+        db: sqlite3.Connection,
+        comparison: tuple,
+    ) -> set[tuple[str, str, str]]:
+        """Maak uit één symmetrische vergelijking twee bronrichtingen."""
+        (
+            region_key, source_a, source_b, minute, compared_at,
+            cells_a, cells_b, overlap, _false_positive, _missed,
+            _precision, _recall, f1_score,
+        ) = comparison
+        frame_rows = db.execute("""
+            SELECT id, source, product_timestamp
+            FROM frames
+            WHERE region_key=? AND nominal_minute=? AND source IN (?, ?)
+        """, (region_key, minute, source_a, source_b)).fetchall()
+        frames = {
+            str(source): (int(frame_id), float(timestamp))
+            for frame_id, source, timestamp in frame_rows
+        }
+        points: dict[str, dict[tuple[int, int], float | None]] = {}
+        for source in (str(source_a), str(source_b)):
+            frame = frames.get(source)
+            if frame is None:
+                points[source] = {}
+                continue
+            points[source] = {
+                (int(lat), int(lon)): (
+                    float(intensity) if intensity is not None else None
+                )
+                for lat, lon, intensity in db.execute(
+                    "SELECT grid_lat, grid_lon, max_intensity "
+                    "FROM frame_points WHERE frame_id=?",
+                    (frame[0],),
+                )
+            }
+
+        timestamp_a = frames.get(str(source_a), (None, None))[1]
+        timestamp_b = frames.get(str(source_b), (None, None))[1]
+        latency_ab = (
+            timestamp_b - timestamp_a
+            if timestamp_a is not None and timestamp_b is not None
+            else None
+        )
+        affected: set[tuple[str, str, str]] = set()
+        for (
+            from_source, to_source, from_cells, to_cells,
+            from_points, to_points, latency,
+        ) in (
+            (
+                str(source_a), str(source_b), cells_a, cells_b,
+                points[str(source_a)], points[str(source_b)], latency_ab,
+            ),
+            (
+                str(source_b), str(source_a), cells_b, cells_a,
+                points[str(source_b)], points[str(source_a)],
+                -latency_ab if latency_ab is not None else None,
+            ),
+        ):
+            shift = self._best_grid_shift(set(from_points), set(to_points))
+            intensity_bias = self._aligned_intensity_bias(
+                from_points, to_points, shift
+            )
+            inserted = self._insert_directional_bias_sample(
+                db,
+                region_key=region_key,
+                from_source=from_source,
+                to_source=to_source,
+                nominal_minute=minute,
+                compared_at=compared_at,
+                from_cells=from_cells,
+                to_cells=to_cells,
+                overlap_cells=overlap,
+                f1_score=f1_score,
+                intensity_bias=intensity_bias,
+                shift_lat_cells=shift[0] if shift is not None else None,
+                shift_lon_cells=shift[1] if shift is not None else None,
+                latency_seconds=latency,
+            )
+            if inserted:
+                scope = scope_from_region_key(str(region_key))
+                affected.add((scope, from_source, to_source))
+                affected.add(("*", from_source, to_source))
+        return affected
+
+    @staticmethod
+    def _best_grid_shift(
+        from_cells: set[tuple[int, int]],
+        to_cells: set[tuple[int, int]],
+    ) -> tuple[int, int] | None:
+        """Zoek een kleine correctie waarmee `to` het best op `from` past."""
+        if not from_cells or not to_cells:
+            return None
+        best_shift = (0, 0)
+        best_score = -1
+        best_cost = 99
+        for shift_lat in range(-2, 3):
+            for shift_lon in range(-2, 3):
+                shifted = {
+                    (lat + shift_lat, lon + shift_lon)
+                    for lat, lon in to_cells
+                }
+                score = len(from_cells & shifted)
+                cost = abs(shift_lat) + abs(shift_lon)
+                if score > best_score or (
+                    score == best_score and cost < best_cost
+                ):
+                    best_score = score
+                    best_cost = cost
+                    best_shift = (shift_lat, shift_lon)
+        return best_shift
+
+    @staticmethod
+    def _aligned_intensity_bias(
+        from_points: dict[tuple[int, int], float | None],
+        to_points: dict[tuple[int, int], float | None],
+        shift: tuple[int, int] | None,
+    ) -> float | None:
+        """Geef gemiddelde `to - from` intensiteit op uitgelijnde natte cellen."""
+        if shift is None:
+            return None
+        differences: list[float] = []
+        for (lat, lon), to_intensity in to_points.items():
+            from_intensity = from_points.get(
+                (lat + shift[0], lon + shift[1])
+            )
+            if from_intensity is None or to_intensity is None:
+                continue
+            differences.append(float(to_intensity) - float(from_intensity))
+        return (
+            round(sum(differences) / len(differences), 4)
+            if differences else None
+        )
+
+    def _insert_directional_bias_sample(
+        self,
+        db: sqlite3.Connection,
+        *,
+        region_key: str,
+        from_source: str,
+        to_source: str,
+        nominal_minute: int,
+        compared_at: float,
+        from_cells: int,
+        to_cells: int,
+        overlap_cells: int,
+        f1_score: float | None,
+        intensity_bias: float | None = None,
+        shift_lat_cells: float | None = None,
+        shift_lon_cells: float | None = None,
+        latency_seconds: float | None = None,
+    ) -> bool:
+        """Bewaar alleen frames waarop de vertrekkende bron regen zag."""
+        from_count = int(from_cells)
+        to_count = int(to_cells)
+        overlap_count = int(overlap_cells)
+        if from_count <= 0:
+            return False
+        detection = overlap_count / from_count
+        extra = (
+            max(0, to_count - overlap_count) / to_count
+            if to_count > 0 else None
+        )
+        wet_area = to_count / from_count
+        db.execute("""
+            INSERT INTO provider_bias_samples(
+                region_key, scope_key, from_source, to_source,
+                nominal_minute, compared_at, from_cells, to_cells,
+                overlap_cells, detection_ratio, extra_fraction,
+                wet_area_ratio, f1_score, intensity_bias,
+                shift_lat_cells, shift_lon_cells, latency_seconds
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(region_key, from_source, to_source, nominal_minute)
+            DO UPDATE SET
+                compared_at=excluded.compared_at,
+                from_cells=excluded.from_cells,
+                to_cells=excluded.to_cells,
+                overlap_cells=excluded.overlap_cells,
+                detection_ratio=excluded.detection_ratio,
+                extra_fraction=excluded.extra_fraction,
+                wet_area_ratio=excluded.wet_area_ratio,
+                f1_score=excluded.f1_score,
+                intensity_bias=coalesce(
+                    excluded.intensity_bias,
+                    provider_bias_samples.intensity_bias
+                ),
+                shift_lat_cells=coalesce(
+                    excluded.shift_lat_cells,
+                    provider_bias_samples.shift_lat_cells
+                ),
+                shift_lon_cells=coalesce(
+                    excluded.shift_lon_cells,
+                    provider_bias_samples.shift_lon_cells
+                ),
+                latency_seconds=coalesce(
+                    excluded.latency_seconds,
+                    provider_bias_samples.latency_seconds
+                )
+        """, (
+            str(region_key), scope_from_region_key(str(region_key)),
+            str(from_source), str(to_source), int(nominal_minute),
+            float(compared_at), from_count, to_count, overlap_count,
+            round(detection, 6), round(extra, 6) if extra is not None else None,
+            round(wet_area, 6), f1_score, intensity_bias,
+            shift_lat_cells, shift_lon_cells, latency_seconds,
+        ))
+        return True
+
+    def _rebuild_all_bias_profiles(self, db: sqlite3.Connection) -> None:
+        db.execute("DELETE FROM provider_bias_profiles")
+        exact = {
+            (str(scope), str(source_from), str(source_to))
+            for scope, source_from, source_to in db.execute(
+                "SELECT DISTINCT scope_key, from_source, to_source "
+                "FROM provider_bias_samples"
+            )
+        }
+        global_pairs = {
+            ("*", str(source_from), str(source_to))
+            for source_from, source_to in db.execute(
+                "SELECT DISTINCT from_source, to_source "
+                "FROM provider_bias_samples"
+            )
+        }
+        self._refresh_bias_profiles(db, exact | global_pairs)
+
+    def _refresh_bias_profiles(
+        self,
+        db: sqlite3.Connection,
+        profiles: set[tuple[str, str, str]],
+    ) -> None:
+        for scope, from_source, to_source in profiles:
+            where_scope = "" if scope == "*" else " AND scope_key=?"
+            params: tuple = (
+                (from_source, to_source)
+                if scope == "*"
+                else (from_source, to_source, scope)
+            )
+            row = db.execute(f"""
+                SELECT
+                    count(*),
+                    avg(detection_ratio),
+                    avg(extra_fraction),
+                    avg(wet_area_ratio),
+                    avg(f1_score),
+                    avg(intensity_bias),
+                    avg(shift_lat_cells),
+                    avg(shift_lon_cells),
+                    avg(latency_seconds),
+                    max(compared_at)
+                FROM provider_bias_samples
+                WHERE from_source=? AND to_source=?{where_scope}
+            """, params).fetchone()
+            count = int(row[0] or 0)
+            if count == 0:
+                db.execute(
+                    "DELETE FROM provider_bias_profiles "
+                    "WHERE scope_key=? AND from_source=? AND to_source=?",
+                    (scope, from_source, to_source),
+                )
+                continue
+            values = [
+                round(float(value), 6) if value is not None else None
+                for value in row[1:9]
+            ]
+            db.execute("""
+                INSERT INTO provider_bias_profiles(
+                    scope_key, from_source, to_source, sample_count,
+                    mean_detection_ratio, mean_extra_fraction,
+                    mean_wet_area_ratio, mean_f1_score,
+                    mean_intensity_bias, mean_shift_lat_cells,
+                    mean_shift_lon_cells, mean_latency_seconds,
+                    confidence, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scope_key, from_source, to_source) DO UPDATE SET
+                    sample_count=excluded.sample_count,
+                    mean_detection_ratio=excluded.mean_detection_ratio,
+                    mean_extra_fraction=excluded.mean_extra_fraction,
+                    mean_wet_area_ratio=excluded.mean_wet_area_ratio,
+                    mean_f1_score=excluded.mean_f1_score,
+                    mean_intensity_bias=excluded.mean_intensity_bias,
+                    mean_shift_lat_cells=excluded.mean_shift_lat_cells,
+                    mean_shift_lon_cells=excluded.mean_shift_lon_cells,
+                    mean_latency_seconds=excluded.mean_latency_seconds,
+                    confidence=excluded.confidence,
+                    updated_at=excluded.updated_at
+            """, (
+                scope, from_source, to_source, count, *values,
+                profile_confidence(count), float(row[9]),
+            ))
+
+    @staticmethod
+    def _load_bias_profiles(db: sqlite3.Connection) -> list[dict]:
+        columns = (
+            "scope_key", "from_source", "to_source", "sample_count",
+            "mean_detection_ratio", "mean_extra_fraction",
+            "mean_wet_area_ratio", "mean_f1_score", "mean_intensity_bias",
+            "mean_shift_lat_cells", "mean_shift_lon_cells",
+            "mean_latency_seconds", "confidence", "updated_at",
+        )
+        rows = db.execute(
+            "SELECT " + ", ".join(columns) + " "
+            "FROM provider_bias_profiles "
+            "ORDER BY scope_key<>'*', sample_count DESC, from_source, to_source"
+        ).fetchall()
+        return [
+            dict(zip(columns, row, strict=True))
+            for row in rows
+        ]
 
     def _connect(self):
         db = sqlite3.connect(self.path, timeout=20)

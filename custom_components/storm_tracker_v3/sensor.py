@@ -72,6 +72,21 @@ def _timestamp_iso(value):
     return datetime.fromtimestamp(float(value), tz=timezone.utc).isoformat()
 
 
+def _apply_source_transition(result: dict, transition: dict | None) -> None:
+    """Publiceer de overgang en pas uitsluitend de geleerde onzekerheidsmarge toe."""
+    if not transition:
+        result["source_transition"] = None
+        result["source_transition_active"] = False
+        return
+    result["source_transition"] = transition
+    result["source_transition_active"] = True
+    confidence = result.get("forecast_confidence_percent")
+    if confidence is None:
+        return
+    penalty = int(transition.get("confidence_penalty_percent", 10))
+    result["forecast_confidence_percent"] = max(0, confidence - penalty)
+
+
 def _cardinal_direction(heading):
     """Zet een koers in graden om naar een compacte windroosrichting."""
     if heading is None:
@@ -755,15 +770,7 @@ class PrecipitationStatusSensor(StormTrackerBaseSensor):
             )
             if lightning is not None:
                 result.update(lightning)
-        if transition:
-            result["source_transition"] = transition
-            result["source_transition_active"] = True
-            confidence = result.get("forecast_confidence_percent")
-            if confidence is not None:
-                result["forecast_confidence_percent"] = max(0, confidence - 10)
-        else:
-            result["source_transition"] = None
-            result["source_transition_active"] = False
+        _apply_source_transition(result, transition)
         target = home_target
         return {
             **result,
@@ -850,15 +857,7 @@ class TargetPrecipitationStatusSensor(StormTrackerBaseSensor):
             )
             if lightning is not None:
                 result.update(lightning)
-        if transition:
-            result["source_transition"] = transition
-            result["source_transition_active"] = True
-            confidence = result.get("forecast_confidence_percent")
-            if confidence is not None:
-                result["forecast_confidence_percent"] = max(0, confidence - 10)
-        else:
-            result["source_transition"] = None
-            result["source_transition_active"] = False
+        _apply_source_transition(result, transition)
         return {
             **result,
             "target_id": self._spec.target_id,

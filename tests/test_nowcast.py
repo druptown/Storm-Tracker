@@ -146,9 +146,13 @@ def test_confirmed_system_preferred_over_closer_single_echo(nowcast_module, stor
 
     assert result["storm_id"] == "confirmed"
     assert result["nearest_precipitation_storm_id"] == "close"
+    assert result["tracked_system_storm_id"] == "confirmed"
+    assert result["nearest_precipitation_is_tracked_system"] is False
+    assert result["distance_system_relation"] == "verschillende_systemen"
     assert result["distance_km"] < 10
     assert result["nearest_precipitation_distance_km"] == result["distance_km"]
     assert result["nearest_precipitation_frames"] == 1
+    assert result["tracked_system_frames"] == 2
     assert result["nearest_precipitation_max_dbz"] == 35.0
     assert result["tracked_system_distance_km"] > result["distance_km"]
     assert (

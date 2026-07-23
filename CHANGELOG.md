@@ -1,5 +1,27 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.89
+
+- Maak in iedere targetstatus expliciet zichtbaar of de dichtstbijzijnde
+  neerslagrand en het voor prognose gevolgde systeem hetzelfde stormobject
+  zijn, inclusief beide storm-ID's en beide frametellers.
+- Migreer de kalibratiedatabase naar schema v3 en leid uit de bestaande
+  historische bronvergelijkingen onmiddellijk richtingsgebonden
+  bronwisselprofielen af.
+- Bewaar per bronrichting en geografische RegionEngine de detectieverhouding,
+  extra nat oppervlak, oppervlakteschaal, F1-score, intensiteitsbias,
+  rasterverschuiving en productlatentie; onderhoud daarnaast een globale
+  fallback per bronpaar.
+- Gebruik een voldoende gevuld profiel bij een providerwissel om de tijdelijke
+  betrouwbaarheidsmarge en overgangsduur conservatief aan te passen. Zonder
+  profiel blijft de bestaande marge van tien procentpunten gedurende tien
+  minuten behouden.
+- Laat de geleerde profielen in deze eerste operationele fase uitsluitend op
+  betrouwbaarheid werken: officiële radarpixels, afstanden en intensiteiten
+  blijven ongewijzigd.
+- Publiceer aantallen biassamples, biasprofielen en maximaal twintig compacte
+  profielsamenvattingen via de bestaande autokalibratiesensor.
+
 # 0.4.88
 
 - Vergelijk voor ieder bevestigd weersysteem een rechtlijnig traject met een

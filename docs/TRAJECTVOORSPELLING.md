@@ -76,3 +76,41 @@ volledige pySTEPS-stack in het Home Assistant-proces.
 
 Storm Tracker V3 is geen gecertificeerd waarschuwingssysteem. Officiele
 waarschuwingen en lokaal zicht op de situatie blijven altijd leidend.
+
+## Dichtstbijzijnde rand versus gevolgd systeem
+
+De operationele veiligheidsafstand en de prognose hoeven niet over hetzelfde
+stormobject te gaan. Een nieuwe echo van één frame kan dichterbij liggen,
+terwijl een verder systeem met meerdere consistente frames als enige een
+bruikbare beweging heeft.
+
+Daarom publiceert de targetstatus afzonderlijk:
+
+- `nearest_precipitation_storm_id`, randafstand, centrumafstand en frames;
+- `tracked_system_storm_id`, randafstand, centrumafstand en frames;
+- `nearest_precipitation_is_tracked_system`;
+- `distance_system_relation`.
+
+`distance_km` blijft altijd de kleinste werkelijk waargenomen buirand en is dus
+de conservatieve veiligheidsmaat. ETA, passage en baanmodel horen bij
+`tracked_system_storm_id`.
+
+## Persistente bronwisselprofielen
+
+Vanaf versie 0.4.89 wordt een bronwissel niet meer als volledig historieloos
+behandeld. Iedere gelijktijdige providervergelijking levert twee afzonderlijke
+richtingen op, bijvoorbeeld KMI naar OPERA én OPERA naar KMI. De database
+onthoudt per RegionEngine en als globale fallback:
+
+- detectieverhouding en extra nat oppervlak;
+- verhouding van het natte oppervlak;
+- F1-score;
+- gemiddelde intensiteitsafwijking op overlappende rastercellen;
+- kleine geografische rasterverschuiving;
+- verschil in producttijd.
+
+Bij minstens twaalf bruikbare natte vergelijkingen kan zo'n profiel de
+tijdelijke confidence-straf en duur van de overgang aanpassen. Zonder
+voldoende historie blijft de vaste veilige standaard van tien procentpunten
+gedurende tien minuten actief. Het profiel corrigeert in deze fase geen
+radarpixels of berekende afstanden.
