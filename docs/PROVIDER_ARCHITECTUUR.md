@@ -1,7 +1,7 @@
-# Storm Tracker V3 — providerarchitectuur 0.4.93
+# Storm Tracker V3 — providerarchitectuur 0.4.94
 
 Dit document beschrijft de effectief geïmplementeerde providerstructuur van
-Storm Tracker V3 0.4.93. Het onderscheidt operationele radar, fallbackdata,
+Storm Tracker V3 0.4.94. Het onderscheidt operationele radar, fallbackdata,
 bliksem, validatiebronnen en bronnen die alleen beleidsmatig voor toekomstige
 uitbreiding zijn voorzien.
 
@@ -192,6 +192,13 @@ waarvan het observatiegebied de positie omvat. De Observation Fusion Engine
 combineert radarcellen, regenmeters en bliksem. De StormEngine onderhoudt de
 historiek en berekent daarna onder andere:
 
+OPERA is een officieel Europees composiet. Een lage of ontbrekende samengestelde
+kwaliteitsindex verlaagt daarom het vertrouwen, maar verwijdert geen verse,
+sterke en ruimtelijk samenhangende echo. Alleen zwakke lage-kwaliteitsecho's
+vereisen onafhankelijke bevestiging. Die bevestiging vergelijkt de volledige
+footprints van OPERA en een nationale radar of RainViewer; alleen het
+overlappende zwakke deel wordt operationeel doorgegeven.
+
 Bij een wissel van radarbron blijft het raster van de nieuwe bron exact intact.
 Omdat verschillende providers niet gegarandeerd dezelfde projectie, resolutie
 of intensiteitsschaal gebruiken, worden hun pixels niet blind gemiddeld. De
@@ -277,7 +284,7 @@ regenkleur betekent ze bliksemactiviteit zonder bevestigde radarneerslag. De
 zone gebruikt inslagen tot vijf minuten oud, een buffer van twaalf kilometer
 en verandert nooit de geometrie of intensiteit van het radarraster.
 
-## 10. Testdekking in 0.4.93
+## 10. Testdekking in 0.4.94
 
 De provider-audit omvat tests voor:
 

@@ -1,5 +1,20 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.94
+
+- Behandel de OPERA-QI voortaan als vertrouwenssignaal in plaats van als harde
+  regen/geen-regenbeslissing. Verse, sterke en ruimtelijk samenhangende echo's
+  uit het officiële OPERA-composiet blijven operationeel zichtbaar, ook
+  wanneer de samengestelde kwaliteitswaarde laag of onbekend is.
+- Behoud de strenge clutterbescherming voor zwakke lage-kwaliteitsecho's, maar
+  vergelijk daarvoor volledige OPERA- en nationale radarfootprints. Een
+  DPC/RainViewer-cel binnen een brede OPERA-footprint kan zo het werkelijk
+  overlappende deel bevestigen zonder een volledige zwakke megacel vrij te
+  geven.
+- Voeg regressiedekking toe voor het onweerscomplex Venetië–Rijeka dat door
+  DPC en Blitzortung werd bevestigd maar door de oude OPERA-puntfilter te klein
+  werd weergegeven.
+
 # 0.4.93
 
 - Werk de veilige database-analyse voor `sample_types` en `target_samples`

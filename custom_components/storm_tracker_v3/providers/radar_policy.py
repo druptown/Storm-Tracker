@@ -109,6 +109,64 @@ def _within_radius_km(
     return _haversine_km(lat1, lon1, lat2, lon2) <= radius_km
 
 
+def _point_in_ring(
+    lat: float, lon: float, ring: Sequence[tuple[float, float]]
+) -> bool:
+    """Return whether a point lies inside a compact lat/lon footprint."""
+    if len(ring) < 3:
+        return False
+    inside = False
+    previous_lat, previous_lon = ring[-1]
+    for current_lat, current_lon in ring:
+        if (current_lat > lat) != (previous_lat > lat):
+            crossing_lon = (
+                (previous_lon - current_lon)
+                * (lat - current_lat)
+                / (previous_lat - current_lat)
+                + current_lon
+            )
+            if lon < crossing_lon:
+                inside = not inside
+        previous_lat, previous_lon = current_lat, current_lon
+    return inside
+
+
+def _reference_points(reference) -> tuple[tuple[float, float], ...]:
+    """Expose the full corroborating footprint, with centroid fallback."""
+    footprint = tuple(getattr(reference, "footprint_points", ()) or ())
+    return footprint or ((reference.lat, reference.lon),)
+
+
+def _confirmed_footprint_points(
+    footprint: Sequence[tuple[float, float]],
+    references: Sequence,
+    radius_km: float,
+) -> tuple[tuple[float, float], ...]:
+    """Find overlap using both radar footprints rather than centroids alone."""
+    if not footprint:
+        return ()
+
+    confirmed: list[tuple[float, float]] = []
+    for reference in references:
+        reference_footprint = tuple(
+            getattr(reference, "footprint_points", ()) or ()
+        )
+        reference_points = _reference_points(reference)
+        for point in footprint:
+            if any(
+                _within_radius_km(*point, *reference_point, radius_km)
+                for reference_point in reference_points
+            ) and point not in confirmed:
+                confirmed.append(point)
+        for reference_point in reference_footprint:
+            if (
+                _point_in_ring(*reference_point, footprint)
+                and reference_point not in confirmed
+            ):
+                confirmed.append(reference_point)
+    return tuple(confirmed)
+
+
 def verify_opera_observations(
     observations: Sequence,
     corroborating: Iterable,
@@ -151,23 +209,33 @@ def verify_opera_observations(
             and float(max_dbz) >= OPERA_MIN_STRUCTURED_MAX_DBZ
             and float(area_km2) >= OPERA_MIN_STRUCTURED_AREA_KM2
         )
+        if structured:
+            # OPERA is an official composite. A low/unknown QI value lowers
+            # confidence, but must not erase a strong, spatially coherent
+            # meteorological echo. Independent radar remains necessary for
+            # weak low-quality cells below these conservative thresholds.
+            accepted.append(obs)
+            structured_echo += 1
+            continue
 
         # Grote of langgerekte cellen kunnen een centroid hebben dat ver van
         # de werkelijk bevestigde regen ligt. Vergelijk daarom ook met de
         # compacte footprint van werkelijk bezette OPERA-rasterpixels.
         footprint = tuple(getattr(obs, "footprint_points", ()) or ())
-        candidate_points = footprint or ((obs.lat, obs.lon),)
         recent_references = tuple(
             ref for ref in references
             if abs(float(obs.timestamp) - float(ref.timestamp)) <= max_age_s
         )
-        confirmed_points = tuple(
-            (lat, lon) for lat, lon in candidate_points
-            if any(
-                _within_radius_km(lat, lon, ref.lat, ref.lon, radius_km)
-                for ref in recent_references
-            )
+        confirmed_points = _confirmed_footprint_points(
+            footprint, recent_references, radius_km
         )
+        if not footprint and any(
+            _within_radius_km(
+                obs.lat, obs.lon, reference.lat, reference.lon, radius_km
+            )
+            for reference in recent_references
+        ):
+            confirmed_points = ((obs.lat, obs.lon),)
         if confirmed_points:
             confirmed_obs = obs
             if footprint:

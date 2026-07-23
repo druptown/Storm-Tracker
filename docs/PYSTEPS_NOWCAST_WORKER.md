@@ -1,6 +1,6 @@
 # pySTEPS-nowcastworker voor Storm Tracker V3
 
-Status: architectuurvoorstel; nog niet operationeel in 0.4.93.
+Status: architectuurvoorstel; nog niet operationeel in 0.4.94.
 
 ## Doel
 

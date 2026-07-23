@@ -155,7 +155,7 @@ def test_opera_low_quality_rejects_distant_or_stale_confirmation(radar_policy_mo
     assert result.rejected == 1
 
 
-def test_opera_strong_structured_echo_requires_independent_confirmation(
+def test_opera_strong_structured_echo_is_accepted_with_low_quality(
     radar_policy_module,
 ):
     opera = _obs(
@@ -164,10 +164,10 @@ def test_opera_strong_structured_echo_requires_independent_confirmation(
 
     result = radar_policy_module.verify_opera_observations([opera], [])
 
-    assert result.accepted == ()
-    assert result.structured_echo == 0
+    assert len(result.accepted) == 1
+    assert result.structured_echo == 1
     assert result.corroborated == 0
-    assert result.rejected == 1
+    assert result.rejected == 0
 
 
 def test_opera_confirmed_structured_echo_is_accepted(
@@ -228,6 +228,36 @@ def test_opera_large_footprint_is_clipped_to_confirmed_area(radar_policy_module)
     assert clipped.area_km2 == 200.0
     assert clipped.lat == 49.05
     assert clipped.lon == 2.05
+
+
+def test_opera_weak_echo_uses_enclosed_national_radar_footprint(
+    radar_policy_module,
+):
+    """Corroboration works when DPC lies inside a broad OPERA footprint."""
+    opera_footprint = (
+        (44.8, 12.0), (44.8, 16.0), (46.0, 16.0),
+        (46.0, 12.0), (44.8, 12.0),
+    )
+    dpc_footprint = (
+        (45.15, 13.05), (45.15, 13.25), (45.30, 13.25),
+        (45.30, 13.05), (45.15, 13.05),
+    )
+    opera = _obs(
+        lat=45.4, lon=14.0, timestamp=1_000.0, quality=0.0,
+        footprint_points=opera_footprint, source="opera",
+        mean_dbz=12.0, max_dbz=20.0, area_km2=2_479.0,
+    )
+    dpc = _obs(
+        lat=45.22, lon=13.15, timestamp=1_060.0,
+        footprint_points=dpc_footprint, source="dpc_radar", intensity=2,
+    )
+
+    result = radar_policy_module.verify_opera_observations([opera], [dpc])
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].footprint_points == dpc_footprint
+    assert result.corroborated == 1
+    assert result.rejected == 0
 
 
 def test_opera_does_not_treat_whole_area_as_a_centroid_circle(radar_policy_module):
