@@ -94,9 +94,9 @@ def test_validation_only_sources_are_never_declared_as_primary_radar():
     assert "meteolux" not in local_mapping
     assert "italiameteo" not in local_mapping
     assert "geosphere_at" not in local_mapping
-    assert "meteolux" in POLICY["countries"]["LU"]["ground_validation"]
-    assert "geosphere_at" in POLICY["countries"]["AT"]["ground_validation"]
-    assert "italiameteo" in POLICY["countries"]["IT"]["ground_validation"]
+    assert "meteolux" in POLICY["countries"]["LU"]["model_guidance"]
+    assert "geosphere_at" in POLICY["countries"]["AT"]["model_guidance"]
+    assert "italiameteo" in POLICY["countries"]["IT"]["model_guidance"]
 
 
 def test_every_operational_local_radar_has_state_routing_and_overlay_paths():

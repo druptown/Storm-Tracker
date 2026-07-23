@@ -1,5 +1,22 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.91
+
+- Classificeer Open-Meteo expliciet als `model_guidance` in plaats van
+  grondvalidatie; modeldata blijft buiten radarcelvorming en kan lokale radar
+  of bliksem niet onderdrukken.
+- Breid de doelgerichte aanvraag uit naar negentien compacte stormvelden:
+  neerslag, neerslagkans, CAPE, Lightning Potential, Lifted Index, convectieve
+  inhibitie, druk, wolken, vriesniveau, windstoten en wind op 700/850 hPa.
+- Behoud de bestaande 90-minutenwaarden en voeg drie uur kwartierbegeleiding
+  en zes uur uurlijkse modelcontext toe.
+- Bewaar ontbrekende modelvelden als onbekend in plaats van nul en publiceer
+  per target welke variabelen werkelijk beschikbaar waren.
+- Breid targetstatussen, de Open-Meteo-gearsensor, CSV en de permanente
+  kalibratiedatabase uit met de nieuwe modelbegeleiding.
+- Leg de veilige architectuur voor een latere, geïsoleerde pySTEPS-nowcastworker
+  vast; pySTEPS draait niet in Home Assistant of AppDaemon.
+
 # 0.4.90
 
 - Vervang de 324-puntencirkel per RegionEngine door één centrale,

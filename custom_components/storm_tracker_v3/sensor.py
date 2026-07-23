@@ -88,7 +88,7 @@ def _apply_source_transition(result: dict, transition: dict | None) -> None:
 
 
 def _open_meteo_target_summary(data: dict, target_id: str) -> dict:
-    """Publiceer modelcontext zonder ze als radarwaarneming te behandelen."""
+    """Publiceer modelbegeleiding zonder ze als radarwaarneming te behandelen."""
     aggregate = data.get("open_meteo_result", {})
     details = data.get("open_meteo_results_by_target", {}).get(target_id, {})
     return {
@@ -102,6 +102,46 @@ def _open_meteo_target_summary(data: dict, target_id: str) -> dict:
             "forecast_90m_first_wet_minutes"
         ),
         "open_meteo_wet_steps_90m": details.get("forecast_90m_wet_steps"),
+        "open_meteo_max_3h_mm": details.get("forecast_3h_max_mm"),
+        "open_meteo_total_3h_mm": details.get("forecast_3h_total_mm"),
+        "open_meteo_precip_probability_max_6h": details.get(
+            "precipitation_probability_max_6h_percent"
+        ),
+        "open_meteo_cape_max_3h_jkg": details.get("cape_max_3h_jkg"),
+        "open_meteo_lightning_potential_max_3h": details.get(
+            "lightning_potential_max_3h"
+        ),
+        "open_meteo_lifted_index_min_6h": details.get(
+            "lifted_index_min_6h"
+        ),
+        "open_meteo_cin_min_6h_jkg": details.get(
+            "convective_inhibition_min_6h_jkg"
+        ),
+        "open_meteo_wind_gusts_max_3h_kmh": details.get(
+            "wind_gusts_max_3h_kmh"
+        ),
+        "open_meteo_wind_850hpa_speed_kmh": details.get(
+            "wind_850hpa_speed_kmh"
+        ),
+        "open_meteo_wind_850hpa_direction_deg": details.get(
+            "wind_850hpa_direction_deg"
+        ),
+        "open_meteo_wind_700hpa_speed_kmh": details.get(
+            "wind_700hpa_speed_kmh"
+        ),
+        "open_meteo_wind_700hpa_direction_deg": details.get(
+            "wind_700hpa_direction_deg"
+        ),
+        "open_meteo_pressure_msl_hpa": details.get("pressure_msl_hpa"),
+        "open_meteo_convective_guidance_available": details.get(
+            "convective_guidance_available", False
+        ),
+        "open_meteo_aloft_wind_guidance_available": details.get(
+            "aloft_wind_guidance_available", False
+        ),
+        "open_meteo_available_variables": details.get(
+            "available_variables", []
+        ),
     }
 
 
@@ -477,6 +517,7 @@ class OpenMeteoGearSensor(StormTrackerBaseSensor):
         target_results = result.get("target_results", {})
         home = target_results.get("home", {})
         return {
+            "role":                  result.get("role", "model_guidance"),
             "provider_status":       result.get("provider_status", "initializing"),
             "is_raining":            result.get("is_raining"),
             "max_precipitation":     result.get("max_precipitation"),
@@ -494,11 +535,29 @@ class OpenMeteoGearSensor(StormTrackerBaseSensor):
             "consecutive_failures":  result.get("consecutive_failures", 0),
             "last_error":            result.get("last_error"),
             "next_retry_at":         result.get("next_retry_at"),
+            "requested_variable_count": result.get("requested_variable_count"),
+            "forecast_15m_steps":    result.get("forecast_15m_steps"),
+            "forecast_hours":        result.get("forecast_hours"),
             "home_current_mm":       home.get("current_precipitation_mm"),
             "home_max_90m_mm":       home.get("forecast_90m_max_mm"),
             "home_total_90m_mm":     home.get("forecast_90m_total_mm"),
             "home_first_wet_minutes": home.get(
                 "forecast_90m_first_wet_minutes"
+            ),
+            "home_max_3h_mm":        home.get("forecast_3h_max_mm"),
+            "home_total_3h_mm":      home.get("forecast_3h_total_mm"),
+            "home_precip_probability_max_6h": home.get(
+                "precipitation_probability_max_6h_percent"
+            ),
+            "home_cape_max_3h_jkg":  home.get("cape_max_3h_jkg"),
+            "home_lightning_potential_max_3h": home.get(
+                "lightning_potential_max_3h"
+            ),
+            "home_wind_700hpa_speed_kmh": home.get(
+                "wind_700hpa_speed_kmh"
+            ),
+            "home_wind_700hpa_direction_deg": home.get(
+                "wind_700hpa_direction_deg"
             ),
             "target_forecasts": {
                 target_id: {
@@ -507,6 +566,23 @@ class OpenMeteoGearSensor(StormTrackerBaseSensor):
                     "total_90m_mm": details.get("forecast_90m_total_mm"),
                     "first_wet_minutes": details.get(
                         "forecast_90m_first_wet_minutes"
+                    ),
+                    "max_3h_mm": details.get("forecast_3h_max_mm"),
+                    "precip_probability_max_6h": details.get(
+                        "precipitation_probability_max_6h_percent"
+                    ),
+                    "cape_max_3h_jkg": details.get("cape_max_3h_jkg"),
+                    "lightning_potential_max_3h": details.get(
+                        "lightning_potential_max_3h"
+                    ),
+                    "wind_700hpa_speed_kmh": details.get(
+                        "wind_700hpa_speed_kmh"
+                    ),
+                    "wind_700hpa_direction_deg": details.get(
+                        "wind_700hpa_direction_deg"
+                    ),
+                    "available_variables": details.get(
+                        "available_variables", []
                     ),
                 }
                 for target_id, details in sorted(target_results.items())
