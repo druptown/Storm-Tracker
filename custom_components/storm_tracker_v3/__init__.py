@@ -268,10 +268,34 @@ async def _async_setup_runtime(
     # ── StormEngine + OFE aanmaken ────────────────────────────────────────
     mcs_store = McsHistoryStore(hass)
     await mcs_store.async_load()
+
+    def _on_region_removed(region) -> None:
+        """Publiceer onmiddellijk dat een lege runtime-regio verdwenen is."""
+        status_cache = hass.data[DOMAIN].setdefault("mcs_status_by_storm", {})
+        for key in tuple(status_cache):
+            if key.startswith(f"{region.engine_id}:"):
+                status_cache.pop(key, None)
+        if hass.data[DOMAIN].get("region_engine") is region:
+            hass.data[DOMAIN]["storms"] = []
+        hass.bus.async_fire(
+            f"{DOMAIN}_storms_updated",
+            {
+                "count": 0,
+                "region_engine": region.engine_id,
+                "targets": [],
+                "removed_engine": True,
+            },
+        )
+        hass.bus.async_fire(
+            f"{DOMAIN}_targets_updated",
+            {"targets": [], "removed_engine": region.engine_id},
+        )
+
     storm_manager = StormManager(
         hass,
         sharing_distance_km=sharing_distance,
         observation_radius_km=radar_radius,
+        on_engine_removed=_on_region_removed,
     )
     active_region = storm_manager.assign_target(fictieve_entity, home_lat, home_lon)
     hass.data[DOMAIN]["targets"]["home"]["region_engine_id"] = active_region.engine_id

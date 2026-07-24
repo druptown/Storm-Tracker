@@ -1,5 +1,12 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.95
+
+- Publiceer onmiddellijk een `storms_updated`- en targetupdate wanneer een lege
+  RegionEngine na een trackerbeweging wordt verwijderd. Daardoor verdwijnt een
+  storm uit de oude regio meteen uit `STV3 Actieve Storms` en blijven ook de
+  interne MCS-statussen niet als verweesde cache-items achter.
+
 # 0.4.94
 
 - Behandel de OPERA-QI voortaan als vertrouwenssignaal in plaats van als harde

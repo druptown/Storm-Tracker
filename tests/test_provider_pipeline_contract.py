@@ -53,6 +53,14 @@ def test_only_one_ordered_five_minute_provider_cycle_is_scheduled():
     assert "provider_stage_timeouts" in bounded
 
 
+def test_removed_region_immediately_invalidates_published_storms():
+    callback = _function_source("_on_region_removed")
+    assert "'removed_engine': True" in callback
+    assert "f'{DOMAIN}_storms_updated'" in callback
+    assert "key.startswith(f'{region.engine_id}:')" in callback
+    assert "on_engine_removed=_on_region_removed" in INIT_SOURCE
+
+
 def test_moved_target_runs_the_same_complete_cycle():
     update = _function_source("_update_secondary_target")
     assert "_sync_region_radar_providers()" in update

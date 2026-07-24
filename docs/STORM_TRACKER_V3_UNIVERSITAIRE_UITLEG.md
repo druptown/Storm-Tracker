@@ -2,7 +2,7 @@
 
 ## Van heterogene weerdata naar persoonsgebonden waarschuwingen
 
-**Versie van de integratie bij opmaak:** 0.4.94
+**Versie van de integratie bij opmaak:** 0.4.95
 **Datum:** 23 juli 2026
 
 ## Samenvatting
