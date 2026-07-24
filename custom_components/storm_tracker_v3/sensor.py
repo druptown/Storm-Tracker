@@ -171,6 +171,7 @@ async def async_setup_platform(
         ActiveRadarSourceSensor(hass),
         ProviderLifecycleSensor(hass),
         RadarCalibrationSensor(hass),
+        PystepsPreflightSensor(hass),
         FictieveTrackerSensor(hass),
         BlitzortungLaatsteInslag(hass),
         KmiObservatieSensor(hass),
@@ -398,6 +399,38 @@ class RadarCalibrationSensor(StormTrackerBaseSensor):
     @property
     def extra_state_attributes(self):
         return self.hass.data.get(DOMAIN, {}).get("radar_calibration", {})
+
+
+class PystepsPreflightSensor(StormTrackerBaseSensor):
+    """Compact zicht op de observerende rasterbewegingscontrole."""
+
+    _attr_name = "STV3 pySTEPS Preflight"
+    _attr_unique_id = "stv3_pysteps_preflight"
+    _attr_icon = "mdi:radar"
+
+    @property
+    def _listen_events(self):
+        return [f"{DOMAIN}_radar_source_update"]
+
+    @property
+    def native_value(self):
+        preflight = self.hass.data.get(DOMAIN, {}).get(
+            "pysteps_input", {}
+        ).get("preflight", {})
+        return sum(
+            1 for result in preflight.values()
+            if result.get("status") == "ready"
+        )
+
+    @property
+    def extra_state_attributes(self):
+        diagnostics = self.hass.data.get(DOMAIN, {}).get("pysteps_input", {})
+        return {
+            "contract": diagnostics.get("contract"),
+            "max_frames": diagnostics.get("max_frames"),
+            "feeds_detection": False,
+            "regions": diagnostics.get("preflight", {}),
+        }
 
 
 class KmiObservatieSensor(StormTrackerBaseSensor):

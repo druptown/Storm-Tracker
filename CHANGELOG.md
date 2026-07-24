@@ -1,5 +1,12 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.98
+
+- Publiceer de compacte observatiesensor `STV3 pySTEPS Preflight`. De toestand
+  is het aantal regio's met een bruikbare experimentele bewegingsschatting; de
+  attributen bevatten per regio richting, snelheid en verificatiescore. Er
+  worden geen rasterwaarden opgeslagen en de sensor blijft strikt observerend.
+
 # 0.4.97
 
 - Voeg een strikt observerende pySTEPS-preflight toe. Zij meet uit maximaal
