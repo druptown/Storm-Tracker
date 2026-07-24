@@ -154,6 +154,10 @@ class RadarFrameHistory:
         )
         return frame
 
+    def frames(self, region_id: str) -> tuple[RadarFrame, ...]:
+        """Geef een onveranderlijke momentopname voor een externe worker."""
+        return tuple(self._frames.get(region_id, ()))
+
     def diagnostics(self) -> dict[str, Any]:
         regions = {}
         for region_id, frames in self._frames.items():

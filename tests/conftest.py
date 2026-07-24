@@ -438,6 +438,14 @@ def radar_frame_module():
 
 
 @pytest.fixture
+def pysteps_preflight_module(radar_frame_module):
+    return _load_module(
+        f"{PKG_NAME}.engine.pysteps_preflight",
+        PKG_ROOT / "engine" / "pysteps_preflight.py",
+    )
+
+
+@pytest.fixture
 def provider_bias_module():
     return _load_module(
         f"{PKG_NAME}.engine.provider_bias",

@@ -40,6 +40,7 @@ from .engine.region_manager import StormManager
 from .engine.mcs_store import McsHistoryStore
 from .engine.pressure_trend import PressureTrendTracker
 from .engine.radar_frame import RadarFrameHistory
+from .engine.pysteps_preflight import evaluate_frames as evaluate_pysteps_frames
 from .engine.targets import build_target_specs, coordinates_from_state
 from .plogger.provider_logger import (
     log_lightning, log_kmi, log_rainviewer, log_knmi, log_netatmo, log_open_meteo
@@ -1566,9 +1567,15 @@ async def _async_setup_runtime(
                     region.engine_id, overlay, _region_bounds(region)
                 )
         hass.data[DOMAIN]["radar_overlays_by_engine"] = overlays
-        hass.data[DOMAIN]["pysteps_input"] = (
-            hass.data[DOMAIN]["pysteps_frame_history"].diagnostics()
-        )
+        frame_history = hass.data[DOMAIN]["pysteps_frame_history"]
+        pysteps_input = frame_history.diagnostics()
+        pysteps_input["preflight"] = {
+            region.engine_id: evaluate_pysteps_frames(
+                frame_history.frames(region.engine_id)
+            )
+            for region in storm_manager.get_all_engines()
+        }
+        hass.data[DOMAIN]["pysteps_input"] = pysteps_input
         hass.bus.async_fire(f"{DOMAIN}_provider_lifecycle_update")
         hass.bus.async_fire(f"{DOMAIN}_radar_source_update", {"engines": decisions})
 

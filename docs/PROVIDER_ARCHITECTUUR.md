@@ -1,7 +1,7 @@
-# Storm Tracker V3 — providerarchitectuur 0.4.96
+# Storm Tracker V3 — providerarchitectuur 0.4.97
 
 Dit document beschrijft de effectief geïmplementeerde providerstructuur van
-Storm Tracker V3 0.4.96. Het onderscheidt operationele radar, fallbackdata,
+Storm Tracker V3 0.4.97. Het onderscheidt operationele radar, fallbackdata,
 bliksem, validatiebronnen en bronnen die alleen beleidsmatig voor toekomstige
 uitbreiding zijn voorzien.
 
@@ -284,7 +284,7 @@ regenkleur betekent ze bliksemactiviteit zonder bevestigde radarneerslag. De
 zone gebruikt inslagen tot vijf minuten oud, een buffer van twaalf kilometer
 en verandert nooit de geometrie of intensiteit van het radarraster.
 
-## 10. Testdekking in 0.4.96
+## 10. Testdekking in 0.4.97
 
 De provider-audit omvat tests voor:
 

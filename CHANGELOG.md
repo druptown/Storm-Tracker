@@ -1,5 +1,12 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.97
+
+- Voeg een strikt observerende pySTEPS-preflight toe. Zij meet uit maximaal
+  drie opeenvolgende genormaliseerde radarframes een experimentele translatie
+  en toetst die tegen het volgende echte frame met een overlapscore. De uitkomst
+  blijft diagnose; ze beïnvloedt geen traject, ETA, waarschuwing of sensor.
+
 # 0.4.96
 
 - Voeg de observerende invoerlaag voor de toekomstige pySTEPS-worker toe.

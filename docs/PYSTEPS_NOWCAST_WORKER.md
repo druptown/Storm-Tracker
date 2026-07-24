@@ -1,6 +1,6 @@
 # pySTEPS-nowcastworker voor Storm Tracker V3
 
-Status: Fase A-invoercontract aanwezig sinds 0.4.96; nog niet operationeel.
+Status: Fase A-invoercontract en Fase-B-preflight aanwezig sinds 0.4.97; nog niet operationeel.
 
 ## Doel
 
@@ -75,6 +75,9 @@ StormEngine of waarschuwingen; alleen compacte diagnostiek is beschikbaar.
 
 ### Fase B — deterministische worker
 
+- [x] Observerende preflight: meet een eenvoudige rastertranslatie en vergelijkt
+  die met het volgende werkelijke frame; publiceert alleen snelheid, richting en
+  overlapscore als experimentele diagnose.
 - Lucas–Kanade of een andere gevalideerde optische-stroommethode;
 - 0–90 minuten extrapolatie;
 - vergelijken met de eerstvolgende werkelijke radarframes;
