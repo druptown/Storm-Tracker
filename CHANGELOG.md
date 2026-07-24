@@ -1,5 +1,13 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+# 0.4.96
+
+- Voeg de observerende invoerlaag voor de toekomstige pySTEPS-worker toe.
+  Geselecteerde radaroverlays worden per RegionEngine op een vast, begrensd
+  raster en op nominale minuten genormaliseerd; per regio blijven hoogstens zes
+  frames in het geheugen. De buffer stuurt niets naar OFE, StormEngine of
+  waarschuwingen en publiceert alleen compacte diagnostiek.
+
 # 0.4.95
 
 - Publiceer onmiddellijk een `storms_updated`- en targetupdate wanneer een lege

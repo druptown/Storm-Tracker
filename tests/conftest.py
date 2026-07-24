@@ -429,6 +429,15 @@ def radar_calibration_module():
 
 
 @pytest.fixture
+def radar_frame_module():
+    """Laadt het zuivere pySTEPS-invoercontract zonder Home Assistant."""
+    return _load_module(
+        f"{PKG_NAME}.engine.radar_frame",
+        PKG_ROOT / "engine" / "radar_frame.py",
+    )
+
+
+@pytest.fixture
 def provider_bias_module():
     return _load_module(
         f"{PKG_NAME}.engine.provider_bias",

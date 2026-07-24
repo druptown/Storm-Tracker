@@ -39,6 +39,7 @@ from .providers.blitzortung import BlitzortungProvider
 from .engine.region_manager import StormManager
 from .engine.mcs_store import McsHistoryStore
 from .engine.pressure_trend import PressureTrendTracker
+from .engine.radar_frame import RadarFrameHistory
 from .engine.targets import build_target_specs, coordinates_from_state
 from .plogger.provider_logger import (
     log_lightning, log_kmi, log_rainviewer, log_knmi, log_netatmo, log_open_meteo
@@ -814,6 +815,11 @@ async def _async_setup_runtime(
         "profiles": bias_profiles[:20],
     }
     hass.data[DOMAIN]["radar_calibration"] = initial_diagnostics
+    # Voorbereiding op de geïsoleerde pySTEPS-worker: enkel observerend.
+    hass.data[DOMAIN]["pysteps_frame_history"] = RadarFrameHistory()
+    hass.data[DOMAIN]["pysteps_input"] = (
+        hass.data[DOMAIN]["pysteps_frame_history"].diagnostics()
+    )
 
     calibration_coverage_bounds = {
         "kmi": (-2.5, 46.5, 10.5, 53.0),
@@ -1556,7 +1562,13 @@ async def _async_setup_runtime(
                 overlay = provider_lifecycle.overlay(source)
             if overlay:
                 overlays[region.engine_id] = overlay
+                hass.data[DOMAIN]["pysteps_frame_history"].add_overlay(
+                    region.engine_id, overlay, _region_bounds(region)
+                )
         hass.data[DOMAIN]["radar_overlays_by_engine"] = overlays
+        hass.data[DOMAIN]["pysteps_input"] = (
+            hass.data[DOMAIN]["pysteps_frame_history"].diagnostics()
+        )
         hass.bus.async_fire(f"{DOMAIN}_provider_lifecycle_update")
         hass.bus.async_fire(f"{DOMAIN}_radar_source_update", {"engines": decisions})
 

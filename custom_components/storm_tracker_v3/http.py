@@ -28,4 +28,5 @@ class StormTrackerGeoJsonView(HomeAssistantView):
             lightning_events=data.get("recent_lightning"),
         )
         collection["radar_overlays"] = data.get("radar_overlays_by_engine", {})
+        collection["pysteps_input"] = data.get("pysteps_input", {})
         return self.json(collection)

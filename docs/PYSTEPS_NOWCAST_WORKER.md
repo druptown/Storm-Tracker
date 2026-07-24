@@ -1,6 +1,6 @@
 # pySTEPS-nowcastworker voor Storm Tracker V3
 
-Status: architectuurvoorstel; nog niet operationeel in 0.4.95.
+Status: Fase A-invoercontract aanwezig sinds 0.4.96; nog niet operationeel.
 
 ## Doel
 
@@ -61,6 +61,12 @@ Daarom wordt pySTEPS later verpakt als een zelfstandige Home Assistant App
 ## Gefaseerde invoering
 
 ### Fase A — invoercontract
+
+Het observerende invoercontract is aanwezig: de gekozen radaroverlay wordt per
+RegionEngine naar een vast, regelmatig raster genormaliseerd, exact per
+nominale minuut uitgelijnd en tot maximaal zes frames begrensd. Ongeldige
+overlays maken geen kunstmatig droog frame. Deze buffer voedt nog geen OFE,
+StormEngine of waarschuwingen; alleen compacte diagnostiek is beschikbaar.
 
 - bronrasters naar één projectie en resolutie omzetten;
 - tijdstappen op exact dezelfde nominale minuten uitlijnen;
