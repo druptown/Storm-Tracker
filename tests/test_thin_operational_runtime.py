@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import MappingProxyType
 
 import numpy as np
@@ -597,6 +598,11 @@ async def test_completed_fusion_is_primary_tracking_source():
         "fusion:region:home",
     }
     assert result.regional_radar[0].mode == "fused"
+    assert result.snapshot["radar_fusion"]["items"][0]["mode"] == "fused"
+    radar_metadata = runtime.geojson_collection()["metadata"]["radar_fusion"]
+    assert radar_metadata[0]["region_id"] == "region:home"
+    assert "rain_rate_mm_h" not in json.dumps(radar_metadata)
+    assert "valid_mask" not in json.dumps(radar_metadata)
 
 
 @pytest.mark.asyncio
@@ -621,7 +627,7 @@ async def test_pending_fusion_uses_marked_per_provider_fallback():
 
 
 class BrokenPostGIS:
-    async def write_cycle(self, cycle, nowcast, validations=()):
+    async def write_cycle(self, cycle, nowcast, validations=(), *, regional_radar=()):
         return PostGISWriteResult(
             status="degraded",
             last_error_code="postgis_unavailable",
@@ -635,7 +641,7 @@ class AdvancingPostGIS:
     def __init__(self, clock_value):
         self._clock_value = clock_value
 
-    async def write_cycle(self, cycle, nowcast, validations=()):
+    async def write_cycle(self, cycle, nowcast, validations=(), *, regional_radar=()):
         self._clock_value[0] = 400.0
         return PostGISWriteResult(
             status="current",

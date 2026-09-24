@@ -509,6 +509,7 @@ class ThinOperationalRuntime:
             nowcast,
             state=state,
             region_plan=region_plan,
+            regional_radar=tuple(regional_summaries),
         )
         if self._postgis is None:
             postgis = PostGISWriteResult(
@@ -520,7 +521,10 @@ class ThinOperationalRuntime:
             )
         else:
             postgis = await self._postgis.write_cycle(
-                fusion, nowcast, validations,
+                fusion,
+                nowcast,
+                validations,
+                regional_radar=tuple(regional_summaries),
             )
         self._revision += 1
         snapshot = self._build_snapshot(
@@ -547,6 +551,7 @@ class ThinOperationalRuntime:
         *,
         state: DesiredState | None = None,
         region_plan: ThinRegionPlan | None = None,
+        regional_radar: tuple[RegionalFusionSummary, ...] = (),
     ) -> dict[str, Any]:
         state = self._state if state is None else state
         assert state is not None
@@ -686,15 +691,22 @@ class ThinOperationalRuntime:
                 "type": "FeatureCollection",
                 "features": features,
                 "metadata": {
-                "schema_version": 1,
-                "feature_count": len(features),
-                "radar_cells_included": len(selected),
-                "radar_cells_total": total_cells,
-                "lightning_events_included": lightning_count,
-                "truncated": len(selected) < total_cells,
-                "state": "operational",
-                "builder": "thin_worker",
-                "built_at": fusion.evaluated_at,
+                    "schema_version": 1,
+                    "feature_count": len(features),
+                    "radar_cells_included": len(selected),
+                    "radar_cells_total": total_cells,
+                    "lightning_events_included": lightning_count,
+                    "truncated": len(selected) < total_cells,
+                    "state": "operational",
+                    "builder": "thin_worker",
+                    "built_at": fusion.evaluated_at,
+                    "radar_fusion": [
+                        summary.as_dict()
+                        for summary in sorted(
+                            regional_radar,
+                            key=lambda item: item.region_id,
+                        )
+                    ],
                 },
             }
 
@@ -999,6 +1011,13 @@ class ThinOperationalRuntime:
             "providers": _collection(provider_items),
             "ui_storms": _storm_collection(storm_items),
             "map_artifact": {"artifact_handle": None, "etag": None},
+            "radar_fusion": _collection([
+                summary.as_dict()
+                for summary in sorted(
+                    regional_radar,
+                    key=lambda item: item.region_id,
+                )
+            ]),
         }
         return validate_snapshot(snapshot)
 
