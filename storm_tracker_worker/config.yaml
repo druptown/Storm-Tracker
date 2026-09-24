@@ -1,0 +1,87 @@
+name: "Storm Tracker Worker"
+version: "1.18.48"
+slug: "storm_tracker_worker"
+description: "Geisoleerde radar- en nowcastworker voor Storm Tracker V3"
+startup: services
+boot: auto
+init: false
+backup_exclude:
+  - "storm_tracker_worker_runtime_production_v1*"
+arch:
+  - amd64
+map:
+  - share:rw
+services:
+  - mqtt:need
+options:
+  queue_size: 16
+  compute_profile: "shared_ha"
+  worker_nice: 15
+  cpu_limit_percent: 25
+  heartbeat_seconds: 10
+  provider_cycle_seconds: 60
+  log_level: "INFO"
+  runtime_mode: "worker_only"
+  postgis_projection_enabled: false
+  postgis_host: "192.168.0.21"
+  postgis_port: 5433
+  postgis_database: "storm_tracker"
+  postgis_user: "storm_ingest"
+  postgis_password: ""
+  postgis_sslmode: "disable"
+  worker_first_config_path: ""
+  worker_first_config_sha256: ""
+  worker_first_authority_sha256: ""
+  netatmo_client_id: ""
+  netatmo_client_secret: ""
+  netatmo_refresh_token: ""
+  netatmo_station_id: ""
+  wunderground_api_key: ""
+  rainviewer_cache_attribution_accepted: false
+  kmi_appv4_raw_retention_authorized: false
+  opera_raw_retention_authorized: false
+  blitzortung_raw_retention_authorized: false
+  knmi_api_key: ""
+  aemet_api_key: ""
+  meteofrance_api_token: ""
+  meteofrance_application_id: ""
+  hsaf_username: ""
+  hsaf_password: ""
+  eumetsat_consumer_key: ""
+  eumetsat_consumer_secret: ""
+schema:
+  queue_size: "int(1,16)"
+  compute_profile: "list(shared_ha|dedicated_nas|dedicated_nas_fast)"
+  worker_nice: "int(0,19)"
+  cpu_limit_percent: "int(25,200)"
+  heartbeat_seconds: "int(2,60)"
+  provider_cycle_seconds: "int(2,300)"
+  log_level: "list(DEBUG|INFO|WARNING|ERROR)"
+  runtime_mode: "list(legacy|worker_first_canary|raw_capture_shadow|worker_only|thin_operational)"
+  postgis_projection_enabled: "bool"
+  postgis_host: "str?"
+  postgis_port: "int(1,65535)"
+  postgis_database: "str?"
+  postgis_user: "str?"
+  postgis_password: "password?"
+  postgis_sslmode: "list(disable|require|verify-full)"
+  worker_first_config_path: "str?"
+  worker_first_config_sha256: "str?"
+  worker_first_authority_sha256: "str?"
+  netatmo_client_id: "str?"
+  netatmo_client_secret: "password?"
+  netatmo_refresh_token: "password?"
+  netatmo_station_id: "str?"
+  wunderground_api_key: "password?"
+  rainviewer_cache_attribution_accepted: "bool"
+  kmi_appv4_raw_retention_authorized: "bool"
+  opera_raw_retention_authorized: "bool"
+  blitzortung_raw_retention_authorized: "bool"
+  knmi_api_key: "password?"
+  aemet_api_key: "password?"
+  meteofrance_api_token: "password?"
+  meteofrance_application_id: "password?"
+  hsaf_username: "str?"
+  hsaf_password: "password?"
+  eumetsat_consumer_key: "password?"
+  eumetsat_consumer_secret: "password?"
