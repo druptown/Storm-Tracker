@@ -1,7 +1,7 @@
 # Dynamische regionale rasterfusie
 
 **Datum:** 25 september 2026  
-**Status:** ontwerp ter beoordeling  
+**Status:** goedgekeurd
 **Basis:** `2026-09-20-thin-operational-pipeline-design.md`
 
 ## Doel
@@ -17,6 +17,14 @@ De providerselectie blijft volledig dynamisch. Er bestaat geen vaste lijst
 van KMI, KNMI, DWD, OPERA of RainViewer: de locatie, providerdekking,
 productgeschiktheid, actualiteit en kwaliteit bepalen per cyclus welke bronnen
 meedoen.
+
+Alle toepasselijke bronnen worden beoordeeld, maar per analyserastercel doen
+maximaal de drie hoogst scorende, kwantitatieve radarbronnen mee aan de
+numerieke fusie. Dit voorkomt dat sterk gecorreleerde composieten de confidence
+kunstmatig verhogen of dat een groot aantal middelmatige bronnen één goede
+lokale radar overstemt. Overige radars blijven beschikbaar als fallback en
+voor vergelijking; bliksem, satelliet, grondstations en modellen behouden hun
+eigen meteorologische rol en worden niet als extra regenradar gemiddeld.
 
 ## Niet-doelen
 
@@ -130,6 +138,12 @@ gewicht bestaat uit afzonderlijk rapporteerbare factoren:
 - beschikbare kwaliteitsmaskers;
 - later, maar niet in deze fase: empirische kalibratiescore uit PostGIS.
 
+De kandidaten worden per pixel deterministisch op dit samengestelde gewicht,
+actualiteit en provider-id gerangschikt. Alleen de beste drie dragen numeriek
+bij. Niet-geselecteerde geldige kandidaten worden in provenance als
+`lower_ranked_standby` vermeld en tellen niet mee voor confidence. Het aantal
+bronnen op zichzelf verhoogt confidence dus niet onbeperkt.
+
 De eerste implementatie gebruikt vaste, verklaarbare basisgewichten en een
 monotone leeftijdsafbouw. Eén bruikbare bron blijft geldig met lagere
 fusieconfidence. Tegenstrijdige waarden worden begrensd en als
@@ -204,13 +218,15 @@ niet de rastermatrix.
 2. `no-data` en geldige nul worden aantoonbaar verschillend behandeld.
 3. Twee overlappende bronnen leveren één gewogen veld met reproduceerbare
    provenance.
-4. Een verouderde of geografisch niet-toepasselijke bron draagt niet bij.
-5. Capaciteitsbegrenzing behoudt de volledige regio en vergroot alleen de
+4. Vier of meer overlappende bronnen bewijzen dat per pixel alleen de beste
+   drie bijdragen en de rest als standby zichtbaar blijft.
+5. Een verouderde of geografisch niet-toepasselijke bron draagt niet bij.
+6. Capaciteitsbegrenzing behoudt de volledige regio en vergroot alleen de
    resolutie.
-6. Een gefuseerde bewegende footprint levert via de bestaande tracker één cel,
+7. Een gefuseerde bewegende footprint levert via de bestaande tracker één cel,
    één bewegingslijn en dezelfde entry-/exitcontracten.
-7. Zonder bruikbaar fusieveld blijft de bestaande per-providerfallback werken.
-8. PostGIS- en snapshottests bewijzen de fusiesamenvatting zonder volledige
+8. Zonder bruikbaar fusieveld blijft de bestaande per-providerfallback werken.
+9. PostGIS- en snapshottests bewijzen de fusiesamenvatting zonder volledige
    rasterpayload.
 
 ## Acceptatiecriteria
