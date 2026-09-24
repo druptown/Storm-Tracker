@@ -6,13 +6,20 @@ from dataclasses import dataclass
 import hashlib
 import json
 import math
-from typing import Iterable
+from types import MappingProxyType
+from typing import Iterable, Mapping
 
 import numpy as np
 from pyproj import CRS, Transformer
 
 from .thin_provider_adapters import ThinRadarField
+from .thin_provider_runtime import ProviderResult
 from .thin_region_planner import ThinAcquisitionRegion
+from .thin_fusion import (
+    MAX_FUSION_AGE_SECONDS,
+    MAX_FUTURE_SKEW_SECONDS,
+    PROVIDER_FUSION_AGE_SECONDS,
+)
 from .tracking_core.engine.analysis_grid import AnalysisGrid
 
 
@@ -49,6 +56,83 @@ class RegionalRadarLayer:
             raise ValueError("regional_radar_layer_shape_invalid")
         if not math.isfinite(self.native_resolution_m) or self.native_resolution_m <= 0.0:
             raise ValueError("regional_radar_native_resolution_invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class RegionalFusionSummary:
+    """Compact, transport-safe provenance for one regional fusion result."""
+
+    region_id: str
+    grid_id: str | None
+    status: str
+    mode: str
+    evaluated_at: float
+    field_observed_at: float | None
+    contributors: tuple[str, ...]
+    excluded: Mapping[str, str]
+    standby: Mapping[str, str]
+    reason_codes: tuple[str, ...]
+    coverage_fraction: float
+    mean_confidence: float
+    disagreement_fraction: float
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "region_id": self.region_id,
+            "grid_id": self.grid_id,
+            "status": self.status,
+            "mode": self.mode,
+            "evaluated_at": self.evaluated_at,
+            "field_observed_at": self.field_observed_at,
+            "contributors": list(self.contributors),
+            "excluded": dict(self.excluded),
+            "standby": dict(self.standby),
+            "reason_codes": list(self.reason_codes),
+            "coverage_fraction": self.coverage_fraction,
+            "mean_confidence": self.mean_confidence,
+            "disagreement_fraction": self.disagreement_fraction,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class FusedRegionalRadarField:
+    region_id: str
+    field: ThinRadarField | None
+    confidence: np.ndarray
+    contributor_mask: np.ndarray
+    summary: RegionalFusionSummary
+
+
+def _empty_fusion(
+    region: ThinAcquisitionRegion,
+    *,
+    evaluated_at: float,
+    excluded: Mapping[str, str],
+    grid: AnalysisGrid | None = None,
+) -> FusedRegionalRadarField:
+    shape = (0, 0) if grid is None else (grid.height, grid.width)
+    summary = RegionalFusionSummary(
+        region_id=region.region_id,
+        grid_id=None if grid is None else grid.grid_id,
+        status="onvoldoende_data",
+        mode="fallback",
+        evaluated_at=evaluated_at,
+        field_observed_at=None,
+        contributors=(),
+        excluded=MappingProxyType(dict(sorted(excluded.items()))),
+        standby=MappingProxyType({}),
+        reason_codes=("no_usable_quantitative_radar",),
+        coverage_fraction=0.0,
+        mean_confidence=0.0,
+        disagreement_fraction=0.0,
+    )
+    return FusedRegionalRadarField(
+        region_id=region.region_id,
+        field=None,
+        confidence=np.zeros(shape, dtype=np.float64),
+        contributor_mask=np.zeros(shape, dtype=np.uint64),
+        summary=summary,
+    )
 
 
 def _canonical_hash(value: object) -> str:
@@ -395,11 +479,224 @@ def project_radar_field(
     )
 
 
+def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
+    order = np.argsort(values, kind="stable")
+    ordered_values = values[order]
+    ordered_weights = weights[order]
+    threshold = float(np.sum(ordered_weights)) * 0.5
+    index = int(np.searchsorted(np.cumsum(ordered_weights), threshold, side="left"))
+    return float(ordered_values[min(index, len(ordered_values) - 1)])
+
+
+def fuse_regional_radar_fields(
+    region: ThinAcquisitionRegion,
+    provider_results: Mapping[str, ProviderResult],
+    *,
+    evaluated_at: float,
+) -> FusedRegionalRadarField:
+    """Fuse at most the three best quantitative radar sources per pixel."""
+    evaluated = float(evaluated_at)
+    if not math.isfinite(evaluated):
+        raise ValueError("evaluated_at_invalid")
+
+    excluded: dict[str, str] = {}
+    candidates: list[ThinRadarField] = []
+    for mapping_id, result in sorted(provider_results.items()):
+        provider_id = str(mapping_id)
+        if not isinstance(result, ProviderResult):
+            excluded[provider_id] = "invalid_provider_result"
+            continue
+        provider_id = result.provider_id
+        if not result.ready or result.status != "operational":
+            excluded[provider_id] = "runtime_not_operational"
+            continue
+        matching_fields = [
+            field for field in result.radar_fields
+            if field.provider_id == provider_id
+        ]
+        if not matching_fields:
+            excluded[provider_id] = (
+                "provider_mismatch" if result.radar_fields
+                else "quantitative_field_unavailable"
+            )
+            continue
+        matching_fields.sort(key=lambda field: field.observed_at, reverse=True)
+        field = matching_fields[0]
+        age = evaluated - float(field.observed_at)
+        maximum_age = float(PROVIDER_FUSION_AGE_SECONDS.get(
+            provider_id, MAX_FUSION_AGE_SECONDS,
+        ))
+        if age > maximum_age:
+            excluded[provider_id] = "field_stale"
+            continue
+        if age < -MAX_FUTURE_SKEW_SECONDS:
+            excluded[provider_id] = "field_from_future"
+            continue
+        candidates.append(field)
+
+    if not candidates:
+        return _empty_fusion(
+            region,
+            evaluated_at=evaluated,
+            excluded=excluded,
+        )
+
+    grid = build_regional_analysis_grid(region, candidates)
+    layers: list[RegionalRadarLayer] = []
+    maximum_ages: list[float] = []
+    for field in candidates:
+        try:
+            layer = project_radar_field(field, grid)
+        except RegionalRadarProjectionError as error:
+            excluded[field.provider_id] = str(error)
+            continue
+        if not np.any(layer.support_mask):
+            excluded[field.provider_id] = "outside_region_coverage"
+            continue
+        if not np.any(layer.valid_mask):
+            excluded[field.provider_id] = "no_valid_region_data"
+            continue
+        layers.append(layer)
+        maximum_ages.append(float(PROVIDER_FUSION_AGE_SECONDS.get(
+            field.provider_id, MAX_FUSION_AGE_SECONDS,
+        )))
+
+    if not layers:
+        return _empty_fusion(
+            region,
+            evaluated_at=evaluated,
+            excluded=excluded,
+            grid=grid,
+        )
+    if len(layers) > 64:
+        raise ValueError("regional_fusion_supports_at_most_64_sources")
+
+    shape = (grid.height, grid.width)
+    source_weights = np.zeros((len(layers), *shape), dtype=np.float64)
+    source_values = np.full((len(layers), *shape), np.nan, dtype=np.float64)
+    for index, (layer, maximum_age) in enumerate(zip(layers, maximum_ages)):
+        age_seconds = max(0.0, evaluated - layer.observed_at)
+        age_factor = max(0.10, 1.0 - age_seconds / maximum_age)
+        resolution_factor = min(
+            1.0,
+            grid.x_resolution_m / layer.native_resolution_m,
+        )
+        weights = (
+            age_factor
+            * resolution_factor
+            * np.clip(layer.coverage_fraction, 0.0, 1.0)
+        )
+        source_weights[index, layer.valid_mask] = weights[layer.valid_mask]
+        source_values[index, layer.valid_mask] = layer.rain_rate_mm_h[layer.valid_mask]
+
+    fused_values = np.full(shape, np.nan, dtype=np.float64)
+    fused_valid = np.zeros(shape, dtype=bool)
+    confidence = np.zeros(shape, dtype=np.float64)
+    contributor_mask = np.zeros(shape, dtype=np.uint64)
+    disagreement = np.zeros(shape, dtype=bool)
+    selected_provider_ids: set[str] = set()
+
+    for row, column in np.argwhere(np.any(source_weights > 0.0, axis=0)):
+        available = np.flatnonzero(source_weights[:, row, column] > 0.0)
+        ranked = sorted(
+            available.tolist(),
+            key=lambda index: (
+                -source_weights[index, row, column],
+                -layers[index].observed_at,
+                layers[index].provider_id,
+            ),
+        )[:3]
+        weights = source_weights[ranked, row, column]
+        values = source_values[ranked, row, column]
+        median = _weighted_median(values, weights)
+        distance = max(5.0, 3.0 * max(1.0, median))
+        clipped = np.clip(values, max(0.0, median - distance), median + distance)
+        if not np.array_equal(clipped, values):
+            disagreement[row, column] = True
+        fused_values[row, column] = float(np.average(clipped, weights=weights))
+        fused_valid[row, column] = True
+        confidence[row, column] = min(1.0, float(np.sum(weights)) / 3.0)
+        for index in ranked:
+            contributor_mask[row, column] |= np.uint64(1) << np.uint64(index)
+            selected_provider_ids.add(layers[index].provider_id)
+
+    if not np.any(fused_valid):
+        return _empty_fusion(
+            region,
+            evaluated_at=evaluated,
+            excluded=excluded,
+            grid=grid,
+        )
+
+    contributors = tuple(sorted(selected_provider_ids))
+    standby = {
+        layer.provider_id: "lower_ranked_standby"
+        for layer in layers
+        if layer.provider_id not in selected_provider_ids
+    }
+    valid_count = int(np.count_nonzero(fused_valid))
+    coverage_fraction = valid_count / fused_valid.size
+    disagreement_fraction = (
+        float(np.count_nonzero(disagreement & fused_valid)) / valid_count
+    )
+    reason_codes: list[str] = []
+    if coverage_fraction < 0.95:
+        reason_codes.append("partial_region_coverage")
+    if disagreement_fraction > 0.0:
+        reason_codes.append("provider_disagreement")
+    if len(contributors) == 1:
+        reason_codes.append("single_source")
+    status = "current" if not reason_codes else "degraded"
+    mode = "fused" if len(contributors) > 1 else "single_source"
+    field_observed_at = max(
+        layer.observed_at
+        for layer in layers
+        if layer.provider_id in selected_provider_ids
+    )
+    field = ThinRadarField(
+        provider_id=f"fusion:{region.region_id}",
+        product_id="regional-rain-rate",
+        observed_at=field_observed_at,
+        crs=grid.crs,
+        origin_x_m=grid.origin_x_m,
+        origin_y_m=grid.origin_y_m,
+        x_resolution_m=grid.x_resolution_m,
+        y_resolution_m=grid.y_resolution_m,
+        rain_rate_mm_h=fused_values,
+        valid_mask=fused_valid,
+    )
+    summary = RegionalFusionSummary(
+        region_id=region.region_id,
+        grid_id=grid.grid_id,
+        status=status,
+        mode=mode,
+        evaluated_at=evaluated,
+        field_observed_at=field_observed_at,
+        contributors=contributors,
+        excluded=MappingProxyType(dict(sorted(excluded.items()))),
+        standby=MappingProxyType(dict(sorted(standby.items()))),
+        reason_codes=tuple(reason_codes),
+        coverage_fraction=coverage_fraction,
+        mean_confidence=float(np.mean(confidence[fused_valid])),
+        disagreement_fraction=disagreement_fraction,
+    )
+    return FusedRegionalRadarField(
+        region_id=region.region_id,
+        field=field,
+        confidence=confidence,
+        contributor_mask=contributor_mask,
+        summary=summary,
+    )
+
+
 __all__ = [
+    "FusedRegionalRadarField",
     "MAXIMUM_ANALYSIS_CELLS",
     "MINIMUM_ANALYSIS_RESOLUTION_M",
+    "RegionalFusionSummary",
     "RegionalRadarLayer",
     "RegionalRadarProjectionError",
     "build_regional_analysis_grid",
+    "fuse_regional_radar_fields",
     "project_radar_field",
 ]

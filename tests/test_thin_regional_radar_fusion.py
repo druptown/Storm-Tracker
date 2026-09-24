@@ -7,8 +7,10 @@ import pytest
 
 from storm_tracker_worker.desired_state import Target
 from storm_tracker_worker.thin_provider_adapters import ThinRadarField
+from storm_tracker_worker.thin_provider_runtime import ProviderResult
 from storm_tracker_worker.thin_region_planner import ThinAcquisitionRegion
 from storm_tracker_worker.thin_regional_radar_fusion import (
+    fuse_regional_radar_fields,
     build_regional_analysis_grid,
     project_radar_field,
 )
@@ -44,6 +46,7 @@ def _field(
     origin: tuple[float, float] = (-2_000.0, 2_000.0),
     values: np.ndarray | None = None,
     valid: np.ndarray | None = None,
+    observed_at: float = 1_000.0,
 ) -> ThinRadarField:
     values = (
         np.ones((4, 4), dtype=float)
@@ -56,9 +59,33 @@ def _field(
         else np.asarray(valid, dtype=bool)
     )
     return ThinRadarField(
-        provider, "rain-rate", 1_000.0, crs,
+        provider, "rain-rate", observed_at, crs,
         origin[0], origin[1], resolution, resolution,
         values, valid,
+    )
+
+
+def _constant(value: float) -> np.ndarray:
+    return np.full((4, 4), value, dtype=float)
+
+
+def _provider(
+    field: ThinRadarField | None = None,
+    *,
+    provider_id: str | None = None,
+    ready: bool = True,
+    status: str = "operational",
+) -> ProviderResult:
+    resolved_id = provider_id or (field.provider_id if field is not None else "provider")
+    return ProviderResult(
+        provider_id=resolved_id,
+        ready=ready,
+        status=status,
+        reason_code=None,
+        observations=(),
+        attempted_at=999.0,
+        completed_at=1_000.0,
+        radar_fields=() if field is None else (field,),
     )
 
 
@@ -171,3 +198,93 @@ def test_reprojected_object_stays_within_one_analysis_pixel():
     )
     x_m, y_m = grid.pixel_center(int(row), int(column))
     assert math.hypot(x_m + 500.0, y_m - 500.0) <= grid.x_resolution_m
+
+
+def test_two_sources_fuse_valid_overlap_with_provenance():
+    result = fuse_regional_radar_fields(
+        _region(),
+        {
+            "local": _provider(_field(
+                provider="local", values=_constant(4.0), observed_at=990.0,
+            )),
+            "wide": _provider(_field(
+                provider="wide", values=_constant(8.0), observed_at=970.0,
+            )),
+        },
+        evaluated_at=1_000.0,
+    )
+
+    assert result.field is not None
+    valid = result.field.valid_mask
+    assert 4.0 < result.field.rain_rate_mm_h[valid].mean() < 8.0
+    assert result.summary.contributors == ("local", "wide")
+    assert result.summary.mode == "fused"
+    assert result.contributor_mask.dtype == np.uint64
+
+
+def test_only_best_three_sources_contribute_per_pixel():
+    providers = {
+        name: _provider(_field(
+            provider=name,
+            values=_constant(value),
+            observed_at=stamp,
+        ))
+        for name, value, stamp in (
+            ("a", 1.0, 999.0),
+            ("b", 2.0, 998.0),
+            ("c", 3.0, 997.0),
+            ("d", 100.0, 900.0),
+        )
+    }
+
+    result = fuse_regional_radar_fields(
+        _region(), providers, evaluated_at=1_000.0,
+    )
+
+    assert result.summary.contributors == ("a", "b", "c")
+    assert result.summary.standby == {"d": "lower_ranked_standby"}
+    assert result.field is not None
+    assert np.nanmax(result.field.rain_rate_mm_h) < 4.0
+
+
+def test_disagreement_is_reported_without_silent_source_removal():
+    providers = {
+        name: _provider(_field(
+            provider=name,
+            values=_constant(value),
+            observed_at=999.0,
+        ))
+        for name, value in (("a", 0.0), ("b", 1.0), ("c", 100.0))
+    }
+
+    result = fuse_regional_radar_fields(
+        _region(), providers, evaluated_at=1_000.0,
+    )
+
+    assert result.summary.disagreement_fraction > 0.0
+    assert "provider_disagreement" in result.summary.reason_codes
+    assert len(result.summary.contributors) == 3
+
+
+@pytest.mark.parametrize(
+    "provider,reason",
+    [
+        (_provider(_field(provider="stale", observed_at=0.0)), "field_stale"),
+        (
+            _provider(provider_id="error", ready=True, status="error"),
+            "runtime_not_operational",
+        ),
+        (
+            _provider(_field(provider="outside", origin=(1_000_000.0, 1_002_000.0))),
+            "outside_region_coverage",
+        ),
+    ],
+)
+def test_unusable_provider_is_excluded_with_fixed_reason(provider, reason):
+    result = fuse_regional_radar_fields(
+        _region(), {provider.provider_id: provider}, evaluated_at=1_000.0,
+    )
+
+    assert result.field is None
+    assert result.summary.excluded[provider.provider_id] == reason
+    assert result.summary.status == "onvoldoende_data"
