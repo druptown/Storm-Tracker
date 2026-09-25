@@ -1,5 +1,54 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+## integration 1.14.144 / worker 1.18.56
+
+- Bewaar iedere algemene bronobservatie en iedere fysieke stationsmeting nog
+  maar één keer, onafhankelijk van het aantal gevolgde personen.
+- Koppel brongegevens aan de actieve waarschuwingsregio en bewaar de actuele
+  doelpersoon-regiotoewijzing met de exacte positie voor afzonderlijke
+  aankomst-, vertrek- en intensiteitsvoorspellingen.
+- Begrens operationele PostGIS-historiek tot zes maanden zonder de
+  stationscatalogus, sensormogelijkheden of importerprogressie te verwijderen.
+
+## integration 1.14.141 / worker 1.18.52
+
+- Scheid de 70 km-waarschuwingshorizon van het radaranalysebereik. Regionale
+  radarvelden worden voortaan tot 250 km rond iedere gevolgde locatie
+  geprojecteerd en gefuseerd, terwijl waarschuwingen hun bestaande horizon
+  behouden.
+- Houd het grotere raster begrensd tot maximaal 250.000 analysepixels en laat
+  directe unit-testregio's zonder expliciete radardekking hun bestaande
+  lokale straal behouden.
+
+## integration 1.14.141 / worker 1.18.51
+
+- Behoud de door de dunne worker gepubliceerde regionale regenrasters in het
+  beveiligde kaartendpoint. De integratie voegt eventuele legacy-overlays nog
+  samen, maar overschrijft actuele workerrasters niet langer met een lege map.
+
+## integration 1.14.140 / worker 1.18.51
+
+- Houd de laatst voltooide regionale rasterlaag zichtbaar terwijl een nieuwer
+  providerframe wordt gefuseerd en vervang haar pas atomair na voltooiing.
+  Daardoor verdwijnt de regenlaag niet meer tussen snelle worker-cycli.
+
+## integration 1.14.140 / worker 1.18.50
+
+- Laat een reeds gestarte regionale fusiejob altijd voltooien wanneer tijdens
+  de berekening nieuwere providerframes arriveren. Daardoor kan de snelle
+  2-secondenruntime de fusie niet meer permanent verhongeren; na voltooiing
+  wordt in de volgende cyclus vanzelf het nieuwste inputframe verwerkt.
+
+## integration 1.14.140 / worker 1.18.49
+
+- Publiceert naast de herkende buicellen ook de volledige gefuseerde regionale
+  regenlaag vanaf 0,1 mm/u, zodat lichte neerslag en de werkelijke omvang van
+  regenbanden zichtbaar blijven zonder de wetenschappelijke celdrempels te
+  verlagen.
+- Begrens de displaylaag adaptief tot een vast totaal aantal rechthoekruns;
+  gefragmenteerde rasters worden uitsluitend voor weergave met max-pooling
+  gecomprimeerd en blijven binnen het bestaande GeoJSON-transportbudget.
+
 ## integration 1.14.140 / worker 1.18.48
 
 - Projecteert geografisch toepasselijke kwantitatieve radarvelden conservatief
