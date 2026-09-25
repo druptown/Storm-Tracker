@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import MappingProxyType
 
 import pytest
 
@@ -15,6 +16,10 @@ from storm_tracker_worker.thin_observation import (
 from storm_tracker_worker.thin_postgis import ThinPostGISSettings, ThinPostGISWriter
 from storm_tracker_worker.thin_provider_runtime import ProviderResult
 from storm_tracker_worker.thin_regional_radar_fusion import RegionalFusionSummary
+from storm_tracker_worker.thin_region_planner import (
+    ThinAcquisitionRegion,
+    ThinRegionPlan,
+)
 from storm_tracker_worker.desired_state import Target
 from storm_tracker_worker.thin_provider_catalog import ThinProviderRequest
 from storm_tracker_worker.thin_satellite_adapters import GoesRrqpeAdapter
@@ -63,10 +68,11 @@ def _cycle_and_nowcast(valid_at: float, *, observation_count: int = 1):
 def _station_cycle_and_nowcast(
     valid_at: float,
     *target_ids: str,
+    provider_id: str = "netatmo",
 ):
     observations = tuple(
         NormalizedObservation.create(
-            provider_id="netatmo",
+            provider_id=provider_id,
             product_id="getpublicdata",
             target_id=target_id,
             kind=ObservationKind.RAIN_RATE,
@@ -85,7 +91,7 @@ def _station_cycle_and_nowcast(
         for target_id in target_ids
     )
     provider = ProviderResult(
-        provider_id="netatmo",
+        provider_id=provider_id,
         ready=True,
         status="operational",
         reason_code=None,
@@ -94,7 +100,7 @@ def _station_cycle_and_nowcast(
         completed_at=valid_at + 1.0,
     )
     cycle = fuse_observations(
-        {"netatmo": provider},
+        {provider_id: provider},
         evaluated_at=valid_at + 2.0,
         target_ids=target_ids,
     )
@@ -105,9 +111,121 @@ def _station_cycle_and_nowcast(
     return cycle, ThinNowcastRuntime(targets=targets).advance(cycle)
 
 
+def _shared_source_cycle_and_nowcast(valid_at: float):
+    observations = tuple(
+        NormalizedObservation.create(
+            provider_id="opera_radar",
+            product_id="composite",
+            target_id=target_id,
+            kind=ObservationKind.RAIN_RATE,
+            value=4.0,
+            unit="mm/h",
+            observed_at=valid_at,
+            received_at=valid_at + 1.0,
+            latitude=38.35,
+            longitude=15.8,
+            quality=ObservationQuality.GOOD,
+            geometry={"type": "Point", "coordinates": [15.8, 38.35]},
+            metadata={"source_pixel": "sri:123:456"},
+        )
+        for target_id in ("home", "child")
+    )
+    provider = ProviderResult(
+        provider_id="opera_radar",
+        ready=True,
+        status="operational",
+        reason_code=None,
+        observations=observations,
+        attempted_at=valid_at,
+        completed_at=valid_at + 1.0,
+    )
+    cycle = fuse_observations(
+        {"opera_radar": provider},
+        evaluated_at=valid_at + 2.0,
+        target_ids=("home", "child"),
+    )
+    nowcast = ThinNowcastRuntime(
+        targets={"home": (38.35, 15.8), "child": (38.35, 15.8)},
+    ).advance(cycle)
+    return cycle, nowcast
+
+
+def _shared_home_region_plan(valid_at: float) -> ThinRegionPlan:
+    targets = tuple(
+        Target(
+            target_id=target_id,
+            display_name=target_id.title(),
+            kind="test",
+            available=True,
+            latitude=38.35,
+            longitude=15.8,
+            position_observed_at=valid_at,
+            location_accuracy_m=10.0,
+            observation_radius_km=100.0,
+            country_code="IT",
+        )
+        for target_id in ("home", "child")
+    )
+    region = ThinAcquisitionRegion(
+        region_id="region:home",
+        region_instance_id="region-instance:home",
+        region_revision_id="region-revision:home:v1",
+        activated_at=0.0,
+        revision_valid_from=valid_at,
+        kind="home",
+        center_latitude=38.35,
+        center_longitude=15.8,
+        observation_radius_km=100.0,
+        targets=targets,
+        stale_target_ids=(),
+    )
+    return ThinRegionPlan(
+        regions=(region,),
+        targets=targets,
+        target_region_ids=MappingProxyType({
+            "home": "region:home",
+            "child": "region:home",
+        }),
+        location_statuses=MappingProxyType({
+            "home": "current",
+            "child": "current",
+        }),
+    )
+
+
+def _split_region_plan(valid_at: float) -> ThinRegionPlan:
+    shared = _shared_home_region_plan(valid_at)
+    regions = tuple(
+        ThinAcquisitionRegion(
+            region_id=f"region:{target.target_id}",
+            region_instance_id=f"region-instance:{target.target_id}",
+            region_revision_id=f"region-revision:{target.target_id}:v1",
+            activated_at=valid_at,
+            revision_valid_from=valid_at,
+            kind="external",
+            center_latitude=target.latitude,
+            center_longitude=target.longitude,
+            observation_radius_km=100.0,
+            targets=(target,),
+            stale_target_ids=(),
+        )
+        for target in shared.targets
+    )
+    return ThinRegionPlan(
+        regions=regions,
+        targets=shared.targets,
+        target_region_ids=MappingProxyType({
+            target.target_id: f"region:{target.target_id}"
+            for target in shared.targets
+        }),
+        location_statuses=shared.location_statuses,
+    )
+
+
 class FakeCursor:
     def __init__(self, connection):
         self.connection = connection
+        self.result = ()
 
     def __enter__(self):
         return self
@@ -116,22 +234,41 @@ class FakeCursor:
         return False
 
     def execute(self, sql, parameters=None):
-        self.connection.statements.append((" ".join(sql.split()), parameters))
+        normalized = " ".join(sql.split())
+        self.connection.statements.append((normalized, parameters))
+        if normalized.startswith("SELECT station.provider_id,station.station_id"):
+            pairs = tuple(zip(parameters[0::2], parameters[1::2]))
+            self.result = tuple(
+                pair for pair in pairs if pair in self.connection.known_stations
+            )
+        else:
+            self.result = ()
 
     def executemany(self, sql, parameters):
         normalized = " ".join(sql.split())
         rows = tuple(parameters)
         self.connection.batch_calls.append((normalized, rows))
         self.connection.statements.extend((normalized, row) for row in rows)
+        if normalized.startswith("INSERT INTO stv3_ground_station"):
+            self.connection.known_stations.update(
+                (str(row[0]), str(row[1])) for row in rows
+            )
+
+    def fetchall(self):
+        return self.result
 
 
 class FakeConnection:
-    def __init__(self, statements, batch_calls=None):
+    def __init__(self, statements, batch_calls=None, known_stations=None):
         self.statements = statements
         self.batch_calls = [] if batch_calls is None else batch_calls
         self.committed = False
         self.rolled_back = False
         self.closed = False
+        self.known_stations = (
+            {("netatmo", "station-1")}
+            if known_stations is None else set(known_stations)
+        )
 
     def cursor(self):
         return FakeCursor(self)
@@ -219,10 +356,58 @@ async def test_writer_batches_many_observations_in_one_database_roundtrip():
     assert result.status == "current"
     observation_batches = [
         rows for sql, rows in factory.batch_calls
-        if sql.startswith("INSERT INTO stv3_observation")
+        if sql.startswith("WITH source AS (")
     ]
     assert len(observation_batches) == 1
     assert len(observation_batches[0]) == 250
+
+
+@pytest.mark.asyncio
+async def test_writer_stores_shared_source_once_and_links_its_region():
+    factory = ConnectionFactory()
+    writer = ThinPostGISWriter(_settings(), connect_factory=factory)
+    cycle, nowcast = _shared_source_cycle_and_nowcast(100.0)
+
+    result = await writer.write_cycle(
+        cycle,
+        nowcast,
+        region_plan=_shared_home_region_plan(100.0),
+    )
+
+    observation_batches = [
+        rows for sql, rows in factory.batch_calls
+        if sql.startswith("WITH source AS (")
+    ]
+    region_link_batches = [
+        rows for sql, rows in factory.batch_calls
+        if sql.startswith("INSERT INTO stv3_observation_region")
+    ]
+    region_batches = [
+        rows for sql, rows in factory.batch_calls
+        if sql.startswith("INSERT INTO stv3_region_revision(")
+    ]
+    membership_batches = [
+        rows for sql, rows in factory.batch_calls
+        if sql.startswith("INSERT INTO stv3_region_target")
+    ]
+    assert len(observation_batches) == 1
+    assert len(observation_batches[0]) == 1
+    assert len(region_link_batches) == 1
+    assert len(region_link_batches[0]) == 1
+    assert region_link_batches[0][0][5] == "region-revision:home:v1"
+    assert len(region_batches) == 1
+    assert region_batches[0][0][0] == "region-revision:home:v1"
+    assert len(membership_batches) == 1
+    assert {
+        (row[0], row[1]) for row in membership_batches[0]
+    } == {
+        ("home", "region-revision:home:v1"),
+        ("child", "region-revision:home:v1"),
+    }
+    assert result.written_rows["observations"] == 1
+    assert result.written_rows["observation_region_links"] == 1
+    assert result.written_rows["regions"] == 1
+    assert result.written_rows["region_targets"] == 2
 
 
 @pytest.mark.asyncio
@@ -233,22 +418,136 @@ async def test_writer_stores_one_physical_station_measurement_for_two_targets():
     result = await ThinPostGISWriter(
         _settings(),
         connect_factory=factory,
-    ).write_cycle(cycle, nowcast)
+    ).write_cycle(
+        cycle,
+        nowcast,
+        region_plan=_shared_home_region_plan(100.0),
+    )
 
     batches = [
         rows for sql, rows in factory.batch_calls
-        if sql.startswith("INSERT INTO stv3_station_measurement")
+        if sql.startswith("INSERT INTO stv3_station_measurement(")
     ]
     assert len(batches) == 1
     assert len(batches[0]) == 1
     assert "home" not in batches[0][0]
     assert "child" not in batches[0][0]
     assert result.written_rows["station_measurements"] == 1
+    station_region_batches = [
+        rows for sql, rows in factory.batch_calls
+        if sql.startswith("INSERT INTO stv3_station_measurement_region")
+    ]
+    assert len(station_region_batches) == 1
+    assert len(station_region_batches[0]) == 1
+    assert station_region_batches[0][0][4] == "region-revision:home:v1"
+    assert result.written_rows["station_measurement_region_links"] == 1
     station_sql = next(
         sql for sql, _ in factory.batch_calls
-        if sql.startswith("INSERT INTO stv3_station_measurement")
+        if sql.startswith("INSERT INTO stv3_station_measurement(")
     )
     assert "EXCLUDED.received_at >= stv3_station_measurement.received_at" in station_sql
+
+
+@pytest.mark.asyncio
+async def test_writer_links_one_shared_fact_to_two_region_revisions():
+    factory = ConnectionFactory()
+    cycle, nowcast = _shared_source_cycle_and_nowcast(100.0)
+
+    result = await ThinPostGISWriter(
+        _settings(), connect_factory=factory,
+    ).write_cycle(cycle, nowcast, region_plan=_split_region_plan(100.0))
+
+    observation_batches = [
+        rows for sql, rows in factory.batch_calls
+        if sql.startswith("WITH source AS (")
+    ]
+    link_batches = [
+        rows for sql, rows in factory.batch_calls
+        if sql.startswith("INSERT INTO stv3_observation_region")
+    ]
+    assert len(observation_batches[0]) == 1
+    assert len(link_batches[0]) == 2
+    assert {row[5] for row in link_batches[0]} == {
+        "region-revision:home:v1",
+        "region-revision:child:v1",
+    }
+    assert result.written_rows["observations"] == 1
+    assert result.written_rows["observation_region_links"] == 2
+
+
+@pytest.mark.asyncio
+async def test_writer_closes_absent_dynamic_region_lifecycle():
+    factory = ConnectionFactory()
+    writer = ThinPostGISWriter(_settings(), connect_factory=factory)
+    cycle, nowcast = _shared_source_cycle_and_nowcast(100.0)
+    await writer.write_cycle(
+        cycle,
+        nowcast,
+        region_plan=_split_region_plan(100.0),
+    )
+    home_only = _shared_home_region_plan(200.0)
+    await writer.write_cycle(cycle, nowcast, region_plan=home_only)
+
+    closure_sql = "\n".join(
+        sql for sql, _parameters in factory.statements
+        if sql.startswith("UPDATE stv3_region_")
+    )
+    assert "UPDATE stv3_region_target" in closure_sql
+    assert "UPDATE stv3_region_revision" in closure_sql
+    assert "UPDATE stv3_region_instance" in closure_sql
+    assert "valid_until=to_timestamp" in closure_sql
+
+
+@pytest.mark.asyncio
+async def test_writer_auto_registers_unknown_ground_station_before_measurement():
+    cycle, nowcast = _station_cycle_and_nowcast(100.0, "home")
+    statements = []
+
+    result = await ThinPostGISWriter(
+        _settings(),
+        connect_factory=lambda **kwargs: FakeConnection(
+            statements,
+            known_stations=set(),
+        ),
+    ).write_cycle(cycle, nowcast)
+
+    assert result.status == "current"
+    assert result.written_rows["station_measurements"] == 1
+    assert result.written_rows["observations"] == 0
+    assert any(
+        sql.startswith("INSERT INTO stv3_ground_station")
+        for sql, _ in statements
+    )
+    assert any(
+        sql.startswith("INSERT INTO stv3_station_measurement")
+        for sql, _ in statements
+    )
+
+
+@pytest.mark.asyncio
+async def test_writer_does_not_auto_register_non_ground_provider_as_station():
+    cycle, nowcast = _station_cycle_and_nowcast(
+        100.0,
+        "home",
+        provider_id="untrusted_model",
+    )
+    statements = []
+
+    result = await ThinPostGISWriter(
+        _settings(),
+        connect_factory=lambda **kwargs: FakeConnection(
+            statements,
+            known_stations=set(),
+        ),
+    ).write_cycle(cycle, nowcast)
+
+    assert result.status == "current"
+    assert result.written_rows["station_measurements"] == 0
+    assert result.written_rows["observations"] == 1
+    assert not any(
+        sql.startswith("INSERT INTO stv3_ground_station")
+        for sql, _ in statements
+    )
 
 
 @pytest.mark.asyncio
@@ -262,7 +561,7 @@ async def test_writer_keeps_nonstation_radar_on_generic_observation_route():
     ).write_cycle(cycle, nowcast)
 
     assert any(
-        sql.startswith("INSERT INTO stv3_observation")
+        sql.startswith("WITH source AS (")
         for sql, _ in factory.statements
     )
 
@@ -354,12 +653,12 @@ async def test_writer_persists_quantitative_satellite_observation():
 
     observation_rows = [
         row for sql, row in factory.statements
-        if sql.startswith("INSERT INTO stv3_observation")
+        if sql.startswith("WITH source AS (")
     ]
     assert result.status == "current"
     assert len(observation_rows) == 1
-    assert observation_rows[0][1] == "goes19_rrqpe"
-    assert observation_rows[0][4] == "rain_rate"
+    assert observation_rows[0][0] == "goes19_rrqpe"
+    assert observation_rows[0][2] == "rain_rate"
     assert observation_rows[0][5] == pytest.approx(4.4)
 
 
@@ -375,12 +674,12 @@ async def test_writer_uses_idempotent_upserts_and_geometry_parameters():
     assert first.status == second.status == "current"
     observation_inserts = [
         item for item in factory.statements
-        if item[0].startswith("INSERT INTO stv3_observation")
+        if item[0].startswith("WITH source AS (")
     ]
     assert len(observation_inserts) == 2
     assert all("ON CONFLICT" in sql and "DO UPDATE" in sql for sql, _ in observation_inserts)
-    assert observation_inserts[0][1][0] == observation_inserts[1][1][0]
-    geometry = json.loads(observation_inserts[0][1][-1])
+    assert observation_inserts[0][1] == observation_inserts[1][1]
+    geometry = json.loads(observation_inserts[0][1][4])
     assert geometry == {"type": "Point", "coordinates": [4.35, 50.85]}
     assert all(connection.committed for connection in factory.connections)
 
