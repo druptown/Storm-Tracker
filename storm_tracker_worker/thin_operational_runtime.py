@@ -80,6 +80,32 @@ def _sample_regional_radar_at_target(
     field = regional.field
     if field is None:
         return None
+    rain_rate = _sample_radar_field_at_target(field, target)
+    if rain_rate is None:
+        return None
+    transformer = Transformer.from_crs("EPSG:4326", field.crs, always_xy=True)
+    target_x_m, target_y_m = transformer.transform(
+        float(target.longitude), float(target.latitude),
+    )
+    column = math.floor(
+        (target_x_m - field.origin_x_m) / field.x_resolution_m
+    )
+    row = math.floor(
+        (field.origin_y_m - target_y_m) / field.y_resolution_m
+    )
+    height, width = field.rain_rate_mm_h.shape
+    if not (0 <= row < height and 0 <= column < width):
+        return None
+    if not bool(field.valid_mask[row, column]):
+        return None
+    confidence = float(regional.confidence[row, column])
+    return rain_rate, confidence if math.isfinite(confidence) else 0.0
+
+
+def _sample_radar_field_at_target(
+    field: Any,
+    target: Any,
+) -> float | None:
     transformer = Transformer.from_crs("EPSG:4326", field.crs, always_xy=True)
     target_x_m, target_y_m = transformer.transform(
         float(target.longitude), float(target.latitude),
@@ -98,8 +124,7 @@ def _sample_regional_radar_at_target(
     rain_rate = float(field.rain_rate_mm_h[row, column])
     if not math.isfinite(rain_rate) or rain_rate <= 0.0:
         return None
-    confidence = float(regional.confidence[row, column])
-    return rain_rate, confidence if math.isfinite(confidence) else 0.0
+    return rain_rate
 
 
 def _apply_regional_radar_to_targets(
@@ -151,6 +176,76 @@ def _apply_regional_radar_to_targets(
                     float(current.precipitation_rate_mm_h or 0.0),
                 ),
                 confidence=max(current.confidence, radar_confidence),
+                contributors=tuple(sorted(
+                    set(current.contributors).union(contributors)
+                )),
+                source_observed_at=MappingProxyType(source_times),
+            )
+            changed = True
+    if not changed:
+        return fusion
+    return replace(fusion, targets=MappingProxyType(targets))
+
+
+def _apply_native_radar_to_targets(
+    fusion: FusionCycle,
+    region_plan: ThinRegionPlan,
+    native_fields: Mapping[str, tuple[Any, ...]],
+) -> FusionCycle:
+    """Use the same native fallback radar fields as the map/tracker.
+
+    Regional fusion is asynchronous. While it is pending, live native radar
+    fields already drive the visible cell contours. Sampling those exact
+    fields keeps the target status consistent with that visible evidence.
+    """
+    targets = dict(fusion.targets)
+    changed = False
+    for region in region_plan.regions:
+        fields = native_fields.get(region.region_id, ())
+        if not fields:
+            continue
+        for target in region.targets:
+            positive_samples = tuple(
+                (field, rain_rate)
+                for field in fields
+                if (rain_rate := _sample_radar_field_at_target(field, target))
+                is not None
+            )
+            if not positive_samples:
+                continue
+            rain_rate = max(sample for _, sample in positive_samples)
+            contributors = tuple(sorted({
+                field.provider_id for field, _ in positive_samples
+            }))
+            current = targets.get(target.target_id)
+            if current is None:
+                current = FusedTargetObservation(
+                    target_id=target.target_id,
+                    status="onvoldoende_data",
+                    evaluated_at=fusion.evaluated_at,
+                    precipitation_rate_mm_h=None,
+                    reflectivity_dbz=None,
+                    radar_level=None,
+                    rain_probability_percent=None,
+                    pressure_hpa=None,
+                    temperature_c=None,
+                    lightning_count=0,
+                    confidence=0.0,
+                    contributors=(),
+                    source_observed_at=MappingProxyType({}),
+                )
+            source_times = dict(current.source_observed_at)
+            source_times.update({
+                field.provider_id: field.observed_at
+                for field, _ in positive_samples
+            })
+            targets[target.target_id] = replace(
+                current,
+                status="operational",
+                precipitation_rate_mm_h=max(
+                    rain_rate,
+                    float(current.precipitation_rate_mm_h or 0.0),
+                ),
                 contributors=tuple(sorted(
                     set(current.contributors).union(contributors)
                 )),
@@ -522,6 +617,7 @@ class ThinOperationalRuntime:
         completed_regional = self._regional_radar.poll()
         pending_region_ids = self._regional_radar.pending_region_ids()
         regional_summaries: list[RegionalFusionSummary] = []
+        native_fallback_fields: dict[str, tuple[Any, ...]] = {}
 
         def track_field(field: Any, targets: tuple[Any, ...]) -> None:
             for target in targets:
@@ -567,6 +663,7 @@ class ThinOperationalRuntime:
             # Provider I/O is less frequent than processing. Cached,
             # still-current native frames remain the explicit fallback while
             # regional fusion is pending or unavailable.
+            current_native_fields: list[Any] = []
             for result in self._latest_provider_results.values():
                 for field in result.radar_fields:
                     field_maximum_age = PROVIDER_FUSION_AGE_SECONDS.get(
@@ -575,7 +672,11 @@ class ThinOperationalRuntime:
                     )
                     if not 0 <= fusion.evaluated_at - field.observed_at <= field_maximum_age:
                         continue
+                    current_native_fields.append(field)
                     track_field(field, region.targets)
+            native_fallback_fields[region.region_id] = tuple(
+                current_native_fields
+            )
 
             if regional is not None:
                 regional_summaries.append(regional.summary)
@@ -594,6 +695,11 @@ class ThinOperationalRuntime:
             fusion,
             region_plan,
             completed_regional,
+        )
+        fusion = _apply_native_radar_to_targets(
+            fusion,
+            region_plan,
+            native_fallback_fields,
         )
         nowcast = self._nowcast.advance(
             fusion,
