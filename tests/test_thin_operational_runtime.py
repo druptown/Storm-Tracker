@@ -579,6 +579,44 @@ class _NativeRadarProviders:
         }
 
 
+class _DryPointWithWetNativeRadarProviders:
+    async def fetch(self, requests):
+        target = next(
+            target
+            for request in requests
+            for target in request.targets
+            if target.target_id == "home"
+        )
+        field = _runtime_radar_field("rainviewer")
+        observation = NormalizedObservation.create(
+            provider_id="open_meteo",
+            product_id="forecast",
+            target_id=target.target_id,
+            kind=ObservationKind.RAIN_RATE,
+            value=0.0,
+            unit="mm/h",
+            observed_at=100.0,
+            received_at=100.0,
+            latitude=target.latitude,
+            longitude=target.longitude,
+            quality=ObservationQuality.GOOD,
+            geometry={
+                "type": "Point",
+                "coordinates": [target.longitude, target.latitude],
+            },
+        )
+        return {
+            "open_meteo": ProviderResult(
+                "open_meteo", True, "operational", None, (observation,),
+                100.0, 100.0,
+            ),
+            "rainviewer": ProviderResult(
+                "rainviewer", True, "operational", None, (),
+                100.0, 100.0, (field,),
+            ),
+        }
+
+
 @pytest.mark.asyncio
 async def test_completed_fusion_is_primary_tracking_source():
     fused = _runtime_radar_field("fusion:region:home")
@@ -674,6 +712,27 @@ async def test_pending_fusion_uses_marked_per_provider_fallback():
     )
     assert result.regional_radar[0].mode == "fallback"
     assert result.regional_radar[0].reason_codes == ("fusion_pending",)
+
+
+@pytest.mark.asyncio
+async def test_pending_fusion_uses_wet_native_radar_for_target_status():
+    coordinator = _RegionalCoordinator(pending=True)
+    runtime = ThinOperationalRuntime(
+        provider_runtime=_DryPointWithWetNativeRadarProviders(),
+        regional_radar_coordinator=coordinator,
+        clock=lambda: 100.0,
+    )
+    runtime.apply_desired_state(_home_state())
+
+    result = await runtime.run_cycle()
+
+    target = result.nowcast.target_results["home"]
+    assert target.current_state == "regen"
+    assert target.precipitation_rate_mm_h == 5.0
+    assert set(target.contributors) >= {"open_meteo", "rainviewer"}
+    assert [item.provider_id for item in result.fusion.observations] == [
+        "open_meteo",
+    ]
 
 
 class BrokenPostGIS:

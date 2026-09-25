@@ -1,5 +1,15 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+## integration 1.14.144 / worker 1.18.58
+
+- Laat de actuele doelstatus tijdens wachtende of ontbrekende regionale fusie
+  hetzelfde nog geldige native radarraster gebruiken als de zichtbare
+  buicellen op de kaart.
+- Een droge modelpuntschatting kan daardoor niet langer blijven staan wanneer
+  de tracker in een positieve pixel van het actieve fallback-raster ligt.
+- De radarwaarde blijft een projectie in het fusieresultaat en maakt geen
+  doelpersoongebonden observatieduplicaten in PostGIS.
+
 ## integration 1.14.144 / worker 1.18.57
 
 - Gebruik de actuele regionale radarwaarde op de exacte doelpositie voor de

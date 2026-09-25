@@ -1,3 +1,3 @@
 """Standalone Storm Tracker worker."""
 
-__version__ = "1.18.57"
+__version__ = "1.18.58"
