@@ -222,6 +222,48 @@ def _split_region_plan(valid_at: float) -> ThinRegionPlan:
     )
 
 
+def _single_region_plan(
+    valid_at: float,
+    positions: dict[str, tuple[float, float]],
+) -> ThinRegionPlan:
+    targets = tuple(
+        Target(
+            target_id=target_id,
+            display_name=target_id.title(),
+            kind="test",
+            available=True,
+            latitude=latitude,
+            longitude=longitude,
+            position_observed_at=valid_at,
+            location_accuracy_m=10.0,
+            observation_radius_km=100.0,
+            country_code="IT",
+        )
+        for target_id, (latitude, longitude) in positions.items()
+    )
+    region = ThinAcquisitionRegion(
+        region_id="region:test",
+        region_instance_id="region-instance:test",
+        region_revision_id="region-revision:test:v1",
+        activated_at=valid_at,
+        revision_valid_from=valid_at,
+        kind="external",
+        center_latitude=sum(item.latitude for item in targets) / len(targets),
+        center_longitude=sum(item.longitude for item in targets) / len(targets),
+        observation_radius_km=100.0,
+        targets=targets,
+        stale_target_ids=(),
+    )
+    return ThinRegionPlan(
+        regions=(region,),
+        targets=targets,
+        target_region_ids=MappingProxyType({
+            target.target_id: region.region_id for target in targets
+        }),
+        location_statuses=MappingProxyType({
+            target.target_id: "current" for target in targets
+        }),
+    )
 class FakeCursor:
     def __init__(self, connection):
         self.connection = connection
@@ -730,6 +772,56 @@ async def test_writer_persists_polygon_entry_and_exit_passage():
     assert len(inserts) == 1
     assert inserts[0][1][4] < inserts[0][1][5]
     assert inserts[0][1][6] == "translated_footprint"
+
+
+@pytest.mark.asyncio
+async def test_writer_keeps_revision_on_cells_tracks_and_target_forecasts():
+    factory = ConnectionFactory()
+    writer = ThinPostGISWriter(_settings(), connect_factory=factory)
+    cycle, _unused = _cycle_and_nowcast(100.0)
+    cell = StormCell(
+        cell_id="regional-cell", provider_id="opera_radar", observed_at=100.0,
+        latitude=0.0, longitude=0.0,
+        geometry={"type": "Polygon", "coordinates": [[
+            [-0.01, -0.01], [0.01, -0.01], [0.01, 0.01],
+            [-0.01, 0.01], [-0.01, -0.01],
+        ]]},
+        precipitation_rate_mm_h=4.0, reflectivity_dbz=None, radar_level=None,
+        velocity_east_kmh=60.0, velocity_north_kmh=0.0,
+        speed_kmh=60.0, heading_deg=90.0,
+    )
+    positions = {"home": (0.0, 0.10), "child": (0.0, 0.20)}
+    nowcast = ThinNowcastRuntime(targets=positions).advance(
+        cycle, tracked_cells=(cell,),
+    )
+
+    await writer.write_cycle(
+        cycle,
+        nowcast,
+        region_plan=_single_region_plan(100.0, positions),
+    )
+
+    cell_row = next(
+        row for sql, row in factory.statements
+        if sql.startswith("INSERT INTO stv3_storm_cell")
+    )
+    track_row = next(
+        row for sql, row in factory.statements
+        if sql.startswith("INSERT INTO stv3_track_point")
+    )
+    forecast_rows = {
+        row[0]: row for sql, row in factory.statements
+        if sql.startswith("INSERT INTO stv3_target_forecast")
+    }
+    assert cell_row[-1] == "region-revision:test:v1"
+    assert track_row[-1] == "region-revision:test:v1"
+    assert set(forecast_rows) == {"home", "child"}
+    assert {row[-1] for row in forecast_rows.values()} == {
+        "region-revision:test:v1"
+    }
+    for target_id, forecast in nowcast.target_results.items():
+        assert forecast_rows[target_id][4] == forecast.precipitation_rate_mm_h
+        assert forecast_rows[target_id][5] == forecast.eta_minutes
 
 
 @pytest.mark.asyncio

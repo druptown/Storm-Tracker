@@ -304,12 +304,28 @@ class ThinRegionPlanner:
             for target in targets
         )
         coverage_offset = max(target_offsets)
-        if kind == "external":
-            coverage_offset = max(coverage_offset, self._recenter_distance_km)
         radius = _coverage_bucket_km(self._warning_radius_km + coverage_offset)
         radar_analysis_radius = _coverage_bucket_km(
             self._radar_analysis_radius_km + coverage_offset
         )
+        previous_revision = self._region_revisions.get(region_id)
+        if previous_revision is not None and kind == "external":
+            previous_fingerprint = previous_revision[0]
+            same_fixed_center = (
+                previous_fingerprint[0] == region_instance_id
+                and previous_fingerprint[1] == round(center[0], 5)
+                and previous_fingerprint[2] == round(center[1], 5)
+            )
+            coverage_hysteresis_km = REGION_COVERAGE_BUCKET_KM * 2.0
+            if (
+                same_fixed_center
+                and abs(radius - previous_fingerprint[3])
+                    <= coverage_hysteresis_km
+                and abs(radar_analysis_radius - previous_fingerprint[4])
+                    <= coverage_hysteresis_km
+            ):
+                radius = previous_fingerprint[3]
+                radar_analysis_radius = previous_fingerprint[4]
         revision_fingerprint = (
             region_instance_id,
             round(center[0], 5),
@@ -317,7 +333,6 @@ class ThinRegionPlanner:
             radius,
             radar_analysis_radius,
         )
-        previous_revision = self._region_revisions.get(region_id)
         if previous_revision is not None and previous_revision[0] == revision_fingerprint:
             region_revision_id = previous_revision[1]
             revision_valid_from = previous_revision[2]

@@ -351,39 +351,43 @@ ON CONFLICT(cycle_key) DO UPDATE SET
 _INSERT_CELL = """
 INSERT INTO stv3_storm_cell(
     cell_id,observed_at,provider_id,precipitation_rate_mm_h,
-    reflectivity_dbz,radar_level,geometry
+    reflectivity_dbz,radar_level,geometry,region_revision_id
 ) VALUES(%s,to_timestamp(%s),%s,%s,%s,%s,
-    ST_SetSRID(ST_GeomFromGeoJSON(%s),4326))
+    ST_SetSRID(ST_GeomFromGeoJSON(%s),4326),%s)
 ON CONFLICT(cell_id,observed_at) DO UPDATE SET
     precipitation_rate_mm_h=EXCLUDED.precipitation_rate_mm_h,
     reflectivity_dbz=EXCLUDED.reflectivity_dbz,
-    radar_level=EXCLUDED.radar_level,geometry=EXCLUDED.geometry
+    radar_level=EXCLUDED.radar_level,geometry=EXCLUDED.geometry,
+    region_revision_id=EXCLUDED.region_revision_id
 """
 
 _INSERT_TRACK = """
 INSERT INTO stv3_track_point(
     cell_id,observed_at,velocity_east_kmh,velocity_north_kmh,
-    speed_kmh,heading_deg,position
+    speed_kmh,heading_deg,position,region_revision_id
 ) VALUES(%s,to_timestamp(%s),%s,%s,%s,%s,
-    ST_SetSRID(ST_GeomFromGeoJSON(%s),4326))
+    ST_SetSRID(ST_GeomFromGeoJSON(%s),4326),%s)
 ON CONFLICT(cell_id,observed_at) DO UPDATE SET
     velocity_east_kmh=EXCLUDED.velocity_east_kmh,
     velocity_north_kmh=EXCLUDED.velocity_north_kmh,
     speed_kmh=EXCLUDED.speed_kmh,heading_deg=EXCLUDED.heading_deg,
-    position=EXCLUDED.position
+    position=EXCLUDED.position,
+    region_revision_id=EXCLUDED.region_revision_id
 """
 
 _INSERT_FORECAST = """
 INSERT INTO stv3_target_forecast(
     target_id,evaluated_at,current_state,forecast_state,
-    precipitation_rate_mm_h,eta_minutes,confidence,reason_code,contributors
-) VALUES(%s,to_timestamp(%s),%s,%s,%s,%s,%s,%s,%s::jsonb)
+    precipitation_rate_mm_h,eta_minutes,confidence,reason_code,contributors,
+    region_revision_id
+) VALUES(%s,to_timestamp(%s),%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
 ON CONFLICT(target_id,evaluated_at) DO UPDATE SET
     current_state=EXCLUDED.current_state,
     forecast_state=EXCLUDED.forecast_state,
     precipitation_rate_mm_h=EXCLUDED.precipitation_rate_mm_h,
     eta_minutes=EXCLUDED.eta_minutes,confidence=EXCLUDED.confidence,
-    reason_code=EXCLUDED.reason_code,contributors=EXCLUDED.contributors
+    reason_code=EXCLUDED.reason_code,contributors=EXCLUDED.contributors,
+    region_revision_id=EXCLUDED.region_revision_id
 """
 
 _INSERT_TARGET_POSITION = """
@@ -400,16 +404,17 @@ ON CONFLICT(target_id,observed_at) DO UPDATE SET
 _INSERT_PASSAGE = """
 INSERT INTO stv3_target_passage(
     target_id,evaluated_at,cell_id,provider_id,entry_at,exit_at,
-    method,predicted_intensity_mm_h,footprint,metadata
+    method,predicted_intensity_mm_h,footprint,metadata,region_revision_id
 ) VALUES(
     %s,to_timestamp(%s),%s,%s,to_timestamp(%s),to_timestamp(%s),
-    %s,%s,ST_SetSRID(ST_GeomFromGeoJSON(%s),4326),%s::jsonb
+    %s,%s,ST_SetSRID(ST_GeomFromGeoJSON(%s),4326),%s::jsonb,%s
 )
 ON CONFLICT(target_id,evaluated_at,cell_id) DO UPDATE SET
     entry_at=EXCLUDED.entry_at,exit_at=EXCLUDED.exit_at,
     method=EXCLUDED.method,
     predicted_intensity_mm_h=EXCLUDED.predicted_intensity_mm_h,
-    footprint=EXCLUDED.footprint,metadata=EXCLUDED.metadata
+    footprint=EXCLUDED.footprint,metadata=EXCLUDED.metadata,
+    region_revision_id=EXCLUDED.region_revision_id
 """
 
 _INSERT_VALIDATION = """
@@ -417,9 +422,9 @@ INSERT INTO stv3_forecast_validation(
     validation_key,target_id,evaluated_at,cell_id,provider_id,
     station_provider_id,station_id,outcome,entry_error_seconds,
     exit_error_seconds,predicted_intensity_mm_h,observed_intensity_mm_h,
-    details
+    details,region_revision_id
 ) VALUES(
-    %s,%s,to_timestamp(%s),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb
+    %s,%s,to_timestamp(%s),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s
 )
 ON CONFLICT(validation_key) DO UPDATE SET
     outcome=EXCLUDED.outcome,
@@ -427,7 +432,8 @@ ON CONFLICT(validation_key) DO UPDATE SET
     exit_error_seconds=EXCLUDED.exit_error_seconds,
     predicted_intensity_mm_h=EXCLUDED.predicted_intensity_mm_h,
     observed_intensity_mm_h=EXCLUDED.observed_intensity_mm_h,
-    details=EXCLUDED.details
+    details=EXCLUDED.details,
+    region_revision_id=EXCLUDED.region_revision_id
 """
 
 
@@ -914,7 +920,7 @@ class ThinPostGISWriter:
                     nowcast,
                     validations,
                     regional_radar,
-                    _region_plan,
+                    region_plan,
                 ) in batch:
                     targets = {
                         key: value.as_dict() for key, value in cycle.targets.items()
@@ -951,6 +957,14 @@ class ThinPostGISWriter:
                     for cell in nowcast.storm_cells:
                         cell_payload = cell.as_dict()
                         geometry_json = _json(cell_payload["geometry"])
+                        cell_region_revision_id = (
+                            None
+                            if region_plan is None
+                            else region_plan.region_revision_id_for_position(
+                                cell.latitude,
+                                cell.longitude,
+                            )
+                        )
                         cursor.execute(_INSERT_CELL, (
                             cell.cell_id,
                             cell.observed_at,
@@ -959,6 +973,7 @@ class ThinPostGISWriter:
                             cell.reflectivity_dbz,
                             cell.radar_level,
                             geometry_json,
+                            cell_region_revision_id,
                         ))
                         counts["storm_cells"] += 1
                         cursor.execute(_INSERT_TRACK, (
@@ -972,10 +987,16 @@ class ThinPostGISWriter:
                                 "type": "Point",
                                 "coordinates": [cell.longitude, cell.latitude],
                             }),
+                            cell_region_revision_id,
                         ))
                         counts["track_points"] += 1
 
                     for target_id, forecast in nowcast.target_results.items():
+                        target_region_revision_id = (
+                            None
+                            if region_plan is None
+                            else region_plan.region_revision_id_for(target_id)
+                        )
                         cursor.execute(_INSERT_FORECAST, (
                             target_id,
                             nowcast.evaluated_at,
@@ -986,6 +1007,7 @@ class ThinPostGISWriter:
                             forecast.confidence,
                             forecast.reason_code,
                             _json(list(forecast.contributors)),
+                            target_region_revision_id,
                         ))
                         counts["target_forecasts"] += 1
                         if (
@@ -1002,6 +1024,13 @@ class ThinPostGISWriter:
                             counts["target_positions"] += 1
 
                     for passage in nowcast.target_passages:
+                        passage_region_revision_id = (
+                            None
+                            if region_plan is None
+                            else region_plan.region_revision_id_for(
+                                passage.target_id
+                            )
+                        )
                         cursor.execute(_INSERT_PASSAGE, (
                             passage.target_id,
                             passage.evaluated_at,
@@ -1016,10 +1045,18 @@ class ThinPostGISWriter:
                                 "fallback_reason": passage.fallback_reason,
                                 "horizon_clipped": passage.horizon_clipped,
                             }),
+                            passage_region_revision_id,
                         ))
                         counts["target_passages"] += 1
 
                     for validation in validations:
+                        validation_region_revision_id = (
+                            None
+                            if region_plan is None
+                            else region_plan.region_revision_id_for(
+                                validation.target_id
+                            )
+                        )
                         cursor.execute(_INSERT_VALIDATION, (
                             validation.validation_key,
                             validation.target_id,
@@ -1041,6 +1078,7 @@ class ThinPostGISWriter:
                                     validation.contributing_stations
                                 ),
                             }),
+                            validation_region_revision_id,
                         ))
                         counts["forecast_validations"] += 1
 
