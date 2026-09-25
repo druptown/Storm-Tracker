@@ -1,5 +1,14 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+## integration 1.14.144 / worker 1.18.57
+
+- Gebruik de actuele regionale radarwaarde op de exacte doelpositie voor de
+  huidige regenstatus. Daardoor kan de kaart niet langer regen tonen terwijl
+  dezelfde locatie uitsluitend door een droge modelpuntschatting als `droog`
+  wordt weergegeven.
+- Behoud regionale radarprovenance en producttijd zonder de onderliggende
+  observaties opnieuw per doelpersoon op te slaan.
+
 ## integration 1.14.144 / worker 1.18.56
 
 - Bewaar iedere algemene bronobservatie en iedere fysieke stationsmeting nog

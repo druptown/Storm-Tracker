@@ -6,12 +6,16 @@ from dataclasses import dataclass, replace
 import json
 import math
 import time
+from types import MappingProxyType
 from typing import Any, Callable, Mapping
+
+from pyproj import Transformer
 
 from .desired_state import METHOD, DesiredState, DesiredStateConflict, parse_desired_state
 from .thin_fusion import (
     MAX_FUSION_AGE_SECONDS,
     PROVIDER_FUSION_AGE_SECONDS,
+    FusedTargetObservation,
     FusionCycle,
     fuse_observations,
 )
@@ -19,6 +23,7 @@ from .thin_ground_validation import ForecastValidation, GroundValidationRuntime
 from .thin_nowcast import StormCell, ThinNowcast, ThinNowcastRuntime
 from .thin_observation import ObservationKind
 from .thin_radar_tracking import ThinRadarTracker
+from .thin_radar_overlay import build_radar_overlay
 from .thin_regional_radar_fusion import RegionalFusionSummary
 from .thin_regional_radar_runtime import ThinRegionalRadarFusionCoordinator
 from .thin_postgis import PostGISWriteResult
@@ -29,6 +34,7 @@ from .tracking_core.operational_snapshot import MAX_UI_STORM_SUMMARIES, validate
 
 SNAPSHOT_TTL_SECONDS = 120.0
 MAX_GEOJSON_PAYLOAD_BYTES = 900_000
+MAX_TOTAL_RADAR_OVERLAY_RUNS = 2_000
 SNAPSHOT_REVISION_EPOCH_SECONDS = 1_577_836_800  # 2020-01-01T00:00:00Z
 SNAPSHOT_PROVIDER_IDS = {
     "kmi_aws": "ground.kmi.aws_10min",
@@ -65,6 +71,95 @@ SNAPSHOT_PROVIDER_IDS = {
 
 def _snapshot_provider_id(provider_id: str) -> str:
     return SNAPSHOT_PROVIDER_IDS.get(provider_id, provider_id)
+
+
+def _sample_regional_radar_at_target(
+    regional: Any,
+    target: Any,
+) -> tuple[float, float] | None:
+    field = regional.field
+    if field is None:
+        return None
+    transformer = Transformer.from_crs("EPSG:4326", field.crs, always_xy=True)
+    target_x_m, target_y_m = transformer.transform(
+        float(target.longitude), float(target.latitude),
+    )
+    column = math.floor(
+        (target_x_m - field.origin_x_m) / field.x_resolution_m
+    )
+    row = math.floor(
+        (field.origin_y_m - target_y_m) / field.y_resolution_m
+    )
+    height, width = field.rain_rate_mm_h.shape
+    if not (0 <= row < height and 0 <= column < width):
+        return None
+    if not bool(field.valid_mask[row, column]):
+        return None
+    rain_rate = float(field.rain_rate_mm_h[row, column])
+    if not math.isfinite(rain_rate) or rain_rate <= 0.0:
+        return None
+    confidence = float(regional.confidence[row, column])
+    return rain_rate, confidence if math.isfinite(confidence) else 0.0
+
+
+def _apply_regional_radar_to_targets(
+    fusion: FusionCycle,
+    region_plan: ThinRegionPlan,
+    regional_fields: Mapping[str, Any],
+) -> FusionCycle:
+    targets = dict(fusion.targets)
+    changed = False
+    for region in region_plan.regions:
+        regional = regional_fields.get(region.region_id)
+        if regional is None or regional.field is None:
+            continue
+        contributors = regional.summary.contributors or (
+            regional.field.provider_id,
+        )
+        for target in region.targets:
+            sample = _sample_regional_radar_at_target(regional, target)
+            if sample is None:
+                continue
+            rain_rate, radar_confidence = sample
+            current = targets.get(target.target_id)
+            if current is None:
+                current = FusedTargetObservation(
+                    target_id=target.target_id,
+                    status="onvoldoende_data",
+                    evaluated_at=fusion.evaluated_at,
+                    precipitation_rate_mm_h=None,
+                    reflectivity_dbz=None,
+                    radar_level=None,
+                    rain_probability_percent=None,
+                    pressure_hpa=None,
+                    temperature_c=None,
+                    lightning_count=0,
+                    confidence=0.0,
+                    contributors=(),
+                    source_observed_at=MappingProxyType({}),
+                )
+            source_times = dict(current.source_observed_at)
+            source_times.update({
+                provider_id: regional.field.observed_at
+                for provider_id in contributors
+            })
+            targets[target.target_id] = replace(
+                current,
+                status="operational",
+                precipitation_rate_mm_h=max(
+                    rain_rate,
+                    float(current.precipitation_rate_mm_h or 0.0),
+                ),
+                confidence=max(current.confidence, radar_confidence),
+                contributors=tuple(sorted(
+                    set(current.contributors).union(contributors)
+                )),
+                source_observed_at=MappingProxyType(source_times),
+            )
+            changed = True
+    if not changed:
+        return fusion
+    return replace(fusion, targets=MappingProxyType(targets))
 
 
 def _ground_evidence(
@@ -495,6 +590,11 @@ class ThinOperationalRuntime:
                     evaluated_at=fusion.evaluated_at,
                     reason_code=reason_code,
                 ))
+        fusion = _apply_regional_radar_to_targets(
+            fusion,
+            region_plan,
+            completed_regional,
+        )
         nowcast = self._nowcast.advance(
             fusion,
             tracked_cells=tuple({item.cell_id: item for item in tracked_cells}.values()) or None,
@@ -510,6 +610,7 @@ class ThinOperationalRuntime:
             state=state,
             region_plan=region_plan,
             regional_radar=tuple(regional_summaries),
+            regional_radar_fields=completed_regional,
         )
         if self._postgis is None:
             postgis = PostGISWriteResult(
@@ -525,6 +626,7 @@ class ThinOperationalRuntime:
                 nowcast,
                 validations,
                 regional_radar=tuple(regional_summaries),
+                region_plan=region_plan,
             )
         self._revision += 1
         snapshot = self._build_snapshot(
@@ -552,6 +654,7 @@ class ThinOperationalRuntime:
         state: DesiredState | None = None,
         region_plan: ThinRegionPlan | None = None,
         regional_radar: tuple[RegionalFusionSummary, ...] = (),
+        regional_radar_fields: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         state = self._state if state is None else state
         assert state is not None
@@ -560,6 +663,24 @@ class ThinOperationalRuntime:
             if region_plan is None
             else region_plan
         )
+        overlay_fields = [
+            (region_id, result.field)
+            for region_id, result in sorted(
+                (regional_radar_fields or {}).items()
+            )
+            if result.field is not None
+        ]
+        per_overlay_run_budget = max(
+            1,
+            MAX_TOTAL_RADAR_OVERLAY_RUNS // max(1, len(overlay_fields)),
+        )
+        radar_overlays = {
+            region_id: build_radar_overlay(
+                field,
+                maximum_runs=per_overlay_run_budget,
+            )
+            for region_id, field in overlay_fields
+        }
         target_features: list[dict[str, Any]] = []
         cell_feature_groups: list[tuple[float, str, list[dict[str, Any]]]] = []
         lightning_features: list[dict[str, Any]] = []
@@ -690,6 +811,7 @@ class ThinOperationalRuntime:
             return {
                 "type": "FeatureCollection",
                 "features": features,
+                "radar_overlays": radar_overlays,
                 "metadata": {
                     "schema_version": 1,
                     "feature_count": len(features),
@@ -756,10 +878,32 @@ class ThinOperationalRuntime:
         # completed cycle is published, not when fusion began.
         evaluated_at = float(self._clock())
         observations = fusion.observations
-        product_valid_at = max((item.observed_at for item in observations), default=None)
-        received_at = max((item.received_at for item in observations), default=None)
+        regional_with_data = tuple(
+            item for item in regional_radar if item.field_observed_at is not None
+        )
+        product_valid_at = max(
+            (
+                *(item.observed_at for item in observations),
+                *(float(item.field_observed_at) for item in regional_with_data),
+            ),
+            default=None,
+        )
+        received_at = max(
+            (
+                *(item.received_at for item in observations),
+                *(item.evaluated_at for item in regional_with_data),
+            ),
+            default=None,
+        )
         source_ids = sorted(
-            {_snapshot_provider_id(item.provider_id) for item in observations}
+            {
+                *(_snapshot_provider_id(item.provider_id) for item in observations),
+                *(
+                    _snapshot_provider_id(provider_id)
+                    for item in regional_with_data
+                    for provider_id in item.contributors
+                ),
+            }
         )
 
         provider_items: list[dict[str, Any]] = []
@@ -859,6 +1003,11 @@ class ThinOperationalRuntime:
         }
         for target in sorted(region_plan.targets, key=lambda item: item.target_id):
             result = nowcast.target_results[target.target_id]
+            fused_target = fusion.targets.get(target.target_id)
+            target_product_valid_at = max(
+                () if fused_target is None else fused_target.source_observed_at.values(),
+                default=product_valid_at,
+            )
             region_id = (
                 region_plan.region_id_for(target.target_id)
                 or "region:unassigned"
@@ -917,7 +1066,11 @@ class ThinOperationalRuntime:
                         if current_state in {"raining", "dry"}
                         else None
                     ),
-                    "product_valid_at": product_valid_at if current_freshness == "current" else None,
+                    "product_valid_at": (
+                        target_product_valid_at
+                        if current_freshness == "current"
+                        else None
+                    ),
                     "provider_ids": providers,
                     "reason_codes": target_reason_codes,
                     "ground_evidence": _ground_evidence(
@@ -935,7 +1088,11 @@ class ThinOperationalRuntime:
                     "eta_minutes": result.eta_minutes if threat_state == "available" else None,
                     "distance_km": None,
                     "passage_status": passage,
-                    "product_valid_at": product_valid_at if threat_freshness == "current" else None,
+                    "product_valid_at": (
+                        target_product_valid_at
+                        if threat_freshness == "current"
+                        else None
+                    ),
                     "provider_ids": providers,
                     "reason_codes": target_reason_codes,
                 },

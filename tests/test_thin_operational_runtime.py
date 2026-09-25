@@ -606,6 +606,56 @@ async def test_completed_fusion_is_primary_tracking_source():
 
 
 @pytest.mark.asyncio
+async def test_regional_radar_rain_at_target_overrides_dry_model_point():
+    fused = _runtime_radar_field("fusion:region:home")
+    coordinator = _RegionalCoordinator({"region:home": _regional_result(fused)})
+    runtime = ThinOperationalRuntime(
+        provider_runtime=ZeroRainProviders(),
+        regional_radar_coordinator=coordinator,
+        clock=lambda: 100.0,
+    )
+    runtime.apply_desired_state(_home_state())
+
+    result = await runtime.run_cycle()
+
+    target = result.nowcast.target_results["home"]
+    assert target.current_state == "regen"
+    assert target.precipitation_rate_mm_h == 5.0
+    assert set(target.contributors) >= {"dwd_radolan", "opera_radar"}
+    assert [item.provider_id for item in result.fusion.observations] == ["open_meteo"]
+    assert result.snapshot["targets"]["items"][0]["current_precipitation"]["state"] == "raining"
+
+
+@pytest.mark.asyncio
+async def test_light_rain_is_mapped_without_becoming_a_tracked_cell():
+    fused = _runtime_radar_field("fusion:region:home")
+    fused.rain_rate_mm_h[:] = 0.0
+    fused.rain_rate_mm_h[6:10, 6:10] = 0.2
+    coordinator = _RegionalCoordinator({"region:home": _regional_result(fused)})
+    runtime = ThinOperationalRuntime(
+        provider_runtime=EmptyProviders(),
+        regional_radar_coordinator=coordinator,
+        clock=lambda: 100.0,
+    )
+    runtime.apply_desired_state(_home_state())
+
+    await runtime.run_cycle()
+
+    collection = runtime.geojson_collection()
+    assert not [
+        feature
+        for feature in collection["features"]
+        if feature["properties"]["layer"] == "radar_cell"
+    ]
+    overlay = collection["radar_overlays"]["region:home"]
+    assert overlay["provider_id"] == "fusion:region:home"
+    assert overlay["observed_at"] == 100.0
+    assert overlay["threshold_mm_h"] == 0.1
+    assert overlay["runs"]
+    assert {run["intensity"] for run in overlay["runs"]} == {1}
+
+
+@pytest.mark.asyncio
 async def test_pending_fusion_uses_marked_per_provider_fallback():
     coordinator = _RegionalCoordinator(pending=True)
     runtime = ThinOperationalRuntime(
@@ -627,7 +677,15 @@ async def test_pending_fusion_uses_marked_per_provider_fallback():
 
 
 class BrokenPostGIS:
-    async def write_cycle(self, cycle, nowcast, validations=(), *, regional_radar=()):
+    async def write_cycle(
+        self,
+        cycle,
+        nowcast,
+        validations=(),
+        *,
+        regional_radar=(),
+        region_plan=None,
+    ):
         return PostGISWriteResult(
             status="degraded",
             last_error_code="postgis_unavailable",
@@ -641,7 +699,15 @@ class AdvancingPostGIS:
     def __init__(self, clock_value):
         self._clock_value = clock_value
 
-    async def write_cycle(self, cycle, nowcast, validations=(), *, regional_radar=()):
+    async def write_cycle(
+        self,
+        cycle,
+        nowcast,
+        validations=(),
+        *,
+        regional_radar=(),
+        region_plan=None,
+    ):
         self._clock_value[0] = 400.0
         return PostGISWriteResult(
             status="current",
