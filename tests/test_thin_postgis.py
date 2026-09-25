@@ -60,6 +60,51 @@ def _cycle_and_nowcast(valid_at: float, *, observation_count: int = 1):
     return cycle, nowcast
 
 
+def _station_cycle_and_nowcast(
+    valid_at: float,
+    *target_ids: str,
+):
+    observations = tuple(
+        NormalizedObservation.create(
+            provider_id="netatmo",
+            product_id="getpublicdata",
+            target_id=target_id,
+            kind=ObservationKind.RAIN_RATE,
+            value=2.5,
+            unit="mm/h",
+            observed_at=valid_at,
+            received_at=valid_at + 1.0,
+            latitude=51.05,
+            longitude=4.42,
+            quality=ObservationQuality.GOOD,
+            metadata={
+                "station_id": "station-1",
+                "measurement": "rain_rate",
+            },
+        )
+        for target_id in target_ids
+    )
+    provider = ProviderResult(
+        provider_id="netatmo",
+        ready=True,
+        status="operational",
+        reason_code=None,
+        observations=observations,
+        attempted_at=valid_at,
+        completed_at=valid_at + 1.0,
+    )
+    cycle = fuse_observations(
+        {"netatmo": provider},
+        evaluated_at=valid_at + 2.0,
+        target_ids=target_ids,
+    )
+    targets = {
+        target_id: (51.05, 4.42)
+        for target_id in target_ids
+    }
+    return cycle, ThinNowcastRuntime(targets=targets).advance(cycle)
+
+
 class FakeCursor:
     def __init__(self, connection):
         self.connection = connection
@@ -178,6 +223,97 @@ async def test_writer_batches_many_observations_in_one_database_roundtrip():
     ]
     assert len(observation_batches) == 1
     assert len(observation_batches[0]) == 250
+
+
+@pytest.mark.asyncio
+async def test_writer_stores_one_physical_station_measurement_for_two_targets():
+    cycle, nowcast = _station_cycle_and_nowcast(100.0, "home", "child")
+    factory = ConnectionFactory()
+
+    result = await ThinPostGISWriter(
+        _settings(),
+        connect_factory=factory,
+    ).write_cycle(cycle, nowcast)
+
+    batches = [
+        rows for sql, rows in factory.batch_calls
+        if sql.startswith("INSERT INTO stv3_station_measurement")
+    ]
+    assert len(batches) == 1
+    assert len(batches[0]) == 1
+    assert "home" not in batches[0][0]
+    assert "child" not in batches[0][0]
+    assert result.written_rows["station_measurements"] == 1
+    station_sql = next(
+        sql for sql, _ in factory.batch_calls
+        if sql.startswith("INSERT INTO stv3_station_measurement")
+    )
+    assert "EXCLUDED.received_at >= stv3_station_measurement.received_at" in station_sql
+
+
+@pytest.mark.asyncio
+async def test_writer_keeps_nonstation_radar_on_generic_observation_route():
+    cycle, nowcast = _cycle_and_nowcast(100.0)
+    factory = ConnectionFactory()
+
+    await ThinPostGISWriter(
+        _settings(),
+        connect_factory=factory,
+    ).write_cycle(cycle, nowcast)
+
+    assert any(
+        sql.startswith("INSERT INTO stv3_observation")
+        for sql, _ in factory.statements
+    )
+
+
+@pytest.mark.asyncio
+async def test_station_fk_failure_rolls_back_and_retry_deduplicates_cycle():
+    factory = ConnectionFactory()
+    original_call = factory.__call__
+    calls = {"count": 0}
+
+    def fail_first_station_batch(**kwargs):
+        connection = original_call(**kwargs)
+        calls["count"] += 1
+        if calls["count"] == 1:
+            original_cursor = connection.cursor
+
+            def cursor():
+                result = original_cursor()
+                original_executemany = result.executemany
+
+                def executemany(sql, parameters):
+                    if "INSERT INTO stv3_station_measurement" in sql:
+                        raise RuntimeError("foreign key violation")
+                    return original_executemany(sql, parameters)
+
+                result.executemany = executemany
+                return result
+
+            connection.cursor = cursor
+        return connection
+
+    writer = ThinPostGISWriter(
+        _settings(),
+        connect_factory=fail_first_station_batch,
+    )
+    cycle, nowcast = _station_cycle_and_nowcast(100.0, "home", "child")
+
+    degraded = await writer.write_cycle(cycle, nowcast)
+    recovered = await writer.write_cycle(cycle, nowcast)
+
+    assert degraded.status == "degraded"
+    assert degraded.queued_cycles == 1
+    assert factory.connections[0].rolled_back is True
+    assert recovered.status == "current"
+    assert recovered.queued_cycles == 0
+    successful_batches = [
+        rows for sql, rows in factory.batch_calls
+        if sql.startswith("INSERT INTO stv3_station_measurement")
+    ]
+    assert len(successful_batches) == 1
+    assert len(successful_batches[0]) == 1
 
 
 @pytest.mark.asyncio
