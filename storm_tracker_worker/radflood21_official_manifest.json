@@ -1,0 +1,118 @@
+{
+  "schema_version": "radflood21-validation-corpus-manifest-v1",
+  "record": {
+    "record_id": 7740059,
+    "concept_record_id": 7740058,
+    "doi": "10.5281/zenodo.7740059",
+    "concept_doi": "10.5281/zenodo.7740058",
+    "revision": 8,
+    "created_at": "2023-03-16T09:04:01.915565+00:00",
+    "updated_at": "2023-10-17T12:06:57.625415+00:00",
+    "publication_date": "2023-03-16",
+    "title": "Observational rainfall data of the 2021 mid-July flood event in Belgium – Part 2. Radar product RADFLOOD21",
+    "resource_type": "dataset",
+    "access_right": "open",
+    "license_id": "cc-by-4.0",
+    "creators": [
+      {
+        "name": "Goudenhoofdt, Edouard",
+        "affiliation": "Royal Meteorological Institute of Belgium"
+      },
+      {
+        "name": "Journée, Michel",
+        "affiliation": "Royal Meteorological Institute of Belgium"
+      },
+      {
+        "name": "Delobbe, Laurent",
+        "affiliation": "Royal Meteorological Institute of Belgium"
+      }
+    ]
+  },
+  "artifacts": [
+    {
+      "name": "radflood21.zip",
+      "role": "validation_corpus_archive",
+      "size_bytes": 2642551002,
+      "checksum_algorithm": "md5",
+      "checksum_hex": "2cb3660a9a2b81fcc3fb98d103984e12"
+    },
+    {
+      "name": "radflood21.mp4",
+      "role": "visualisation_only",
+      "size_bytes": 45375862,
+      "checksum_algorithm": "md5",
+      "checksum_hex": "ab87ef2df8bf0008a39dd6b791168ea2"
+    }
+  ],
+  "product": {
+    "authority": "Royal Meteorological Institute of Belgium",
+    "product_name": "RADFLOOD21",
+    "semantic_class": "radar_gauge_merged_quantitative_precipitation_estimate",
+    "native_projection_name": "Belgian Lambert 2008",
+    "spatial_resolution_metres": 1000,
+    "pixel_support": "average_precipitation_over_1_km_square",
+    "declared_wgs84_bounds": {
+      "west": -0.3,
+      "south": 47.4,
+      "east": 9.7,
+      "north": 53.7
+    },
+    "published_product_start": "2021-07-11T00:00:00Z",
+    "published_product_end": "2021-07-18T00:00:00Z",
+    "paper_core_analysis_start": "2021-07-13T06:00:00Z",
+    "paper_core_analysis_end": "2021-07-16T06:00:00Z",
+    "time_reference": "UTC",
+    "timestamp_role": "end_of_accumulation_period",
+    "accumulation_products": [
+      {
+        "duration_seconds": 300,
+        "cadence_seconds": 300
+      },
+      {
+        "duration_seconds": 3600,
+        "cadence_seconds": 3600
+      }
+    ],
+    "zenodo_archive_declared_format": "HDF5",
+    "guide_formats": [
+      {
+        "format": "GeoTIFF",
+        "storage_type": "int16",
+        "scale_divisor": 100,
+        "physical_increment_mm": 0.01
+      },
+      {
+        "format": "HDF5",
+        "storage_type": "float32",
+        "information_model": "ODIM"
+      }
+    ],
+    "user_guide_version": 2
+  },
+  "decoder_gate": {
+    "decoder_eligible": false,
+    "live_provider_eligible": false,
+    "operational_admission_eligible": false,
+    "weather_state": "unknown_until_offline_artifact_validation_and_certified_decode",
+    "open_gates": [
+      "zip_internal_member_inventory_not_pinned",
+      "hdf5_dataset_paths_not_pinned",
+      "odim_product_and_quantity_tokens_not_pinned",
+      "hdf5_gain_offset_nodata_undetect_not_pinned",
+      "pixel_qc_fields_and_codes_not_pinned",
+      "exact_grid_dimensions_origin_and_projdef_not_pinned",
+      "archive_member_filename_timestamp_contract_not_pinned",
+      "published_window_endpoint_inclusivity_not_pinned",
+      "official_small_golden_hdf5_not_available"
+    ]
+  },
+  "primary_sources": {
+    "zenodo_record": "https://zenodo.org/records/7740059",
+    "zenodo_api_record": "https://zenodo.org/api/records/7740059",
+    "kmi_case_page": "https://opendata.meteo.be/cases/202107.php",
+    "kmi_user_guide": "https://opendata.meteo.be/cases/202107/radflood21_userguide.pdf",
+    "hess_article": "https://hess.copernicus.org/articles/27/3169/2023/",
+    "hess_doi": "10.5194/hess-27-3169-2023"
+  },
+  "audit_date": "2026-08-02"
+}

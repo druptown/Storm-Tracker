@@ -26,7 +26,14 @@ from .thin_satellite_adapters import (
     NoaaErrAdapter,
 )
 from .thin_ground_station_runtime import GroundStationRuntime
-from .thin_postgis import ThinPostGISSettings, ThinPostGISWriter
+from .thin_postgis import (
+    PASSAGE_ALGORITHM_VERSION,
+    PASSAGE_POLICY_VERSION,
+    ThinPostGISSettings,
+    ThinPostGISWriter,
+    _forecast_issue_id,
+    _passage_id,
+)
 from .thin_provider_adapters import (
     AemetRadarAdapter,
     AioHttpFetcher,
@@ -60,6 +67,130 @@ from .tracking_core.operational_snapshot import encode_control_envelope
 _LOGGER = logging.getLogger(__name__)
 
 
+def _passage_bracket(lower_at: Any, upper_at: Any) -> dict[str, float] | None:
+    if lower_at is None or upper_at is None:
+        return None
+    return {"lower_at": float(lower_at), "upper_at": float(upper_at)}
+
+
+def _build_passages_contract(nowcast: Any) -> dict[str, Any]:
+    """Build the bounded, lossless passage result contract."""
+
+    passages = tuple(nowcast.target_passages[:256])
+    fingerprints_by_target: dict[str, tuple[str, ...]] = {}
+    for target_id in {str(item.target_id) for item in passages}:
+        fingerprints_by_target[target_id] = tuple(sorted({
+            str(item.field_fingerprint)
+            for item in passages
+            if str(item.target_id) == target_id
+            and item.field_fingerprint is not None
+        }))
+    items: list[dict[str, Any]] = []
+    for passage in passages:
+        target_id = str(passage.target_id)
+        calculated_issue_id = _forecast_issue_id(
+            target_id=target_id,
+            issued_at=float(nowcast.evaluated_at),
+            algorithm_version=PASSAGE_ALGORITHM_VERSION,
+            policy_version=PASSAGE_POLICY_VERSION,
+            region_revision_id=None,
+            input_fingerprints=fingerprints_by_target[target_id],
+        )
+        issue_id = getattr(passage, "forecast_issue_id", None) or calculated_issue_id
+        system_id = str(passage.passage_system_id or passage.cell_id)
+        entry_bracket = _passage_bracket(
+            passage.entry_bracket_lower_at,
+            passage.entry_bracket_upper_at,
+        )
+        exit_bracket = _passage_bracket(
+            passage.exit_bracket_lower_at,
+            passage.exit_bracket_upper_at,
+        )
+        scenario_outcome = (
+            "horizon_censored" if passage.right_censored
+            else "coverage_censored" if passage.coverage_censored
+            else "hit"
+        )
+        items.append({
+            "forecast_issue_id": issue_id,
+            "passage_id": getattr(passage, "passage_id", None) or _passage_id(
+                issue_id, system_id, passage.interval_ordinal,
+            ),
+            "target_id": target_id,
+            "passage_system_id": system_id,
+            "cell_id": str(passage.cell_id),
+            "provider_id": str(passage.provider_id),
+            "interval_ordinal": int(passage.interval_ordinal),
+            "status": str(passage.passage_status),
+            "entry_at": passage.entry_at,
+            "exit_at": passage.exit_at,
+            "entry_bracket": entry_bracket,
+            "exit_bracket": exit_bracket,
+            "left_censored": bool(passage.left_censored),
+            "right_censored": bool(passage.right_censored),
+            "coverage_censored": bool(passage.coverage_censored),
+            "method": str(passage.method),
+            "predicted_mean_intensity_mm_h": (
+                passage.predicted_intensity_mm_h
+            ),
+            "predicted_peak_intensity_mm_h": passage.peak_intensity_mm_h,
+            "quantity": passage.quantity,
+            "unit": passage.unit,
+            "policy_label": "provisional_unvalidated",
+            "validation_label": "unvalidated",
+            "scenario_outcomes": [{
+                "scenario_id": "admitted_motion",
+                "outcome": scenario_outcome,
+                "entry_bracket": entry_bracket,
+                "exit_bracket": exit_bracket,
+            }],
+            "provenance": {
+                "algorithm_version": PASSAGE_ALGORITHM_VERSION,
+                "policy_version": PASSAGE_POLICY_VERSION,
+                "field_fingerprint": passage.field_fingerprint,
+            },
+        })
+    return {
+        "schema_version": 2,
+        "evaluated_at": float(nowcast.evaluated_at),
+        "items": items,
+        "overflow_count": max(0, len(nowcast.target_passages) - 256),
+    }
+
+WORKER_TECHNICAL_SOURCE_CONTRACT = (
+    "stv3-worker-technical-diagnostics-source-v1"
+)
+WORKER_TECHNICAL_SOURCE_FIELDS = frozenset({
+    "build_sha256",
+    "cache_age_seconds",
+    "cache_status",
+    "capacity_alarm",
+    "config_sha256",
+    "contract",
+    "current_version",
+    "desired_state_sha256",
+    "failed_jobs",
+    "frame_age_seconds",
+    "frame_status",
+    "headroom_bytes",
+    "headroom_percent",
+    "next_version",
+    "provider_age_seconds",
+    "provider_status",
+    "queue_depth",
+    "replay_algorithm_version",
+    "replay_contract_version",
+    "retention_alarm",
+    "storage_reason_codes",
+    "terminal_jobs",
+    "transition_reason_codes",
+    "transition_status",
+    "worker_observed_at",
+    "worker_state",
+    "worker_version",
+})
+
+
 class ThinMqttService:
     def __init__(
         self,
@@ -85,6 +216,7 @@ class ThinMqttService:
         self._heartbeat_thread: threading.Thread | None = None
         self._job_results: dict[str, dict[str, Any]] = {}
         self._last_snapshot_revision = 0
+        self._last_snapshot_published_at: float | None = None
         self._last_error: str | None = None
         self._last_cycle_summary: tuple[Any, ...] | None = None
         self._last_geojson_feature_count: int | None = None
@@ -96,8 +228,66 @@ class ThinMqttService:
         self._postgis_projection_projected = 0
         self._postgis_projection_last_success_at: float | None = None
         self._postgis_projection_last_error_code: str | None = None
+        self._provider_status_snapshot: dict[str, Any] | None = None
+
+    def _technical_diagnostics_source(
+        self,
+        *,
+        state: str,
+        observed_at: float,
+    ) -> dict[str, Any]:
+        snapshot_age = (
+            None
+            if self._last_snapshot_published_at is None
+            else max(0.0, observed_at - self._last_snapshot_published_at)
+        )
+        snapshot_status = (
+            "unknown"
+            if snapshot_age is None
+            else "current" if snapshot_age <= 300.0 else "stale"
+        )
+        desired_state = self.runtime.desired_state_snapshot()
+        desired_state_sha256 = (
+            desired_state.get("state_sha256")
+            if isinstance(desired_state, dict)
+            and desired_state.get("status") == "configured"
+            else None
+        )
+        source = {
+            "contract": WORKER_TECHNICAL_SOURCE_CONTRACT,
+            "worker_state": state,
+            "worker_observed_at": observed_at,
+            "worker_version": WORKER_VERSION,
+            "build_sha256": None,
+            "config_sha256": None,
+            "desired_state_sha256": desired_state_sha256,
+            "provider_age_seconds": snapshot_age,
+            "provider_status": snapshot_status,
+            "frame_age_seconds": snapshot_age,
+            "frame_status": snapshot_status,
+            "cache_age_seconds": snapshot_age,
+            "cache_status": snapshot_status,
+            "queue_depth": 0,
+            "terminal_jobs": min(1_000_000_000, len(self._job_results)),
+            "failed_jobs": 0 if self._last_error is None else 1,
+            "retention_alarm": None,
+            "capacity_alarm": None,
+            "headroom_bytes": None,
+            "headroom_percent": None,
+            "storage_reason_codes": None,
+            "transition_status": "stable",
+            "current_version": WORKER_VERSION,
+            "next_version": None,
+            "transition_reason_codes": [],
+            "replay_contract_version": None,
+            "replay_algorithm_version": None,
+        }
+        if set(source) != WORKER_TECHNICAL_SOURCE_FIELDS:
+            raise RuntimeError("thin worker technical source schema drift")
+        return source
 
     def _heartbeat(self, state: str = "online") -> bytes:
+        observed_at = time.time()
         snapshot_runtime: dict[str, Any] = {
             "snapshot_revision": self._last_snapshot_revision,
             "snapshot_transport_state": (
@@ -119,6 +309,10 @@ class ThinMqttService:
                 "last_success_at": self._postgis_projection_last_success_at,
                 "last_error_code": self._postgis_projection_last_error_code,
             }
+        if self._provider_status_snapshot is not None:
+            snapshot_runtime["provider_status_snapshot"] = (
+                self._provider_status_snapshot
+            )
         return encode(envelope(
             "worker_status",
             state=state,
@@ -133,6 +327,10 @@ class ThinMqttService:
             cpu_threads=2,
             provider_cycle_seconds=self.cycle_seconds,
             operational_snapshot_runtime=snapshot_runtime,
+            technical_diagnostics=self._technical_diagnostics_source(
+                state=state,
+                observed_at=observed_at,
+            ),
         ))
 
     def _publish_heartbeat(self) -> None:
@@ -264,6 +462,14 @@ class ThinMqttService:
                     else None
                 )
                 provider_items = result.snapshot.get("providers", {}).get("items", [])
+                self._provider_status_snapshot = {
+                    "desired_state_sha256": result.snapshot[
+                        "desired_state_sha256"
+                    ],
+                    "evaluated_at": result.snapshot["evaluated_at"],
+                    "valid_until": result.snapshot["valid_until"],
+                    "items": [dict(item) for item in provider_items],
+                }
                 provider_summary = tuple(
                     sorted(
                         (
@@ -296,24 +502,13 @@ class ThinMqttService:
                     qos=1,
                     retain=True,
                 )
-                passages_payload = json.dumps({
-                    "schema_version": 1,
-                    "evaluated_at": result.nowcast.evaluated_at,
-                    "items": [{
-                        "target_id": item.target_id,
-                        "cell_id": item.cell_id,
-                        "provider_id": item.provider_id,
-                        "entry_at": item.entry_at,
-                        "exit_at": item.exit_at,
-                        "method": item.method,
-                        "predicted_intensity_mm_h": item.predicted_intensity_mm_h,
-                        "fallback_reason": item.fallback_reason,
-                        "horizon_clipped": item.horizon_clipped,
-                    } for item in result.nowcast.target_passages[:256]],
-                    "overflow_count": max(
-                        0, len(result.nowcast.target_passages) - 256,
-                    ),
-                }, allow_nan=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+                self._last_snapshot_published_at = time.time()
+                passages_payload = json.dumps(
+                    _build_passages_contract(result.nowcast),
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
                 self.client.publish(
                     topic(self.topic_root, "operational/passages"),
                     passages_payload,
@@ -379,11 +574,32 @@ class ThinMqttService:
             return
         payload = bytes(message.payload)
         incoming_topic = str(message.topic)
-        self._loop.call_soon_threadsafe(
-            lambda: asyncio.create_task(self.handle_message(incoming_topic, payload))
-        )
+        # Paho invokes this callback on its own network thread.  Process the
+        # bounded control envelope there so a CPU-heavy fusion/nowcast section
+        # on the asyncio loop cannot make a desired-state request expire.
+        # Runtime state replacement is atomic and each weather cycle captures
+        # its state once at the start, so the new state applies next cycle.
+        self._handle_message(incoming_topic, payload)
 
     async def handle_message(self, incoming_topic: str, payload: bytes | str) -> None:
+        """Compatibility wrapper for direct async callers and unit tests."""
+
+        self._handle_message(incoming_topic, payload)
+
+    def _wake_cycle(self) -> None:
+        loop = self._loop
+        if loop is None:
+            return
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is loop:
+            self._wake.set()
+        else:
+            loop.call_soon_threadsafe(self._wake.set)
+
+    def _handle_message(self, incoming_topic: str, payload: bytes | str) -> None:
         if incoming_topic != topic(self.topic_root, "jobs/request"):
             return
         request: dict[str, Any] | None = None
@@ -410,7 +626,7 @@ class ThinMqttService:
                 result = self.runtime.apply_desired_state(values["desired_state"])
                 if self.lightning_feed is not None:
                     self.lightning_feed.update_targets(self.runtime.targets)
-                self._wake.set()
+                self._wake_cycle()
             elif job_type == "geojson_operational":
                 result = {"collection": self.runtime.geojson_collection()}
             elif job_type == "ping":
@@ -436,9 +652,10 @@ class ThinMqttService:
                 state="failed",
                 error=type(error).__name__,
             )
-        self._job_results[job_id] = status
-        if len(self._job_results) > 256:
-            self._job_results.pop(next(iter(self._job_results)))
+        if status["state"] == "completed":
+            self._job_results[job_id] = status
+            if len(self._job_results) > 256:
+                self._job_results.pop(next(iter(self._job_results)))
         self._publish_job_status(status)
 
     def _publish_job_status(self, status: dict[str, Any]) -> None:
@@ -525,7 +742,10 @@ def _build_runtime() -> tuple[ThinOperationalRuntime, BlitzortungAdapter]:
     provider_runtime = ThinProviderRuntime(
         adapters=adapters,
         fetcher=fetcher,
-        max_parallel=8,
+        # NAS-HA is dedicated to Storm Tracker.  Start every provider that is
+        # actually due in the same I/O wave; the adapter-level radar decode
+        # semaphore still caps CPU-heavy decoding at two threads.
+        max_parallel=len(adapters),
         timeout_seconds=45.0,
         retries=1,
         request_preparer=station_runtime,

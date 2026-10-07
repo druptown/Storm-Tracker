@@ -12,6 +12,90 @@ from typing import Any, Callable, Iterable, Mapping
 from .thin_footprint_forecast import TargetPassage, forecast_target_passage
 from .thin_ground_validation import ForecastValidation, validate_passages
 from .thin_observation import NormalizedObservation, ObservationKind, ObservationQuality
+from .thin_passage_verification import (
+    PassageForecastEvidence,
+    PassageReferenceEvidence,
+    PassageVerificationReport,
+    RadarForecastIssue,
+    TemporalRadarReference,
+    build_temporal_radar_reference,
+    verify_passages_by_event,
+)
+from .tracking_core.engine.motion_consensus import (
+    MotionVectorCandidate,
+    select_motion_consensus,
+)
+
+
+def run_motion_admission_replay() -> dict[str, Any]:
+    """Exercise known motion failure modes without touching live state."""
+
+    covariance = ((4.0, 0.0), (0.0, 4.0))
+
+    def candidate(method: str, role: str, vx: float, vy: float):
+        return MotionVectorCandidate(
+            method, role, vx, vy, covariance, 16, 0.8, 4, 0.8,
+        )
+
+    translation = select_motion_consensus((
+        candidate("flow-translation", "optical_flow", 6.0, 2.0),
+        candidate("track-translation", "object_track", 5.7, 2.1),
+    ))
+    intensity_only = select_motion_consensus((
+        candidate("flow-intensity", "optical_flow", 0.0, 0.0),
+        candidate("track-intensity", "object_track", 0.0, 0.0),
+    ))
+    rotation_only = select_motion_consensus((
+        candidate("flow-rotation", "optical_flow", 0.0, 0.0),
+        candidate("track-centroid-drift", "object_track", 5.0, 0.0),
+    ))
+    east = select_motion_consensus((
+        candidate("flow-east", "optical_flow", 5.0, 0.0),
+        candidate("track-east", "object_track", 5.1, 0.1),
+    ))
+    north = select_motion_consensus((
+        candidate("flow-north", "optical_flow", 0.0, 4.0),
+        candidate("track-north", "object_track", 0.1, 4.1),
+    ))
+    checks = {
+        "translation_admitted": translation.status == "ready_high",
+        "intensity_only_has_no_heading": (
+            intensity_only.status == "stationary"
+            and intensity_only.heading_deg is None
+        ),
+        "rotation_centroid_drift_withheld": (
+            rotation_only.status == "indeterminate"
+        ),
+        "independent_system_directions": (
+            east.heading_deg is not None
+            and north.heading_deg is not None
+            and abs(east.heading_deg - north.heading_deg) > 45.0
+        ),
+    }
+    return {
+        "mode": "thin_motion_admission_replay_v1",
+        "operational_state_mutated": False,
+        "passed": all(checks.values()),
+        "checks": checks,
+        "scenarios": {
+            "translation": translation.status,
+            "intensity_change_without_translation": intensity_only.status,
+            "rotation_without_bulk_translation": rotation_only.status,
+            "two_independent_systems": {
+                "east": east.status,
+                "north": north.status,
+            },
+        },
+    }
+
+
+def verify_immutable_passage_issues(
+    forecasts: Iterable[PassageForecastEvidence],
+    references: Iterable[PassageReferenceEvidence],
+) -> PassageVerificationReport:
+    """Offline-only event aggregation for immutable passage issues."""
+
+    return verify_passages_by_event(forecasts, references)
 
 
 @dataclass(frozen=True, slots=True)
@@ -719,6 +803,10 @@ __all__ = [
     "ReplayReport",
     "RadarForecastVerification",
     "ReplayRepository",
+    "RadarForecastIssue",
+    "TemporalRadarReference",
+    "build_temporal_radar_reference",
     "run_replay",
+    "verify_immutable_passage_issues",
     "verify_radar_forecasts",
 ]

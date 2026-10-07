@@ -1,0 +1,56 @@
+[
+  {
+    "station_id": "IWILLE87",
+    "latitude": 51.05,
+    "longitude": 4.37,
+    "capabilities": ["rain_rate", "rain_accumulation", "temperature", "relative_humidity", "pressure", "wind_speed", "wind_gust", "wind_direction"]
+  },
+  {
+    "station_id": "IMECHE70",
+    "latitude": 51.05,
+    "longitude": 4.47,
+    "capabilities": ["rain_rate", "rain_accumulation", "temperature", "relative_humidity", "pressure", "wind_speed", "wind_gust", "wind_direction"]
+  },
+  {
+    "station_id": "IMECHE17",
+    "latitude": 51.05,
+    "longitude": 4.42,
+    "capabilities": ["rain_rate", "rain_accumulation", "temperature", "relative_humidity", "pressure", "wind_speed", "wind_gust", "wind_direction"]
+  },
+  {
+    "station_id": "IRUMST20",
+    "latitude": 51.10,
+    "longitude": 4.42,
+    "capabilities": ["rain_rate", "rain_accumulation", "temperature", "relative_humidity", "pressure", "wind_speed", "wind_gust", "wind_direction"]
+  },
+  {
+    "station_id": "IKAPEL108",
+    "latitude": 51.02,
+    "longitude": 4.37,
+    "capabilities": ["rain_rate", "rain_accumulation", "temperature", "relative_humidity", "pressure", "wind_speed", "wind_gust", "wind_direction"]
+  },
+  {
+    "station_id": "IMECHE71",
+    "latitude": 51.01,
+    "longitude": 4.42,
+    "capabilities": ["rain_rate", "rain_accumulation", "temperature", "relative_humidity", "pressure", "wind_speed", "wind_gust", "wind_direction"]
+  },
+  {
+    "station_id": "IMECHE79",
+    "latitude": 51.03,
+    "longitude": 4.46,
+    "capabilities": ["rain_rate", "rain_accumulation", "temperature", "relative_humidity", "pressure", "wind_speed", "wind_gust", "wind_direction"]
+  },
+  {
+    "station_id": "IDUFFE19",
+    "latitude": 51.09,
+    "longitude": 4.52,
+    "capabilities": ["rain_rate", "rain_accumulation", "temperature", "relative_humidity", "pressure", "wind_speed", "wind_gust", "wind_direction"]
+  },
+  {
+    "station_id": "IBOOM10",
+    "latitude": 51.10,
+    "longitude": 4.37,
+    "capabilities": ["rain_rate", "rain_accumulation", "temperature", "relative_humidity", "pressure", "wind_speed", "wind_gust", "wind_direction"]
+  }
+]

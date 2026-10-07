@@ -7,7 +7,11 @@ import math
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
-from .thin_observation import NormalizedObservation, ObservationQuality
+from .thin_observation import (
+    NormalizedObservation,
+    ObservationKind,
+    ObservationQuality,
+)
 from .thin_station_catalog import normalize_capabilities
 
 
@@ -17,6 +21,31 @@ _QUALITY_RANK = {
     ObservationQuality.SUSPECT: 2,
     ObservationQuality.GOOD: 3,
 }
+
+_MEASUREMENT_ALIASES = {
+    "humidity": "relative_humidity",
+    "rain_60min": "rain_accumulation",
+    "rain_total": "rain_accumulation",
+    "rain_accumulation_10min": "rain_accumulation",
+    "rain_rate_10min_equivalent": "rain_rate",
+}
+
+
+def normalize_station_measurement_type(
+    value: object,
+    *,
+    fallback_kind: ObservationKind | None = None,
+) -> str:
+    """Map provider labels to the small canonical station vocabulary."""
+
+    raw = str(value or "").strip().lower()
+    if raw:
+        candidate = _MEASUREMENT_ALIASES.get(raw, raw)
+    elif fallback_kind is not None:
+        candidate = fallback_kind.value
+    else:
+        raise ValueError("station_measurement_type_missing")
+    return normalize_capabilities((candidate,))[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,18 +78,17 @@ class StationMeasurement:
         observation: NormalizedObservation,
     ) -> "StationMeasurement | None":
         station_id = str(observation.metadata.get("station_id", "")).strip()
-        measurement_type = str(
-            observation.metadata.get("measurement", ""),
-        ).strip().lower()
         if (
             not station_id
             or len(station_id) > 191
             or any(ord(character) < 32 for character in station_id)
-            or not measurement_type
         ):
             return None
         try:
-            normalized_type = normalize_capabilities((measurement_type,))[0]
+            normalized_type = normalize_station_measurement_type(
+                observation.metadata.get("measurement"),
+                fallback_kind=observation.kind,
+            )
         except (ValueError, IndexError):
             return None
         if not (
@@ -111,4 +139,5 @@ def deduplicate_station_measurements(
 __all__ = [
     "StationMeasurement",
     "deduplicate_station_measurements",
+    "normalize_station_measurement_type",
 ]
