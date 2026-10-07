@@ -411,6 +411,15 @@ class ThinMqttService:
             task.cancel()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
+        archive = getattr(self.runtime, "raw_archive", None)
+        if archive is not None and (archive.pending() or getattr(self.runtime,"raw_pending_cycles",lambda:0)()):
+            archive.mark_gap("worker_stop_unconfirmed")
+            self.client.publish(
+                topic(self.topic_root,"operational/raw_archive_status"),
+                json.dumps({"schema_version":1,**archive.status()},
+                           allow_nan=False,separators=(",", ":")),
+                qos=1,retain=True,
+            )
         close_runtime = getattr(self.runtime, "close", None)
         if callable(close_runtime):
             close_runtime()
@@ -502,6 +511,15 @@ class ThinMqttService:
                     qos=1,
                     retain=True,
                 )
+                raw_status = getattr(result, "raw_archive_status", None)
+                if raw_status is not None:
+                    self.client.publish(
+                        topic(self.topic_root, "operational/raw_archive_status"),
+                        json.dumps({"schema_version":1,
+                                    "evaluated_at":result.fusion.evaluated_at,
+                                    **raw_status},allow_nan=False,separators=(",", ":")),
+                        qos=1,retain=True,
+                    )
                 self._last_snapshot_published_at = time.time()
                 passages_payload = json.dumps(
                     _build_passages_contract(result.nowcast),
@@ -719,6 +737,9 @@ def _build_runtime() -> tuple[ThinOperationalRuntime, BlitzortungAdapter]:
     adapters = _build_provider_adapters(fetcher)
     blitzortung = adapters["blitzortung"]
     settings = ThinPostGISSettings.from_environment()
+    from .thin_raw_archive import RawArchiveBuffer
+    from .thin_raw_code import source_tree_digest
+    archive = RawArchiveBuffer() if settings is not None else None
     station_runtime = None
     if settings is not None:
         import psycopg
@@ -749,6 +770,8 @@ def _build_runtime() -> tuple[ThinOperationalRuntime, BlitzortungAdapter]:
         timeout_seconds=45.0,
         retries=1,
         request_preparer=station_runtime,
+        archive=archive,
+        code_revision=source_tree_digest(),
     )
     writer = ThinPostGISWriter(settings) if settings is not None else None
     return (
@@ -780,6 +803,8 @@ async def _async_main() -> None:
         lightning_feed=ThinBlitzortungFeed(
             client=lightning_client,
             adapter=blitzortung,
+            archive=runtime.raw_archive,
+            context_factory=runtime.raw_ingress_context,
         ),
         heartbeat_seconds=float(os.getenv("STV3_HEARTBEAT_SECONDS", "10")),
         cycle_seconds=float(os.getenv("STV3_PROVIDER_CYCLE_SECONDS", "60")),

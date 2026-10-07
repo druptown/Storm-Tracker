@@ -127,3 +127,73 @@ def test_unknown_error_json_not_a_weather_capture():
             b'{"error":"login required"}', received_at=15.0,
             content_type="application/json") is None
     assert archive.status()["status"] == "degraded"
+
+
+def test_knmi_signed_download_descriptor_is_not_archived_as_weather():
+    m=api();archive=m.RawArchiveBuffer()
+    with m.capture_scope(context(m,provider='knmi_radar'),archive):
+        m.capture_received('https://api.dataplatform.knmi.nl/open-data/v1/datasets/test/files/file/url',
+            b'{"temporaryDownloadUrl":"https://example.amazonaws.com/file?X-Amz-Signature=PRIVATE"}',received_at=15,
+            content_type='application/json')
+    assert archive.pending() == ()
+    assert 'PRIVATE' not in repr(archive.status())
+
+
+def test_reported_gap_can_be_acknowledged_without_losing_a_newer_gap():
+    m=api();archive=m.RawArchiveBuffer()
+    archive.mark_gap('first_gap')
+    sequence=archive.status()['gap_sequence']
+    archive.mark_gap('newer_gap')
+    archive.ack_gaps(sequence)
+    assert archive.status()['reason_codes'] == ('newer_gap',)
+    archive.ack_gaps(archive.status()['gap_sequence'])
+    assert archive.status()['status']=='current'
+    assert archive.status()['dropped_count']==2
+
+
+def test_knmi_signed_hdf_bytes_keep_safe_address_without_signature():
+    m=api();archive=m.RawArchiveBuffer()
+    with m.capture_scope(context(m,provider='knmi_radar'),archive):
+        m.capture_received('https://knmi-radar.storage.googleapis.com/radar/RAD_NL25_RAC_MFBS_5min_202610072210.h5?X-Goog-Signature=PRIVATE',
+                          b'\x89HDF\r\n\x1a\nweather',received_at=15)
+    assert len(archive.pending())==1
+    assert 'PRIVATE' not in str(archive.pending()[0].safe_source)
+
+
+def test_bounded_reason_set_preserves_overflow_after_earlier_ack():
+    m=api();archive=m.RawArchiveBuffer()
+    for index in range(64): archive.mark_gap(f'gap_{index}')
+    before=archive.status()['gap_sequence']
+    archive.mark_gap('extra_gap')
+    archive.ack_gaps(before)
+    assert archive.status()['status']=='degraded'
+
+
+def test_authenticated_weather_query_is_stripped_not_weather_discarded():
+    m=api();archive=m.RawArchiveBuffer()
+    with m.capture_scope(context(m),archive):
+        identifier=m.capture_received('https://api.netatmo.com/api/getpublicdata?access_token=PRIVATE',
+                                      b'{"body":[]}',received_at=15)
+    assert identifier
+    assert 'PRIVATE' not in str(archive.pending()[0].safe_source)
+    assert 'access_token' not in str(archive.pending()[0].safe_source)
+
+
+@pytest.mark.parametrize('host',['app.meteo.be','cdn.meteo.be'])
+def test_kmi_actual_image_host_captured_only_as_image(host):
+    m=api();archive=m.RawArchiveBuffer()
+    with m.capture_scope(context(m,provider='kmi_appv4'),archive):
+        identifier=m.capture_received(f'https://{host}/frame.png',b'\x89PNG\r\n\x1a\nweather',received_at=15,content_type='image/png')
+        rejected=m.capture_received(f'https://{host}/login',b'{"login":"unknown"}',received_at=15,content_type='application/json')
+    assert identifier
+    assert rejected is None
+
+
+@pytest.mark.parametrize('provider,host,path',[
+    (provider,host,path) for provider,routes in api()._ROUTES.items()
+    for host,path in routes
+])
+def test_declared_async_weather_route_never_admits_another_host(provider,host,path):
+    m=api()
+    assert m.safe_source_context(provider,f'https://{host}{path}')['allowed']
+    assert not m.safe_source_context(provider,f'https://unknown.invalid{path}')['allowed']

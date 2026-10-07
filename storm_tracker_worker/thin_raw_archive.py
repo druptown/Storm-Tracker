@@ -13,7 +13,7 @@ import re
 from threading import RLock
 from types import MappingProxyType
 from typing import Any, Mapping
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 
@@ -52,7 +52,7 @@ _ROUTES = {
     "metar": (("aviationweather.gov", "/api/data/metar"),),
     "meteolux": (("metapi.ana.lu", "/api/v1/hvd/"),),
     "kmi_aws": (("opendata.meteo.be", "/geoserver/"),),
-    "kmi_appv4": (("app.meteo.be", "/services/appv4/"),),
+    "kmi_appv4": (("app.meteo.be", "/"), ("cdn.meteo.be", "/")),
     "kmi_radqpe": (("opendata.meteo.be", "/"),),
     "opera_radar": (("s3.waw3-1.cloudferro.com", "/openradar-24h/"),),
     "knmi_radar": (("api.dataplatform.knmi.nl", "/open-data/v1/"),),
@@ -70,11 +70,13 @@ _ROUTES = {
     "rainviewer": (("api.rainviewer.com", "/public/"),
                    ("tilecache.rainviewer.com", "/")),
     "eumetsat_li": (("api.eumetsat.int", "/data/"),),
+    "noaa_err": (("noaa-enterprise-rainrate-pds.s3.amazonaws.com", "/"),),
 }
 _ALIASES = {"ground.netatmo.region": "netatmo"}
 _SECRET_KEYS = re.compile(r'(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|password|authorization|cookie)', re.I)
-_AUTH_BODY = re.compile(rb'["\'](?:access_token|refresh_token|id_token|client_secret|password|authorization|cookie)["\']\s*:', re.I)
+_AUTH_BODY = re.compile(rb'["\'](?:access_token|refresh_token|id_token|client_secret|password|authorization|cookie|temporaryDownloadUrl)["\']\s*:', re.I)
 _SCOPE: ContextVar[tuple[RawCaptureContext, "RawArchiveBuffer"] | None] = ContextVar("thin_raw_capture", default=None)
+_REFERENCES: ContextVar[set[str] | None] = ContextVar("thin_raw_references",default=None)
 
 
 def safe_source_context(provider_id: str, source: str,
@@ -86,15 +88,27 @@ def safe_source_context(provider_id: str, source: str,
             return {"allowed": False, "reason_code": "credentials_excluded"}
         if _SECRET_KEYS.search(parsed.path) or parsed.path.rstrip("/").endswith("/token"):
             return {"allowed": False, "reason_code": "auth_excluded"}
-        if any(_SECRET_KEYS.search(key) for key, _ in parse_qsl(parsed.query)):
-            return {"allowed": False, "reason_code": "credentials_excluded"}
+        # Authenticated weather requests are legitimate inputs. Strip ALL
+        # query values, not the weather body; auth endpoints remain excluded.
         provider = _ALIASES.get(provider_id, provider_id)
+        if provider == 'knmi_radar' and parsed.path.endswith('/url'):
+            return {"allowed":False,"reason_code":"auth_excluded"}
         host = parsed.hostname or ""
         routes = _ROUTES.get(provider, ())
         allowed = parsed.scheme == "https" and any(host == h and parsed.path.startswith(p) for h, p in routes)
+        if provider == 'knmi_radar' and parsed.scheme == 'https' and parsed.path.endswith('.h5'):
+            # Same object-host families already validated by KnmiRadarAdapter.
+            # A download signature is NEVER included in safe_source.
+            allowed = any(host.endswith(suffix) for suffix in (
+                '.knmi.nl','.amazonaws.com','.googleapis.com',
+                '.googleusercontent.com','.cloudfront.net','.blob.core.windows.net'))
         if provider.startswith("goes") and provider.endswith(("_rrqpe", "_glm")):
             satellite = provider[4:6]
             allowed = parsed.scheme == "https" and host == f"noaa-goes{satellite}.s3.amazonaws.com"
+        if provider == "hsaf_h40b":
+            allowed = parsed.scheme == "ftp" and host == "ftphsaf.meteoam.it" and parsed.path.startswith("/h40B/h40_cur_mon_data/")
+        if provider == "blitzortung":
+            allowed = parsed.scheme == "mqtt" and host == "blitzortung.ha.sed.pl" and bool(re.fullmatch(r'/blitzortung/1\.1/[0-9bcdefghjkmnpqrstuvwxyz]/[0-9bcdefghjkmnpqrstuvwxyz]/[0-9bcdefghjkmnpqrstuvwxyz]/[a-z0-9_-]+',parsed.path))
         if not allowed:
             return {"allowed": False, "reason_code": "source_policy_missing"}
         return {"allowed": True, "scheme": parsed.scheme, "host": host, "path": parsed.path}
@@ -117,6 +131,8 @@ def weather_payload_allowed(provider_id: str, safe_source: Mapping[str, Any],
         return head.startswith(b"{") and bool(re.search(rb'"body"\s*:', payload[:4096]))
     if provider_id == "metar":
         return head.startswith(b"[")
+    if provider_id == "kmi_appv4" and not safe_source.get('path','').startswith('/services/appv4/'):
+        return payload.startswith(b'\x89PNG\r\n\x1a\n')
     return bool(payload)
 
 
@@ -132,15 +148,27 @@ class RawArchiveBuffer:
         self._bytes = 0
         self._dropped = 0
         self._excluded = 0
-        self._reasons: set[str] = set()
+        self._reasons: dict[str, int] = {}
+        self._gap_sequence = 0
 
     def mark_gap(self, reason_code: str, context: RawCaptureContext | None = None) -> None:
         with self._lock:
             self._dropped += 1
+            self._gap_sequence += 1
             # Caller codes only, never an exception/URL/body. Bound metadata too.
             code = reason_code if re.fullmatch(r"[a-z0-9_]{1,80}", reason_code) else "capture_failed"
-            if len(self._reasons) < 64:
-                self._reasons.add(code)
+            if code in self._reasons or len(self._reasons) < 64:
+                self._reasons[code] = self._gap_sequence
+            else:
+                # Replace one older detail with a bounded overflow sentinel.
+                # Acknowledging older gaps must not erase this newer loss.
+                self._reasons.pop(next(iter(self._reasons)))
+                self._reasons['archive_reason_overflow'] = self._gap_sequence
+
+    def ack_gaps(self, through_sequence: int) -> None:
+        with self._lock:
+            self._reasons = {code:sequence for code,sequence in self._reasons.items()
+                             if sequence > through_sequence}
 
     def exclude(self) -> None:
         with self._lock:
@@ -183,16 +211,48 @@ class RawArchiveBuffer:
             return {"status": "degraded" if self._reasons else "current",
                     "queued_bytes": self._bytes, "queued_receipts": len(self._pending),
                     "dropped_count": self._dropped, "excluded_count": self._excluded,
+                    "gap_sequence": self._gap_sequence,
                     "reason_codes": tuple(sorted(self._reasons))}
 
 
 @contextmanager
 def capture_scope(context: RawCaptureContext, archive: RawArchiveBuffer):
+    parent = _SCOPE.get()
+    refs = (_REFERENCES.get() if parent is not None and parent[0].request_id == context.request_id
+            else set())
     token = _SCOPE.set((context, archive))
+    ref_token = _REFERENCES.set(refs)
     try:
         yield
     finally:
+        _REFERENCES.reset(ref_token)
         _SCOPE.reset(token)
+
+
+def reference_captures(capture_ids) -> None:
+    scope, refs = _SCOPE.get(), _REFERENCES.get()
+    if scope is None or refs is None:
+        return
+    _, archive = scope
+    with archive._lock:
+        if not capture_ids:
+            archive.mark_gap('cache_origin_missing')
+            return
+        for identifier in capture_ids:
+            if not isinstance(identifier,str) or not re.fullmatch(r'[0-9a-f-]{36}',identifier):
+                archive.mark_gap('capture_reference_invalid')
+            elif len(refs) < archive.maximum_receipts:
+                refs.add(identifier)
+            else:
+                archive.mark_gap('capture_reference_overflow')
+
+
+def current_capture_references() -> tuple[str, ...]:
+    scope, refs = _SCOPE.get(), _REFERENCES.get()
+    if scope is None or refs is None:
+        return ()
+    with scope[1]._lock:
+        return tuple(sorted(refs))
 
 
 def capture_received(source: str, payload: bytes, *, received_at: float,
@@ -218,4 +278,18 @@ def capture_received(source: str, payload: bytes, *, received_at: float,
     identifier = str(uuid4())
     receipt = RawCapture(identifier, context, transport, MappingProxyType(safe), received_at, None,
                          http_status, payload, content_type, "received", None)
-    return identifier if archive.enqueue(receipt) else None
+    if archive.enqueue(receipt):
+        reference_captures((identifier,))
+        return identifier
+    return None
+
+
+def capture_transport_gap(source: str, reason_code: str) -> None:
+    scope = _SCOPE.get()
+    if scope is None:
+        return
+    context, archive = scope
+    safe = safe_source_context(context.provider_id, source)
+    if safe.get('reason_code') in {'auth_excluded','credentials_excluded'}:
+        return
+    archive.mark_gap(reason_code,context)

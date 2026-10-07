@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, asdict
+import asyncio
 import json
 import logging
 import math
 import time
+from uuid import uuid4
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
@@ -37,6 +39,8 @@ from .thin_postgis import (
 from .thin_provider_catalog import PROVIDERS, build_due_requests
 from .thin_provider_adapters import rainviewer_nominal_coverage_for_target
 from .thin_region_planner import ThinRegionPlan, ThinRegionPlanner
+from .thin_postgis_raw_archive import RawArchiveBatch
+from .thin_raw_field_codec import snapshot_field_job
 from .tracking_core.operational_snapshot import MAX_UI_STORM_SUMMARIES, validate_snapshot
 
 
@@ -530,6 +534,7 @@ class ThinCycleResult:
     postgis: PostGISWriteResult
     validations: tuple[ForecastValidation, ...] = ()
     regional_radar: tuple[RegionalFusionSummary, ...] = ()
+    raw_archive_status: Mapping[str, Any] | None = None
 
 
 def _collection(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -570,6 +575,7 @@ class ThinOperationalRuntime:
         self._postgis = postgis_writer
         self._clock = clock
         self._state: DesiredState | None = None
+        self._raw_region_plan = None
         self._authority: tuple[str, int, str, float] | None = None
         self._receipt_count = 0
         self._first_received_at: float | None = None
@@ -614,6 +620,30 @@ class ThinOperationalRuntime:
     @property
     def targets(self) -> tuple[Any, ...]:
         return () if self._state is None else self._state.targets
+
+    @property
+    def raw_archive(self):
+        return getattr(self._providers, "archive", None)
+
+    def raw_pending_cycles(self):
+        if self._postgis is None:
+            return 0
+        return int(getattr(self._postgis,"diagnostics",lambda:{})().get("queued_cycles",0))
+
+    def raw_ingress_context(self):
+        from .thin_raw_archive import RawCaptureContext
+        state, plan = self._state, self._raw_region_plan
+        if state is None or plan is None:
+            return None
+        actual = {(t.target_id,t.latitude,t.longitude) for t in state.targets if t.available}
+        planned = {(t.target_id,t.latitude,t.longitude) for t in plan.targets}
+        if actual != planned:
+            return None
+        now = float(self._clock())
+        return RawCaptureContext(str(uuid4()),"blitzortung","event",now,0,
+                                 tuple(r.region_revision_id for r in plan.regions),
+                                 tuple((t.target_id,t.latitude,t.longitude,t.position_observed_at) for t in plan.targets),
+                                 getattr(self._providers,"code_revision","unregistered"))
 
     def geojson_collection(self) -> dict[str, Any]:
         """Return a detached, bounded map derived from the latest nowcast."""
@@ -791,6 +821,7 @@ class ThinOperationalRuntime:
         # snapshot must all describe the same captured target set.
         now = float(self._clock())
         region_plan = self._region_planner.plan(state, now=now)
+        self._raw_region_plan = region_plan
         active_targets = region_plan.targets
         self._nowcast.update_targets({
             item.target_id: (
@@ -839,6 +870,42 @@ class ThinOperationalRuntime:
             evaluated_at=float(self._clock()),
             target_ids=tuple(item.target_id for item in active_targets),
         )
+        archive = getattr(self._providers, "archive", None)
+        archive_fields = []
+        archive_capture_ids = {}
+        archive_field_bytes = 0
+        if archive is not None:
+            for result in self._latest_provider_results.values():
+                for field in (*result.radar_fields, *result.visual_radar_fields):
+                    archive_capture_ids[id(field)] = result.raw_capture_ids
+
+        async def archive_field(field, region, *, confidence=None,
+                                contributor_mask=None, role="used", source_ids=None):
+            nonlocal archive_field_bytes
+            if archive is None:
+                return
+            arrays = [getattr(field, "rain_rate_mm_h", None),
+                      getattr(field, "valid_mask", None),
+                      getattr(field, "levels", None), confidence, contributor_mask]
+            byte_count = sum(int(value.nbytes) for value in arrays if value is not None)
+            queued_field_bytes = getattr(self._postgis, "queued_archive_field_bytes", lambda: 0)()
+            if archive.status()["queued_bytes"] + queued_field_bytes + archive_field_bytes + byte_count > archive.maximum_bytes:
+                archive.mark_gap("raw_field_budget_exceeded")
+                return
+            try:
+                archive_fields.append(await asyncio.to_thread(
+                    snapshot_field_job, field,
+                    region_revision_id=region.region_revision_id,
+                    confidence=confidence, contributor_mask=contributor_mask,
+                    source_capture_ids=(archive_capture_ids.get(id(field), ())
+                                        if source_ids is None else source_ids),
+                    role=role,
+                ))
+                archive_field_bytes += byte_count
+            except Exception:
+                # Archive degradation must not fabricate/erase weather output.
+                archive.mark_gap("field_snapshot_failed")
+
         tracked_cells: list[StormCell] = []
         self._regional_radar.submit(
             region_plan,
@@ -953,6 +1020,16 @@ class ThinOperationalRuntime:
         for region in region_plan.regions:
             regional = completed_regional.get(region.region_id)
             if regional is not None and regional.field is not None:
+                source_ids = tuple(sorted({receipt_id
+                    for _, receipt_ids in regional.archive_inputs
+                    for receipt_id in receipt_ids}))
+                for input_field, receipt_ids in regional.archive_inputs:
+                    await archive_field(input_field, region, role="native_input",
+                                        source_ids=receipt_ids)
+                await archive_field(regional.field, region,
+                                    confidence=regional.confidence,
+                                    contributor_mask=regional.contributor_mask,
+                                    source_ids=source_ids)
                 track_field(regional.field, region)
                 regional_summaries.append(regional.summary)
                 continue
@@ -980,6 +1057,7 @@ class ThinOperationalRuntime:
                 region,
             )
             if selected_native is not None:
+                await archive_field(selected_native, region)
                 track_field(selected_native, region)
                 native_fallback_fields[region.region_id] = (selected_native,)
             else:
@@ -1070,6 +1148,21 @@ class ThinOperationalRuntime:
             fusion.observations,
             evaluated_at=float(self._clock()),
         )
+        # Keep native display-class input separately. It must never enter
+        # quantitative tracking or masquerade as a mm/h field.
+        if archive is not None:
+            for region in region_plan.regions:
+                for result in self._latest_provider_results.values():
+                    for field in result.visual_radar_fields:
+                        maximum_age = PROVIDER_FUSION_AGE_SECONDS.get(field.provider_id, MAX_FUSION_AGE_SECONDS)
+                        spec = _PROVIDER_SPEC_BY_ID.get(field.provider_id)
+                        if not 0 <= fusion.evaluated_at-field.observed_at <= maximum_age:
+                            continue
+                        if spec is not None and not any(spec.applies_to(t) for t in region.targets):
+                            continue
+                        cropped = crop_visual_radar_field(field,region)
+                        if cropped is not None:
+                            await archive_field(cropped,region,role="visual_input",source_ids=result.raw_capture_ids)
         self._latest_geojson = self._build_geojson(
             fusion,
             nowcast,
@@ -1078,6 +1171,37 @@ class ThinOperationalRuntime:
             regional_radar=tuple(regional_summaries),
             regional_radar_fields=completed_regional,
         )
+        archive_batch = None
+        archive_gap_sequence = None
+        if archive is not None:
+            archive_gap_sequence = archive.status()['gap_sequence']
+            bindings = []
+            for target_id in nowcast.target_results:
+                revision_id = region_plan.region_revision_id_for(target_id)
+                if revision_id is not None:
+                    bindings.append((_forecast_issue_id(
+                        target_id=target_id, issued_at=nowcast.evaluated_at,
+                        algorithm_version=PASSAGE_ALGORITHM_VERSION,
+                        policy_version=PASSAGE_POLICY_VERSION,
+                        region_revision_id=revision_id,
+                        input_fingerprints=fingerprints_by_target.get(target_id, ()),
+                    ), revision_id))
+            archive_batch = RawArchiveBatch(
+                str(uuid4()), fusion.evaluated_at,
+                getattr(self._providers, "code_revision", "unregistered"),
+                {"targets": [asdict(target) for target in active_targets],
+                 "settings": asdict(state.settings),
+                 "regions": [{"region_id": r.region_id,
+                              "region_revision_id": r.region_revision_id,
+                              "center": [r.center_latitude, r.center_longitude]}
+                             for r in region_plan.regions],
+                 "algorithm_version": PASSAGE_ALGORITHM_VERSION,
+                 "provider_inputs": {provider_id: list(result.raw_capture_ids)
+                                     for provider_id,result in self._latest_provider_results.items()},
+                 "policy_version": PASSAGE_POLICY_VERSION},
+                archive.pending(), tuple(archive_fields), tuple(bindings),
+                archive.status()["reason_codes"],
+            )
         if self._postgis is None:
             postgis = PostGISWriteResult(
                 status="disabled",
@@ -1087,13 +1211,36 @@ class ThinOperationalRuntime:
                 dropped_cycles=0,
             )
         else:
+            archive_kwargs = ({"archive_batch": archive_batch}
+                              if archive_batch is not None else {})
             postgis = await self._postgis.write_cycle(
                 fusion,
                 nowcast,
                 validations,
                 regional_radar=tuple(regional_summaries),
                 region_plan=region_plan,
+                **archive_kwargs,
             )
+        raw_archive_status = None
+        if archive_batch is not None:
+            if postgis.queued_cycles == 0 and postgis.status in {"current", "degraded"} and postgis.last_error_code in {None, "raw_archive_incomplete"}:
+                archive.ack(tuple(c.capture_id for c in archive_batch.captures))
+                archive.ack_gaps(archive_gap_sequence)
+            raw_archive_status = {**archive.status(),
+                                  "current_cycle_id": archive_batch.cycle_id,
+                                  "retention_policy": "one_calendar_month",
+                                  "code_revision": archive_batch.code_revision,
+                                  "native_captures_written": postgis.written_rows.get("raw_captures",0),
+                                  "radar_fields_written": postgis.written_rows.get("raw_fields",0),
+                                  "complete_cycles_written": postgis.written_rows.get("raw_complete_cycles",0),
+                                  "queued_cycles": postgis.queued_cycles,
+                                  "dropped_cycles": postgis.dropped_cycles,
+                                  "postgis_status": postgis.status,
+                                  "postgis_error_code": postgis.last_error_code}
+            raw_archive_status['reason_codes'] = tuple(sorted(set(
+                raw_archive_status['reason_codes']) | set(archive_batch.gaps)))
+            if postgis.status != "current":
+                raw_archive_status["status"] = "degraded"
         if requests:
             _LOGGER.info(
                 "Bronbatch verwerkt: due=%d totaal=%.1fs postgis=%s",
@@ -1117,6 +1264,7 @@ class ThinOperationalRuntime:
             postgis=postgis,
             validations=validations,
             regional_radar=tuple(regional_summaries),
+            raw_archive_status=raw_archive_status,
         )
 
     def _build_geojson(

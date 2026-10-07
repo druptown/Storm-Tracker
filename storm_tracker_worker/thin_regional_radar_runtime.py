@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 from types import MappingProxyType
@@ -137,7 +137,7 @@ class ThinRegionalRadarFusionCoordinator:
             if completed is not None and completed.fingerprint == fingerprint:
                 continue
             future = self._executor.submit(
-                self._fuse,
+                self._fuse_with_archive_provenance,
                 region,
                 providers,
                 evaluated_at=float(evaluated_at),
@@ -154,6 +154,17 @@ class ThinRegionalRadarFusionCoordinator:
             self._jobs.pop(region_id).future.cancel()
         for region_id in set(self._completed) - active_ids:
             self._completed.pop(region_id, None)
+
+    def _fuse_with_archive_provenance(self, region, providers, *, evaluated_at):
+        result = self._fuse(region, providers, evaluated_at=evaluated_at)
+        if not isinstance(result, FusedRegionalRadarField):
+            return result
+        inputs = tuple((field, provider.raw_capture_ids)
+                       for provider in providers.values()
+                       if isinstance(provider, ProviderResult)
+                       for field in provider.radar_fields)
+        # These are the actual submitted inputs, never a newer provider cache.
+        return replace(result, archive_inputs=inputs)
 
     def poll(self) -> Mapping[str, FusedRegionalRadarField]:
         for region_id, job in tuple(self._jobs.items()):

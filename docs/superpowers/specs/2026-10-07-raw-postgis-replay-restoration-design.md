@@ -1,7 +1,12 @@
 # Herstel ruwe bronopslag en radarreplay in PostGIS
 
-Datum: 7 oktober 2026. Status: herstel gevraagd; schriftelijke uitwerking wacht
-op gebruikersreview. Nog geen productcode gewijzigd of gedeployed.
+Datum: 7 oktober 2026. Status: schriftelijk opslagontwerp door gebruiker
+goedgekeurd na de expliciete ontwerpvraag. Uitvoering daarna goedgekeurd met
+"ga aan de slag". Uitvoeringsplan staat in
+`../plans/2026-10-07-raw-postgis-replay-restoration.md`.
+Capturefundament geïmplementeerd in geïsoleerde worktree; opslagherstel nog
+niet gedeployed. Op 7 oktober heeft de gebruiker de bewaartermijn gewijzigd
+naar maximaal één maand voor alle meteorologische historiek, inclusief RAW.
 
 ## Doel en afbakening
 
@@ -80,7 +85,7 @@ gebruikscontext blijft afzonderlijk bewaard.
 
 Maak alleen additieve versiegebonden tabellen in dezelfde PostGIS-database:
 payloadbytes met digest/deduplicatie, bronontvangsten met metadata, radarvelden
-en cyclus-/issuebindings. Geen wijziging of verwijdering van oude tabellen.
+en cyclus-/issuebindings. Geen verwijdering van oude tabellen of schema's.
 Digest is integriteitscontrole, geen vervanging voor bytes. Bestaande
 genormaliseerde metingen, targethistoriek en immutable forecastissues blijven.
 
@@ -92,16 +97,26 @@ invoer registreer expliciet een replaygat en dropped_count; nooit current/
 complete claimen. Zonder tweede duurzame spool is perfecte verliesloosheid
 tijdens langdurige DB-uitval niet te garanderen. Rapporteer deze beperking.
 
-Geen automatische RAW-verwijdering of impliciete nieuwe retentieperiode.
-Huidige retentionfunctie mag nieuwe archieftabellen niet meenemen. Maak bytes,
+Expliciete gebruikerswijziging op 7 oktober: maximaal één kalendermaand
+meteorologische historiek, zowel bestaande metingen/voorspellingen als nieuwe
+bronbytes, radarvelden en replaybindings. Vervang de bestaande zesmaandsgrens
+via een versiegebonden migratie; wijzig geen reeds toegepaste migratie.
+Verlopen bindings eerst verwijderen, daarna niet meer benodigde veld-/capture-
+records en niet-gerefereerde deduplicatiepayloads. Recent bewaarde cycli mogen
+geen stil ontbrekende input krijgen: noodzakelijke verlopen broninput betekent
+een expliciet replaygat, niet een complete replayclaim. Een begrensde geplande
+controle handhaaft de termijn; geen zelfstandige eenmalige historische cleanup.
+Stationcatalogus, configuratie en deploy-/rollbackartefacten zijn referentie-
+gegevens, geen meteorologische historiek, en vallen buiten deze verwijdering.
+Maak bytes,
 aantal producten, achterstand en gaten zichtbaar via een apart versioned
 archiefrapport op `storm_tracker/v1/operational/raw_archive_status` en veilige
 logsamenvattingen. Bestaande exact-key snapshot-/diagnostiekcontracten niet
 stil uitbreiden. Gecombineerde opslagstatus wordt alleen current als ook de
 ruwe invoer van de betreffende cyclus bevestigd is; alleen de bestaande
 observatie-insert is daarvoor niet voldoende.
-Meet live groei voordat een toekomstige bewaartermijn/capaciteitskeuze wordt
-voorgelegd; geen capaciteit of opslagruimte verzinnen. Bij onvoldoende ruimte
+Meet live groei binnen de afgesproken maand; geen capaciteit of opslagruimte
+verzinnen. Bij onvoldoende ruimte
 duidelijk degraded/gap, geen oude bestanden of databasegegevens opruimen.
 
 ## Replaycontract
@@ -134,7 +149,9 @@ Eerst falende relevante regressies, daarna alleen de opslagaansluiting:
   fetchers en regionale bliksemfeed kunnen niet ongemerkt buiten capture vallen.
 - DB-uitval, bufferoverflow en ontbrekende bronopname worden degraded/gap,
   zonder MQTT/provideruitval te veroorzaken of de pollcadans te veranderen.
-- Additieve migratie behoudt bestaande data en laat oude retentie ongemoeid.
+- Schemamigratie is additief; afzonderlijke retentieaanpassing gebruikt de
+  expliciet gekozen maandgrens. Grenswaarden, deletevolgorde, hergebruikte
+  payloadreferenties en recent complete cyclusbindings worden gericht getest.
 - Cyclus-/forecastbindings wijzen naar de daadwerkelijk gebruikte frames;
   herstelbare invoer moet op ontvangsttijd causaal selecteerbaar zijn.
 

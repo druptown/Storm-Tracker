@@ -16,6 +16,7 @@ from .thin_ground_validation import ForecastValidation
 from .thin_nowcast import ThinNowcast
 from .thin_regional_radar_fusion import RegionalFusionSummary
 from .thin_region_planner import ThinRegionPlan
+from .thin_postgis_raw_archive import RawArchiveBatch, write_archive_batch
 from .thin_station_measurement import (
     StationMeasurement,
     deduplicate_station_measurements,
@@ -720,6 +721,7 @@ class ThinPostGISWriter:
                 tuple[ForecastValidation, ...],
                 tuple[RegionalFusionSummary, ...],
                 ThinRegionPlan | None,
+                RawArchiveBatch | None,
             ]
         ] = deque()
         self._lock = asyncio.Lock()
@@ -734,6 +736,21 @@ class ThinPostGISWriter:
             factory = psycopg.connect
         return factory(**self._settings.connect_kwargs())
 
+    def queued_archive_field_bytes(self):
+        arrays = {}
+        for entry in self._queue:
+            archive = entry[5] if len(entry) > 5 else None
+            if archive is None:
+                continue
+            for job in archive.fields:
+                for value in (getattr(job.field, 'rain_rate_mm_h', None),
+                              getattr(job.field, 'valid_mask', None),
+                              getattr(job.field, 'levels', None),
+                              job.confidence, job.contributor_mask):
+                    if value is not None:
+                        arrays[id(value)] = value.nbytes
+        return sum(arrays.values())
+
     def _write_batch(
         self,
         batch: tuple[
@@ -746,6 +763,8 @@ class ThinPostGISWriter:
             ], ...
         ],
     ) -> dict[str, int]:
+        archives = tuple(row[5] for row in batch if len(row) > 5 and row[5] is not None)
+        batch = tuple(row[:5] for row in batch)
         connection = self._connect()
         counts = {
             "regions": 0,
@@ -1326,6 +1345,10 @@ class ThinPostGISWriter:
                         ))
                         counts["forecast_validations"] += 1
 
+                for archive in archives:
+                    for key, count in write_archive_batch(cursor, archive).items():
+                        counts[key] = counts.get(key, 0) + count
+                counts['raw_expected_cycles'] = len(archives)
                 cursor.execute(_ENFORCE_RETENTION)
             connection.commit()
             return counts
@@ -1343,17 +1366,23 @@ class ThinPostGISWriter:
         *,
         regional_radar: tuple[RegionalFusionSummary, ...] = (),
         region_plan: ThinRegionPlan | None = None,
+        archive_batch: RawArchiveBatch | None = None,
     ) -> PostGISWriteResult:
         async with self._lock:
             if len(self._queue) >= MAX_RETRY_CYCLES:
                 self._queue.popleft()
                 self._dropped_cycles += 1
+                if archive_batch is not None:
+                    from dataclasses import replace
+                    archive_batch = replace(archive_batch,gaps=tuple(sorted(set(
+                        archive_batch.gaps) | {'archive_retry_cycle_dropped'})))
             self._queue.append((
                 cycle,
                 nowcast,
                 tuple(validations),
                 tuple(regional_radar),
                 region_plan,
+                archive_batch,
             ))
             batch = tuple(self._queue)
             try:
@@ -1368,11 +1397,12 @@ class ThinPostGISWriter:
                     dropped_cycles=self._dropped_cycles,
                 )
             self._queue.clear()
-            self._last_error_code = None
+            incomplete = counts.get('raw_complete_cycles', 0) < counts.get('raw_expected_cycles', 0)
+            self._last_error_code = 'raw_archive_incomplete' if incomplete else None
             self._last_written_rows = counts
             return PostGISWriteResult(
-                status="current",
-                last_error_code=None,
+                status="degraded" if incomplete else "current",
+                last_error_code=self._last_error_code,
                 written_rows=MappingProxyType(dict(counts)),
                 queued_cycles=0,
                 dropped_cycles=self._dropped_cycles,

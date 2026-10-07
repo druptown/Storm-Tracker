@@ -540,18 +540,29 @@ class AioHttpFetcher:
                 timeout=timeout,
             ) as response:
                 if response.status != 200:
+                    from .thin_raw_archive import capture_transport_gap
+                    capture_transport_gap(url,f"http_status_{int(response.status)}")
                     raise HttpStatusError(response.status)
                 declared = response.headers.get("Content-Length")
                 if declared is not None and int(declared) > limit:
+                    from .thin_raw_archive import capture_transport_gap
+                    capture_transport_gap(url,"response_too_large")
                     raise ValueError("response_too_large")
                 chunks: list[bytes] = []
                 size = 0
                 async for chunk in response.content.iter_chunked(64 * 1024):
                     size += len(chunk)
                     if size > limit:
+                        from .thin_raw_archive import capture_transport_gap
+                        capture_transport_gap(url,"response_too_large")
                         raise ValueError("response_too_large")
                     chunks.append(bytes(chunk))
-                return b"".join(chunks)
+                payload = b"".join(chunks)
+                from .thin_raw_archive import capture_received
+                capture_received(str(getattr(response, 'url', url)), payload,
+                    received_at=time.time(), content_type=response.headers.get('Content-Type'),
+                    http_status=response.status)
+                return payload
 
         if self._session is not None:
             return await _read(self._session)
@@ -598,18 +609,29 @@ class AioHttpFetcher:
                 timeout=timeout,
             ) as response:
                 if response.status != 200:
+                    from .thin_raw_archive import capture_transport_gap
+                    capture_transport_gap(url,f"http_status_{int(response.status)}")
                     raise RuntimeError(f"http_status_{response.status}")
                 declared = response.headers.get("Content-Length")
                 if declared is not None and int(declared) > limit:
+                    from .thin_raw_archive import capture_transport_gap
+                    capture_transport_gap(url,"response_too_large")
                     raise ValueError("response_too_large")
                 chunks: list[bytes] = []
                 size = 0
                 async for chunk in response.content.iter_chunked(64 * 1024):
                     size += len(chunk)
                     if size > limit:
+                        from .thin_raw_archive import capture_transport_gap
+                        capture_transport_gap(url,"response_too_large")
                         raise ValueError("response_too_large")
                     chunks.append(bytes(chunk))
-                return b"".join(chunks)
+                payload = b"".join(chunks)
+                from .thin_raw_archive import capture_received
+                capture_received(str(getattr(response, 'url', url)), payload,
+                    received_at=time.time(), content_type=response.headers.get('Content-Type'),
+                    http_status=response.status)
+                return payload
 
         if self._session is not None:
             payload = await _read(self._session)
@@ -3652,14 +3674,14 @@ class WundergroundAdapter:
 
 class BlitzortungAdapter:
     def __init__(self, *, maximum_events: int = 20_000) -> None:
-        self._events: deque[tuple[float, float, float, float]] = deque(maxlen=maximum_events)
+        self._events: deque[tuple[float, float, float, float, str | None]] = deque(maxlen=maximum_events)
         self._transport_connected = False
 
     def set_transport_state(self, connected: bool) -> None:
         """Expose the public MQTT transport state to provider health."""
         self._transport_connected = bool(connected)
 
-    def feed_message(self, raw: bytes, *, received_at: float) -> None:
+    def feed_message(self, raw: bytes, *, received_at: float, raw_capture_id: str | None = None) -> None:
         try:
             payload = json.loads(raw)
             latitude = float(payload["lat"])
@@ -3675,7 +3697,7 @@ class BlitzortungAdapter:
             and -90.0 <= latitude <= 90.0
             and -180.0 <= longitude <= 180.0
         ):
-            self._events.append((observed_at, float(received_at), latitude, longitude))
+            self._events.append((observed_at, float(received_at), latitude, longitude, raw_capture_id))
 
     async def fetch(self, request, fetcher, *, now):
         if not self._transport_connected:
@@ -3683,7 +3705,9 @@ class BlitzortungAdapter:
         while self._events and now - self._events[0][0] > 15 * 60:
             self._events.popleft()
         observations: list[NormalizedObservation] = []
-        for observed_at, received_at, latitude, longitude in tuple(self._events):
+        for observed_at, received_at, latitude, longitude, raw_capture_id in tuple(self._events):
+            from .thin_raw_archive import reference_captures
+            reference_captures((raw_capture_id,) if raw_capture_id is not None else ())
             for target in request.targets:
                 if _haversine_km(latitude, longitude, target.latitude, target.longitude) > target.observation_radius_km:
                     continue
