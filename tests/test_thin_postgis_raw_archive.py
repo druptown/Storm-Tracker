@@ -70,3 +70,23 @@ def test_source_received_after_issue_marks_cycle_incomplete():
     assert counts['raw_complete_cycles']==0
     cycle=next(p for sql,p in cursor.calls if 'INSERT INTO public.stv3_raw_cycle_v1' in sql)
     assert 'field_source_received_after_issue' in cycle[5]
+
+
+def test_forecast_binds_previous_source_field_not_just_current_used_field():
+    m=api(); cursor=Cursor()
+    cursor.fetchall=lambda: [('previous-field-id','previous-fingerprint')]
+    batch=m.RawArchiveBatch('cycle',100,'code',
+        {'forecast_inputs':{'issue':['previous-fingerprint']}},(),(),(('issue','region'),),())
+    m.write_archive_batch(cursor,batch)
+    links=[p for sql,p in cursor.calls if 'INSERT INTO public.stv3_raw_issue_field_v1' in sql]
+    assert links == [('issue','cycle','region','previous-field-id')]
+
+
+def test_missing_forecast_input_is_explicit_incomplete_replay():
+    m=api(); cursor=Cursor(); cursor.fetchall=lambda: []
+    batch=m.RawArchiveBatch('cycle',100,'code',
+        {'forecast_inputs':{'issue':['missing-fingerprint']}},(),(),(('issue','region'),),())
+    counts=m.write_archive_batch(cursor,batch)
+    assert counts['raw_complete_cycles'] == 0
+    cycle=next(p for sql,p in cursor.calls if 'INSERT INTO public.stv3_raw_cycle_v1' in sql)
+    assert 'forecast_input_missing_or_unavailable' in cycle[5]

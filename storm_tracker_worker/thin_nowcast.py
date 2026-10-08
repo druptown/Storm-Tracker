@@ -12,6 +12,10 @@ from .thin_footprint_forecast import TargetPassage, forecast_target_passages
 from .thin_provider_adapters import ThinRadarField
 from .thin_passage_state import PassageEvidence, PassageStateRegistry
 from .thin_observation import NormalizedObservation, ObservationKind
+from .thin_source_radar_forecast import (
+    MAX_SOURCE_COUNT, SourceRadarMotion,
+    rain_intervals, select_primary, trace_target,
+)
 from .tracking_core.engine.cell_track import (
     CellDetection,
     estimate_preliminary_cell_track,
@@ -104,6 +108,7 @@ class TargetNowcast:
     target_accuracy_km: float = 0.0
     passage_system_id: str | None = None
     passage_status: str | None = None
+    radar_field_forecast: Mapping[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -126,6 +131,10 @@ class TargetNowcast:
             "target_accuracy_km": self.target_accuracy_km,
             "passage_system_id": self.passage_system_id,
             "passage_status": self.passage_status,
+            "radar_field_forecast": (
+                None if self.radar_field_forecast is None
+                else dict(self.radar_field_forecast)
+            ),
         }
 
 
@@ -202,6 +211,86 @@ def _is_spatial_weather(observation: NormalizedObservation) -> bool:
     )
 
 
+def _field_target_forecast(target_id, latitude, longitude, issued_at, region_id,
+                           motions, *, previous_provider, core_passages):
+    """Bounded target series; core windows are details, never the zone extent."""
+    candidates = []
+    for motion in tuple(motions)[:MAX_SOURCE_COUNT]:
+        samples = trace_target(motion, latitude, longitude, issued_at)
+        candidates.append({**motion.provenance(), "samples": samples,
+            "previous_product_at": None if motion.delta_seconds is None else
+                motion.field.observed_at-motion.delta_seconds,
+            "availability_basis": "regional_submission"})
+    selected = select_primary(candidates, previous_provider)
+    samples = selected["samples"]
+    intervals = rain_intervals(samples)
+    known = sum(s["rate_mm_h"] is not None for s in samples)
+    summary = {key: selected[key] for key in (
+        "primary_provider", "source_conflict", "selection_reason", "policy_version")}
+    summary.update(issued_at=issued_at, region_id=region_id,
+        support_state="unknown" if not known else "complete" if known == 121 else "partial",
+        known_sample_count=known, total_sample_count=121,
+        threshold_mm_h=.1, intervals=intervals,
+        weak_positive_sample_count=sum(s["rate_mm_h"] is not None and
+            0 < s["rate_mm_h"] < .1 for s in samples),
+        candidates=[{**{k:v for k,v in c.items() if k != "samples"},
+            "known_sample_count": sum(s["rate_mm_h"] is not None for s in c["samples"]),
+            "reason_codes": sorted({s["reason"] for s in c["samples"] if s["reason"]}),
+            "intervals": rain_intervals(c["samples"])} for c in candidates],
+        intensity_core_windows=[{"cell_id":p.cell_id, "provider_id":p.provider_id,
+            "entry_at":p.entry_at, "exit_at":p.exit_at,
+            "mean_mm_h":p.predicted_intensity_mm_h, "peak_mm_h":p.peak_intensity_mm_h}
+            for p in core_passages[:64]],
+        intensity_core_overflow_count=max(0, len(core_passages)-64))
+    return summary, _field_passages(summary, target_id, latitude, longitude, issued_at)
+
+
+def _field_passages(summary, target_id, latitude, longitude, issued_at):
+    primary = next((c for c in summary["candidates"]
+        if c["provider_id"] == summary["primary_provider"]), None)
+    passages = []
+    for ordinal, interval in enumerate(summary["intervals"]):
+        if interval["exit_at"] is not None and interval["exit_at"] < issued_at:
+            continue
+        # A left/support-censored start is a supported wet sample, not a
+        # measured onset. Required legacy entry_at is labelled by censoring.
+        entry = interval["entry_at"]
+        entry_bracket = interval["entry_bracket"] or (None, None)
+        exit_bracket = interval["exit_bracket"] or (None, None)
+        system_id = f"field:{summary['region_id']}:{primary['provider_id']}"
+        passages.append(TargetPassage(
+            target_id=target_id, evaluated_at=issued_at, cell_id=system_id,
+            provider_id=primary["provider_id"],
+            entry_at=interval["first_supported_at"] if entry is None else entry,
+            exit_at=interval["exit_at"], method="source_clock_full_field",
+            predicted_intensity_mm_h=interval["mean_mm_h"],
+            footprint=_point(longitude, latitude),
+            fallback_reason=interval["end_status"] if interval["exit_at"] is None else None,
+            horizon_clipped=interval["end_status"] == "horizon_censored",
+            motion_status="supported", motion_confidence="uncalibrated",
+            motion_method="source_clock_local_lk_rk2",
+            entry_bracket_lower_at=entry_bracket[0], entry_bracket_upper_at=entry_bracket[1],
+            exit_bracket_lower_at=exit_bracket[0], exit_bracket_upper_at=exit_bracket[1],
+            left_censored=entry is None, right_censored=interval["exit_at"] is None,
+            coverage_censored=interval["end_status"] == "support_censored",
+            interval_ordinal=ordinal, peak_intensity_mm_h=interval["peak_mm_h"],
+            quantity=primary["quantity"], unit=primary["unit"],
+            field_fingerprint=primary["field_fingerprint"], passage_system_id=system_id,
+            passage_status="coasting" if summary["support_state"] == "held" else "candidate",
+        ))
+    return tuple(passages)
+
+
+def forecast_input_fingerprints(forecast, passages):
+    """All compared source pairs count, including abstentions/held issues."""
+    fingerprints = {p.field_fingerprint for p in passages if p.field_fingerprint}
+    summary = forecast.radar_field_forecast
+    for candidate in (() if summary is None else summary.get("candidates", ())):
+        fingerprints.update(candidate[key] for key in (
+            "field_fingerprint", "previous_fingerprint") if candidate.get(key))
+    return tuple(sorted(fingerprints))
+
+
 class ThinNowcastRuntime:
     def __init__(self, *, targets: Mapping[str, tuple[float, ...]]) -> None:
         self._targets = dict(targets)
@@ -265,6 +354,7 @@ class ThinNowcastRuntime:
         cycle: FusionCycle,
         *,
         tracked_cells: tuple[StormCell, ...] | None = None,
+        source_motions: Mapping[str, tuple[SourceRadarMotion, ...]] | None = None,
     ) -> ThinNowcast:
         if self._latest is not None and cycle.evaluated_at <= self._latest.evaluated_at:
             return self._latest
@@ -458,6 +548,24 @@ class ThinNowcastRuntime:
                 )
             passages = tuple(passages_list)
             target_passages.extend(passages)
+            field_summary = None
+            field_mode = source_motions is not None
+            if field_mode:
+                previous = self._latest.target_results.get(target_id) if self._latest else None
+                previous_provider = None
+                if (previous is not None and previous.radar_field_forecast is not None
+                    and previous.target_latitude == target_latitude
+                    and previous.target_longitude == target_longitude
+                    and previous.radar_field_forecast.get("region_id") == target_region_id):
+                    previous_provider = previous.radar_field_forecast.get("primary_provider")
+                field_summary, passages = _field_target_forecast(
+                    target_id, target_latitude, target_longitude,
+                    cycle.evaluated_at, target_region_id,
+                    source_motions.get(target_region_id, ()),
+                    previous_provider=previous_provider,
+                    core_passages=passages,
+                )
+                target_passages.extend(passages)
             arrival = min(
                 passages,
                 key=lambda item: (
@@ -470,7 +578,11 @@ class ThinNowcastRuntime:
             )
             held_result = None
             held = self._held_arrivals.get(target_id)
-            if arrival is None and not raining and held is not None:
+            field_complete_dry = (field_summary is not None
+                and field_summary["support_state"] == "complete"
+                and not field_summary["intervals"])
+            if (arrival is None and (not raining or field_mode) and held is not None
+                and not field_complete_dry):
                 held_at, candidate = held
                 same_position = (
                     candidate.target_latitude is not None
@@ -491,7 +603,9 @@ class ThinNowcastRuntime:
                     and still_fresh
                     and not_finished
                 ):
-                    if candidate.passage_system_id is not None:
+                    if field_mode and candidate.radar_field_forecast is None:
+                        candidate = None
+                    if candidate is not None and candidate.passage_system_id is not None:
                         snapshot = self._passage_states.advance(PassageEvidence(
                             target_id=target_id,
                             passage_system_id=candidate.passage_system_id,
@@ -508,6 +622,13 @@ class ThinNowcastRuntime:
                         )
                         self._held_arrivals[target_id] = (held_at, candidate)
                     held_result = candidate
+                    if candidate is not None and candidate.radar_field_forecast is not None:
+                        field_summary = dict(candidate.radar_field_forecast)
+                        field_summary.update(support_state="held",
+                            age_seconds=cycle.evaluated_at-field_summary["issued_at"],
+                            last_attempt_at=cycle.evaluated_at)
+                        target_passages.extend(_field_passages(field_summary,
+                            target_id, target_latitude, target_longitude, cycle.evaluated_at))
                 else:
                     self._held_arrivals.pop(target_id, None)
             eta_minutes = 0.0 if raining else (
@@ -533,10 +654,16 @@ class ThinNowcastRuntime:
                 current_state = "droog" if fused and fused.status == "operational" else "onbekend"
                 forecast_state = "regen_op_komst"
                 reason = (
+                    "source_clock_full_field_arrival" if field_mode and arrival is not None else
+                    "source_clock_full_field_hold" if field_mode else
                     "tracked_cell_arrival"
                     if arrival is not None
                     else "tracked_cell_arrival_handoff_hold"
                 )
+            elif field_mode and not field_complete_dry:
+                current_state = "droog" if fused and fused.status == "operational" and rain_rate is not None else "onbekend"
+                forecast_state = "onvoldoende_data"
+                reason = "field_forecast_support_incomplete"
             elif (
                 fused is not None
                 and fused.status == "operational"
@@ -544,7 +671,7 @@ class ThinNowcastRuntime:
             ):
                 current_state = "droog"
                 forecast_state = "geen_dreiging"
-                reason = "no_tracked_arrival"
+                reason = "field_no_rain_within_supported_horizon" if field_complete_dry else "no_tracked_arrival"
             else:
                 current_state = "onbekend"
                 forecast_state = "onvoldoende_data"
@@ -618,6 +745,7 @@ class ThinNowcastRuntime:
                         else held_result.passage_status
                     )
                 ),
+                radar_field_forecast=field_summary,
             )
             target_results[target_id] = result
             if arrival is not None:

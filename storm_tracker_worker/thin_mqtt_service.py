@@ -33,7 +33,9 @@ from .thin_postgis import (
     ThinPostGISWriter,
     _forecast_issue_id,
     _passage_id,
+    forecast_versions,
 )
+from .thin_nowcast import forecast_input_fingerprints
 from .thin_provider_adapters import (
     AemetRadarAdapter,
     AioHttpFetcher,
@@ -76,7 +78,14 @@ def _passage_bracket(lower_at: Any, upper_at: Any) -> dict[str, float] | None:
 def _build_passages_contract(nowcast: Any) -> dict[str, Any]:
     """Build the bounded, lossless passage result contract."""
 
-    passages = tuple(nowcast.target_passages[:256])
+    field_targets = {target_id for target_id, result in
+        getattr(nowcast, "target_results", {}).items()
+        if getattr(result, "radar_field_forecast", None) is not None}
+    # The existing card's main passage must not select a short core instead
+    # of the full field. Core windows remain archived and in the field topic.
+    all_passages = tuple(p for p in nowcast.target_passages
+        if p.target_id not in field_targets or p.method == "source_clock_full_field")
+    passages = all_passages[:256]
     fingerprints_by_target: dict[str, tuple[str, ...]] = {}
     for target_id in {str(item.target_id) for item in passages}:
         fingerprints_by_target[target_id] = tuple(sorted({
@@ -85,14 +94,21 @@ def _build_passages_contract(nowcast: Any) -> dict[str, Any]:
             if str(item.target_id) == target_id
             and item.field_fingerprint is not None
         }))
+        forecast = getattr(nowcast, "target_results", {}).get(target_id)
+        if forecast is not None:
+            fingerprints_by_target[target_id] = forecast_input_fingerprints(forecast,
+                tuple(p for p in nowcast.target_passages if p.target_id == target_id))
     items: list[dict[str, Any]] = []
     for passage in passages:
         target_id = str(passage.target_id)
+        forecast = getattr(nowcast, "target_results", {}).get(target_id)
+        algorithm, policy = ((PASSAGE_ALGORITHM_VERSION, PASSAGE_POLICY_VERSION)
+            if forecast is None else forecast_versions(forecast))
         calculated_issue_id = _forecast_issue_id(
             target_id=target_id,
             issued_at=float(nowcast.evaluated_at),
-            algorithm_version=PASSAGE_ALGORITHM_VERSION,
-            policy_version=PASSAGE_POLICY_VERSION,
+            algorithm_version=algorithm,
+            policy_version=policy,
             region_revision_id=None,
             input_fingerprints=fingerprints_by_target[target_id],
         )
@@ -107,8 +123,8 @@ def _build_passages_contract(nowcast: Any) -> dict[str, Any]:
             passage.exit_bracket_upper_at,
         )
         scenario_outcome = (
-            "horizon_censored" if passage.right_censored
-            else "coverage_censored" if passage.coverage_censored
+            "coverage_censored" if passage.coverage_censored
+            else "horizon_censored" if passage.right_censored
             else "hit"
         )
         items.append({
@@ -145,8 +161,8 @@ def _build_passages_contract(nowcast: Any) -> dict[str, Any]:
                 "exit_bracket": exit_bracket,
             }],
             "provenance": {
-                "algorithm_version": PASSAGE_ALGORITHM_VERSION,
-                "policy_version": PASSAGE_POLICY_VERSION,
+                "algorithm_version": algorithm,
+                "policy_version": policy,
                 "field_fingerprint": passage.field_fingerprint,
             },
         })
@@ -154,8 +170,21 @@ def _build_passages_contract(nowcast: Any) -> dict[str, Any]:
         "schema_version": 2,
         "evaluated_at": float(nowcast.evaluated_at),
         "items": items,
-        "overflow_count": max(0, len(nowcast.target_passages) - 256),
+        "overflow_count": max(0, len(all_passages) - 256),
     }
+
+
+def _build_field_forecasts_contract(nowcast):
+    """Additive topic, leaving the strict HA passage schema unchanged."""
+    return {"schema_version": 1, "evaluated_at": nowcast.evaluated_at,
+        "targets": {target_id: {**dict(result.radar_field_forecast),
+            "entry_at": result.entry_at, "exit_at": result.exit_at,
+            "target_latitude": result.target_latitude,
+            "target_longitude": result.target_longitude,
+            "eta_minutes": result.eta_minutes,
+            "passage_status": result.passage_status}
+            for target_id,result in nowcast.target_results.items()
+            if result.radar_field_forecast is not None}}
 
 WORKER_TECHNICAL_SOURCE_CONTRACT = (
     "stv3-worker-technical-diagnostics-source-v1"
@@ -532,6 +561,12 @@ class ThinMqttService:
                     passages_payload,
                     qos=1,
                     retain=True,
+                )
+                self.client.publish(
+                    topic(self.topic_root, "operational/field_forecasts"),
+                    json.dumps(_build_field_forecasts_contract(result.nowcast),
+                        allow_nan=False, separators=(",", ":")),
+                    qos=1, retain=True,
                 )
                 validation_counts: dict[str, int] = {}
                 for validation in result.validations:

@@ -1189,7 +1189,9 @@ async def test_zero_rain_observation_is_published_as_current_dry_result():
     assert target["current_precipitation"]["provider_ids"] == [
         "model.openmeteo.region"
     ]
-    assert target["next_threat"]["state"] == "none"
+    # A current zero/model value cannot rule out future rain without a
+    # supported full-field trajectory.
+    assert target["next_threat"]["state"] == "unknown"
     provider_ids = {
         item["provider_id"] for item in snapshot["providers"]["items"]
     }

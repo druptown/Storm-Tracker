@@ -23,7 +23,7 @@ from .thin_fusion import (
     fuse_observations,
 )
 from .thin_ground_validation import ForecastValidation, GroundValidationRuntime
-from .thin_nowcast import StormCell, ThinNowcast, ThinNowcastRuntime
+from .thin_nowcast import StormCell, ThinNowcast, ThinNowcastRuntime, forecast_input_fingerprints
 from .thin_observation import ObservationKind
 from .thin_radar_tracking import ThinRadarTracker
 from .thin_radar_overlay import build_radar_overlays, crop_visual_radar_field
@@ -35,6 +35,7 @@ from .thin_postgis import (
     PostGISWriteResult,
     _forecast_issue_id,
     _passage_id,
+    forecast_versions,
 )
 from .thin_provider_catalog import PROVIDERS, build_due_requests
 from .thin_provider_adapters import rainviewer_nominal_coverage_for_target
@@ -1109,10 +1110,15 @@ class ThinOperationalRuntime:
         tracked_cell_values = tuple({
             item.cell_id: item for item in tracked_cells
         }.values())
+        source_motions = {
+            region_id: result.source_motions
+            for region_id, result in completed_regional.items()
+        }
         if tracked_cell_values:
             nowcast = self._nowcast.advance(
                 fusion,
                 tracked_cells=tracked_cell_values,
+                source_motions=source_motions,
             )
         else:
             # Some visual providers only expose bounded polygons, not a native
@@ -1125,17 +1131,12 @@ class ThinOperationalRuntime:
             nowcast = self._nowcast.advance(
                 replace(fusion, observations=fallback_observations),
                 tracked_cells=None if fallback_observations else (),
+                source_motions=source_motions,
             )
         fingerprints_by_target = {
-            target_id: tuple(sorted({
-                item.field_fingerprint
-                for item in nowcast.target_passages
-                if item.target_id == target_id
-                and item.field_fingerprint is not None
-            }))
-            for target_id in {
-                item.target_id for item in nowcast.target_passages
-            }
+            target_id: forecast_input_fingerprints(forecast,
+                tuple(p for p in nowcast.target_passages if p.target_id == target_id))
+            for target_id, forecast in nowcast.target_results.items()
         }
         identified_passages = []
         for passage in nowcast.target_passages:
@@ -1145,8 +1146,8 @@ class ThinOperationalRuntime:
             issue_id = _forecast_issue_id(
                 target_id=passage.target_id,
                 issued_at=nowcast.evaluated_at,
-                algorithm_version=PASSAGE_ALGORITHM_VERSION,
-                policy_version=PASSAGE_POLICY_VERSION,
+                algorithm_version=forecast_versions(nowcast.target_results[passage.target_id])[0],
+                policy_version=forecast_versions(nowcast.target_results[passage.target_id])[1],
                 region_revision_id=region_revision_id,
                 input_fingerprints=fingerprints_by_target[passage.target_id],
             )
@@ -1196,16 +1197,19 @@ class ThinOperationalRuntime:
         if archive is not None:
             archive_gap_sequence = archive.status()['gap_sequence']
             bindings = []
+            forecast_inputs = {}
             for target_id in nowcast.target_results:
                 revision_id = region_plan.region_revision_id_for(target_id)
                 if revision_id is not None:
                     bindings.append((_forecast_issue_id(
                         target_id=target_id, issued_at=nowcast.evaluated_at,
-                        algorithm_version=PASSAGE_ALGORITHM_VERSION,
-                        policy_version=PASSAGE_POLICY_VERSION,
+                        algorithm_version=forecast_versions(nowcast.target_results[target_id])[0],
+                        policy_version=forecast_versions(nowcast.target_results[target_id])[1],
                         region_revision_id=revision_id,
                         input_fingerprints=fingerprints_by_target.get(target_id, ()),
                     ), revision_id))
+                    if nowcast.target_results[target_id].radar_field_forecast is not None:
+                        forecast_inputs[bindings[-1][0]] = list(fingerprints_by_target[target_id])
             archive_batch = RawArchiveBatch(
                 str(uuid4()), fusion.evaluated_at,
                 getattr(self._providers, "code_revision", "unregistered"),
@@ -1215,10 +1219,11 @@ class ThinOperationalRuntime:
                               "region_revision_id": r.region_revision_id,
                               "center": [r.center_latitude, r.center_longitude]}
                              for r in region_plan.regions],
-                 "algorithm_version": PASSAGE_ALGORITHM_VERSION,
+                 "algorithm_version": "source-clock-full-field-v1" if forecast_inputs else PASSAGE_ALGORITHM_VERSION,
+                 "forecast_inputs": forecast_inputs,
                  "provider_inputs": {provider_id: list(result.raw_capture_ids)
                                      for provider_id,result in self._latest_provider_results.items()},
-                 "policy_version": PASSAGE_POLICY_VERSION},
+                 "policy_version": "source-clock-field-v1" if forecast_inputs else PASSAGE_POLICY_VERSION},
                 archive.pending(), tuple(archive_fields), tuple(bindings),
                 archive.status()["reason_codes"],
             )
@@ -1854,6 +1859,24 @@ class ThinOperationalRuntime:
                 track_id = probability = calibration = None
                 passage = "unknown"
             target_reason_codes = [result.reason_code]
+            field_summary = result.radar_field_forecast
+            forecast_product_valid_at = target_product_valid_at
+            if field_summary is not None:
+                primary = next((c for c in field_summary["candidates"]
+                    if c["provider_id"] == field_summary["primary_provider"]), None)
+                forecast_product_valid_at = None if primary is None else primary["product_at"]
+                if field_summary["support_state"] == "held":
+                    threat_freshness = "stale"
+                elif primary is None:
+                    threat_freshness = "unknown"
+                if threat_freshness != "current":
+                    # The strict live snapshot describes current evidence only.
+                    # Held estimates retain their original clocks in the field
+                    # forecast and coasting passage contracts, not here.
+                    threat_state = passage = "unknown"
+                    track_id = probability = calibration = None
+                if field_summary["source_conflict"]:
+                    target_reason_codes.append("source_conflict")
             if region_plan.location_status_for(target.target_id) == "stale":
                 target_reason_codes.append("target_location_stale")
             target_reason_codes = sorted(set(target_reason_codes))
@@ -1897,7 +1920,7 @@ class ThinOperationalRuntime:
                     "distance_km": None,
                     "passage_status": passage,
                     "product_valid_at": (
-                        target_product_valid_at
+                        forecast_product_valid_at
                         if threat_freshness == "current"
                         else None
                     ),
