@@ -24,7 +24,7 @@ from .tracking_core.engine.pyramidal_sparse_flow import (
 )
 
 
-POLICY_VERSION = "source-clock-field-v1"
+POLICY_VERSION = "source-clock-field-episode-v2"
 MAX_SOURCE_COUNT = 3
 MAX_PAIR_GAP_SECONDS = 1200.
 HORIZON_SECONDS = 7200.
@@ -248,6 +248,11 @@ def trace_target(motion: SourceRadarMotion, latitude, longitude, issued_at):
 
 
 def rain_intervals(samples, threshold=.1):
+    """Supported QPE windows; threshold zero means strictly positive echo.
+
+    Positive echo is a quantitative radar indication, not exact ground truth.
+    Keep real zeros and missing support distinct, without bridging either.
+    """
     result = []; active = None; previous = None
     def finish(status, bracket=None):
         nonlocal active
@@ -262,7 +267,7 @@ def rain_intervals(samples, threshold=.1):
             if active is not None:
                 finish("support_censored")
             previous = None; continue
-        if rate >= threshold:
+        if (rate > 0. if threshold == 0. else rate >= threshold):
             if active is None:
                 bracket = None if previous is None else [previous, at]
                 active = {"entry_at": None if bracket is None else sum(bracket)/2.,

@@ -159,7 +159,7 @@ async def test_archived_unknown_forecast_retains_actual_source_pair_and_policy(m
     assert result.status == "current"
     row = next(p for sql,p in factory.statements if sql.startswith("INSERT INTO stv3_target_forecast_issue("))
     assert row[3] == "source-clock-full-field-v1"
-    assert row[4] == "source-clock-field-v1"
+    assert row[4] == "source-clock-field-episode-v2"
     assert set(json.loads(row[6])) == {source.field.identity.content_fingerprint, "previous-field"}
     assert json.loads(row[7])["forecast"]["radar_field_forecast"]["support_state"] == "unknown"
 
@@ -193,6 +193,39 @@ def test_supported_dry_gap_is_not_joined_into_one_wet_period():
     assert len(intervals) == 2
     assert intervals[0]["exit_at"] == 2890.
     assert intervals[1]["entry_at"] == 3910.
+
+
+def test_target_episode_uses_weak_edges_and_keeps_intensity_windows():
+    values = np.zeros((10,10)); values[:,1:5] = .03; values[:,3] = .2
+    result = runtime().advance(cycle(), tracked_cells=(),
+        source_motions={"r1": (motion(values),)})
+    target = result.target_results["home"]
+    assert target.entry_at == 1000.  # first sample already wet, not an onset
+    assert target.exit_at == 4930.
+    summary = target.radar_field_forecast
+    assert summary["intervals"][0]["left_censored"]
+    assert summary["threshold_mm_h"] == 0.
+    assert summary["threshold_operator"] == "gt"
+    assert summary["intensity_threshold_mm_h"] == .1
+    assert summary["intensity_intervals"][0]["entry_at"] == 1930.
+    assert summary["intensity_intervals"][0]["exit_at"] == 2890.
+    assert summary["candidates"][0]["intervals"][0]["exit_at"] == 4930.
+    assert summary["candidates"][0]["intensity_intervals"][0]["exit_at"] == 2890.
+    from storm_tracker_worker.thin_mqtt_service import _build_field_forecasts_contract
+    published = _build_field_forecasts_contract(result)["targets"]["home"]
+    assert published["exit_at"] == 4930.
+    assert published["intensity_intervals"][0]["exit_at"] == 2890.
+
+
+def test_weak_background_prevents_false_closed_target_end():
+    values = np.full((10,10), .03); values[:,3:6] = .2
+    source = motion(values)
+    # Remain inside the quantitative/support domain for the whole horizon.
+    source = replace(source, vectors=tuple((x,y,.3,0.) for x,y,_,_ in source.vectors))
+    target = runtime().advance(cycle(rate=.03), tracked_cells=(),
+        source_motions={"r1": (source,)}).target_results["home"]
+    assert target.exit_at is None
+    assert target.radar_field_forecast["intervals"][0]["end_status"] == "horizon_censored"
 
 
 def test_colocated_targets_share_field_timing_and_conflicts_keep_primary():

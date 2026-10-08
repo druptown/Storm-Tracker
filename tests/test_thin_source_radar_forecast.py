@@ -90,6 +90,32 @@ def test_real_dry_gap_remains_between_two_intervals():
     assert intervals[1]["entry_at"] == 1150.
 
 
+def test_positive_rain_episode_does_not_end_at_intensity_threshold():
+    samples = [{"at": 1000.+i*60., "rate_mm_h": value}
+               for i, value in enumerate((0., .03, .12, .03, 0.))]
+    episode = forecast.rain_intervals(samples, threshold=0.)
+    assert len(episode) == 1
+    assert episode[0]["entry_at"] == 1030.
+    assert episode[0]["exit_at"] == 1210.
+    intensity = forecast.rain_intervals(samples, threshold=.1)
+    assert intensity[0]["entry_at"] == 1090.
+    assert intensity[0]["exit_at"] == 1150.
+
+
+def test_positive_rain_episode_keeps_true_zero_gap_and_unknown_end():
+    samples = [{"at": 1000.+i*60., "rate_mm_h": value}
+               for i, value in enumerate((0., .03, 0., .03, None, .03))]
+    episode = forecast.rain_intervals(samples, threshold=0.)
+    assert len(episode) == 3
+    assert episode[0]["entry_at"] == 1030.
+    assert episode[0]["exit_at"] == 1090.
+    assert episode[1]["entry_at"] == 1150.
+    assert episode[1]["exit_at"] is None
+    assert episode[1]["end_status"] == "support_censored"
+    assert episode[2]["entry_at"] is None
+    assert episode[2]["end_status"] == "horizon_censored"
+
+
 def test_primary_conflict_keeps_selected_source_not_average():
     a = {"provider_id": "a", "native_resolution_m": 500.,
          "product_at": 900., "samples": [{"at": 1000., "rate_mm_h": 4.}]}
