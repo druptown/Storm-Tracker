@@ -919,7 +919,8 @@ class ThinOperationalRuntime:
 
         def track_field(field: Any, region: Any) -> None:
             scope = _RadarTrackingScope(
-                target_id=region.region_id,
+                target_id=(region.region_id + ":" + region.region_revision_id
+                           if region.region_revision_id else region.region_id),
                 latitude=region.center_latitude,
                 longitude=region.center_longitude,
                 observation_radius_km=float(
@@ -1030,7 +1031,26 @@ class ThinOperationalRuntime:
                                     confidence=regional.confidence,
                                     contributor_mask=regional.contributor_mask,
                                     source_ids=source_ids)
-                track_field(regional.field, region)
+                # The observation-map composite is asynchronous. It must never
+                # be a motion frame: each native source keeps its own clock.
+                tracking_fields = regional.native_tracking_fields
+                if not tracking_fields:
+                    # Compatibility with restored snapshots lacking layers;
+                    # only a current geographically applicable native source.
+                    candidates = [f for p in self._latest_provider_results.values()
+                                  for f in p.radar_fields
+                                  if 0 <= fusion.evaluated_at-f.observed_at <=
+                                  PROVIDER_FUSION_AGE_SECONDS.get(f.provider_id, MAX_FUSION_AGE_SECONDS)]
+                    selected = _select_native_radar_fallback(candidates, region)
+                    tracking_fields = () if selected is None else (selected,)
+                for tracking_field in tracking_fields:
+                    native_ids = tuple(sorted({receipt_id
+                        for f,receipt_ids in regional.archive_inputs
+                        if f.provider_id == tracking_field.provider_id
+                        for receipt_id in receipt_ids}))
+                    await archive_field(tracking_field, region, role="used",
+                                        source_ids=native_ids or None)
+                    track_field(tracking_field, region)
                 regional_summaries.append(regional.summary)
                 continue
 

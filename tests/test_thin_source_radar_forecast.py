@@ -149,6 +149,15 @@ def test_same_time_correction_does_not_supply_independent_motion():
     assert result.delta_seconds is None
 
 
+def test_source_composition_change_requires_reseed():
+    engine = forecast.SourceRadarForecastEngine(estimate=lambda a,b: pytest.fail("incompatible pair"))
+    old = field(300.)
+    engine.advance(old,layer(old),received_at=350.)
+    new = field(600.)
+    new = replace(new,identity=replace(new.identity,source_composition=("other_network",)))
+    assert engine.advance(new,layer(new),received_at=650.).reason_code == "source_pair_incompatible"
+
+
 def test_real_lk_uses_source_600_seconds_not_composite_300_seconds():
     rows, cols = np.indices((64, 64))
     values = sum(.4*np.exp(-((rows-r)**2+(cols-c)**2)/18.)

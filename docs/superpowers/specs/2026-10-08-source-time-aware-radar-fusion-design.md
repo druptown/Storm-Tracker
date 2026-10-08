@@ -133,6 +133,20 @@ van de oude positie hergebruikt. Zonder eerdere schatting of invoer wordt
 onbekende timing uitgelegd, niet verzonnen. Beschikbare presentatie is geen
 garantie op altijd beschikbare verse meteorologische kennis.
 
+Aanvullende gebruikersvereiste: behoud het bruikbare vroegere concept van een
+tijdschatting met een numerieke onzekerheidsindicatie, in plaats van leegte.
+Passagekans (raakt de regen het target?) en tijdnauwkeurigheid zijn twee
+verschillende grootheden. De oude `forecast_confidence_percent` was een
+heuristiek: basis 82/64, framebonus en horizonstraf; geen gemeten trefkans.
+Een eventuele identieke score blijft daarom expliciet een ongekalibreerde
+betrouwbaarheidsschatting, niet `calibrated_probability_percent`. Bij een
+onbekende achterrand wordt de werkelijk ondersteunde ondergrens zichtbaar:
+"regen verwacht tot minstens …", niet een verzonnen exact einde. Bij een
+bestaande eindschatting zonder verse bevestiging blijven de oorspronkelijke
+tijd en ouderdom zichtbaar als eerdere/indicatieve schatting. Kalibratie van
+een echte passagekans vereist meerdere onafhankelijke regen- én niet-passage-
+gebeurtenissen; supportfractie en bronstemmen zijn op zichzelf geen trefkans.
+
 ### Waarneming en voorspelling
 
 De bestaande radarwaarnemingskaart mag ruimtelijk samengestelde bronpixels tonen,

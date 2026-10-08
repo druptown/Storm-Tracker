@@ -68,7 +68,8 @@ def _compatible(item: SourceRadarMotion) -> tuple[Any, ...]:
     f = item.field; identity = f.identity
     assert identity is not None
     return (f.provider_id, f.product_id, identity.quantity, identity.unit,
-            identity.processing_version, identity.grid_id, item.layer.grid)
+            identity.processing_version, identity.source_composition,
+            identity.grid_id, item.layer.grid)
 
 
 def _flow_config() -> SparsePyramidalConfig:

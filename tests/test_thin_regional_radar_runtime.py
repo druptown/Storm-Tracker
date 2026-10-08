@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import replace
 
 import numpy as np
 
@@ -78,6 +79,29 @@ def test_coordinator_uses_at_most_two_compute_threads():
     coordinator.close()
 
 
+def test_fusion_exposes_native_source_clocks_and_explicit_bit_mapping():
+    from storm_tracker_worker.thin_regional_radar_fusion import fuse_regional_radar_fields
+    source = _providers()["radar"]
+    older = replace(source.radar_fields[0], provider_id="a", observed_at=900., identity=None)
+    result = fuse_regional_radar_fields(_plan().regions[0], {
+        "radar": source, "a": replace(source, provider_id="a", radar_fields=(older,))},
+        evaluated_at=1000.)
+    assert {f.provider_id: f.observed_at for f,l in result.native_layers} == {"a":900., "radar":1000.}
+    assert result.summary.source_index == ("radar", "a")
+    assert result.summary.source_product_times == {"radar":1000., "a":900.}
+
+
+def test_coordinator_fingerprint_changes_on_corrected_content_and_region_revision():
+    from storm_tracker_worker.thin_regional_radar_runtime import _input_fingerprint
+    plan = _plan(); providers = _providers()
+    original = _input_fingerprint(plan.regions[0], providers)
+    field = providers["radar"].radar_fields[0]
+    changed = replace(field, rain_rate_mm_h=np.full((4,4), .2), identity=None)
+    assert _input_fingerprint(plan.regions[0], {"radar":replace(providers["radar"], radar_fields=(changed,))}) != original
+    revision = replace(plan.regions[0], region_revision_id="moved")
+    assert _input_fingerprint(revision, providers) != original
+
+
 def test_identical_completed_fingerprint_is_not_scheduled_again():
     calls: list[str] = []
     completed = threading.Event()
@@ -96,4 +120,53 @@ def test_identical_completed_fingerprint_is_not_scheduled_again():
     time.sleep(0.02)
 
     assert calls == ["region:home"]
+    coordinator.close()
+
+
+def test_source_engine_reuses_products_and_is_reset_for_region_revision():
+    from storm_tracker_worker.thin_source_radar_forecast import SourceRadarForecastEngine
+    engines = []
+    calls = []
+    def engine_factory():
+        engine = SourceRadarForecastEngine(estimate=lambda a,b: calls.append(
+            (a.field.observed_at,b.field.observed_at)) or ())
+        engines.append(engine)
+        return engine
+    coordinator = ThinRegionalRadarFusionCoordinator(source_engine_factory=engine_factory)
+    plan = _plan()
+    def complete(providers, at):
+        coordinator.submit(plan, providers, evaluated_at=at)
+        # Bounded synchronization of the existing job, not a production poll.
+        coordinator._jobs["region:home"].future.result(timeout=3.)
+        return coordinator.poll()["region:home"]
+    first = complete(_providers(),1000.)
+    assert first.source_motions[0].reason_code == "source_pair_missing"
+    source = _providers()["radar"]
+    newer = replace(source.radar_fields[0], observed_at=1300., identity=None)
+    providers = {"radar":replace(source, radar_fields=(newer,))}
+    second = complete(providers,1300.)
+    assert second.source_motions[0].delta_seconds == 300.
+    assert calls == [(1000.,1300.)]
+    coordinator.submit(plan,providers,evaluated_at=1310.)
+    assert coordinator.pending_region_ids() == frozenset()
+    plan = replace(plan, regions=(replace(plan.regions[0],region_revision_id="moved"),))
+    moved = complete(providers,1320.)
+    assert moved.source_motions[0].reason_code == "source_pair_missing"
+    assert len(engines) == 2
+    coordinator.close()
+
+
+def test_completed_old_region_revision_is_not_published_after_move():
+    gate = threading.Event()
+    def fuse(*args, **kwargs):
+        gate.wait(2.)
+        return object()
+    coordinator = ThinRegionalRadarFusionCoordinator(fuse=fuse)
+    plan = _plan()
+    coordinator.submit(plan, _providers(), evaluated_at=1000.)
+    moved = replace(plan,regions=(replace(plan.regions[0],region_revision_id="moved"),))
+    coordinator.submit(moved, _providers(), evaluated_at=1001.)
+    job = coordinator._jobs["region:home"]
+    gate.set(); job.future.result(timeout=2.)
+    assert coordinator.poll() == {}
     coordinator.close()

@@ -545,6 +545,7 @@ class _RecordingRadarTracker:
             rain_rate_mm_h=5.0,
             velocity_east_kmh=10.0,
             velocity_north_kmh=0.0,
+            motion_ready=True,
             geometry={
                 "type": "MultiPolygon",
                 "coordinates": [[[[4.41, 51.04], [4.43, 51.04],
@@ -618,7 +619,7 @@ class _DryPointWithWetNativeRadarProviders:
 
 
 @pytest.mark.asyncio
-async def test_completed_fusion_is_primary_tracking_source():
+async def test_completed_map_fusion_is_not_a_motion_tracking_source():
     fused = _runtime_radar_field("fusion:region:home")
     coordinator = _RegionalCoordinator({"region:home": _regional_result(fused)})
     runtime = ThinOperationalRuntime(
@@ -633,7 +634,7 @@ async def test_completed_fusion_is_primary_tracking_source():
 
     assert result.nowcast.storm_cells
     assert {cell.provider_id for cell in result.nowcast.storm_cells} == {
-        "fusion:region:home",
+        "dwd_radolan",
     }
     assert result.regional_radar[0].mode == "fused"
     assert result.snapshot["radar_fusion"]["items"][0]["mode"] == "fused"
