@@ -1,8 +1,8 @@
 {
   "kind": "recovered_archive_source",
   "component": "worker",
-  "version": "1.18.78",
-  "source_id": "5d19da599132a21950a738e561519cd36256a645c9240174907f97f33160e486",
+  "version": "1.18.79",
+  "source_id": "8ddce12d5859d70bc9cf063e826e8acd12e31e8382fb05445c8acf881b102e5c",
   "recovered_on": "2026-10-09",
   "files": [
     {
@@ -32,7 +32,7 @@
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "3e69b62efa61ec16adb5972a127309b13005f32f08ac4ceb8e6c30806a1b9f2d",
+      "sha256": "72a461255fc0979cc3e1fc13f19263f095d98093a26f21dc947a9ed733be2749",
       "size": 64
     },
     {
@@ -272,7 +272,7 @@
     {
       "path": "config.yaml",
       "mode": 420,
-      "sha256": "ffd7ea63e0ca86af8e4dc7b6a0f08659eca6472b7a8c0a160cfdddd084e251f7",
+      "sha256": "cefa2b2d8adf42d40cd7cda901955fd0a17424b0e87a27da6b7020f0483e42a2",
       "size": 2669
     },
     {
@@ -1056,6 +1056,30 @@
       "size": 46521
     },
     {
+      "path": "tests/__init__.py",
+      "mode": 420,
+      "sha256": "0b775e898a664ac7c360e04bb16995bbf244b3c1fb97fef39a348a5ddf2ad88e",
+      "size": 61
+    },
+    {
+      "path": "tests/test_thin_motion_consensus.py",
+      "mode": 420,
+      "sha256": "9dcbd4d65a9cd0dc0fcd41944964fb8472e120c0c73c5c503f61c7aabeb2d623",
+      "size": 4238
+    },
+    {
+      "path": "tests/test_thin_motion_persistence.py",
+      "mode": 420,
+      "sha256": "7ebc1731c0c84b62e92446757a07fc19db22ee1595d8221ff649c528733f119c",
+      "size": 3139
+    },
+    {
+      "path": "tests/test_thin_tracking_capacity.py",
+      "mode": 420,
+      "sha256": "6cd542326bae45484ebad9c3d7ecc6304b2c3af25e381ff5d5ca0218fbe6d71b",
+      "size": 1077
+    },
+    {
       "path": "thin_blitzortung.py",
       "mode": 420,
       "sha256": "241aae5bb05407913e8e0f6bb34d640eff37cf2fa127794f5303449e8c926361",
@@ -1088,8 +1112,8 @@
     {
       "path": "thin_mqtt_service.py",
       "mode": 420,
-      "sha256": "464e8eb0ddb088f8dabee96e63250f5e8f724350d03a71b569be5f4d6006911d",
-      "size": 27261
+      "sha256": "653863d64ce61bc85bd656f8aff2b9da2397fea5bb44c1c3cff3e3ab63faa322",
+      "size": 28143
     },
     {
       "path": "thin_nowcast.py",
@@ -1622,13 +1646,1510 @@
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_worker_v1.18.78_deploy.tar.gz",
-      "archive_sha256": "524112cb63912ce404b99329d91f12b3354f3dcb7fdfe985dc33eda3bb5144d5",
-      "bytes": 2402573,
-      "evidence_checks": [
+      "filename": "storm_tracker_worker_v1.18.79_deploy.tar.gz",
+      "archive_sha256": "24efe276ae5ad6c35841ccfb3647d2e491f9b816802705b94baf252031689631",
+      "bytes": 8128811,
+      "evidence_checks": [],
+      "omitted_members": [
         {
-          "manifest": "storm_tracker_release_v1.14.152_worker_v1.18.78_evidence.json",
-          "archive_and_source_match": true
+          "path": "storm_tracker_worker/tracking_core/geometry/__pycache__/polygon.cpython-312.pyc",
+          "sha256": "2969ae3744749a4b9e065c8810eacd9550176e19b1f6ac37496a29c9e455f5f4",
+          "bytes": 32937,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/geometry/__pycache__/__init__.cpython-312.pyc",
+          "sha256": "6af93e3bd4d3aab9eec8743c803e647752d32002a656d4903497ba8cbd0f4e74",
+          "bytes": 277,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/geometry/__pycache__/bounding_box.cpython-312.pyc",
+          "sha256": "1c7cd6366d38c6628c48f1c0aff873650bf744812ce0c9f71a8a17e3115ba575",
+          "bytes": 2313,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/geometry/__pycache__/distance.cpython-312.pyc",
+          "sha256": "20770c497385755f3156304f16495536202031f64b51f6e71168c6c7a1d98cd2",
+          "bytes": 1511,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/geometry/__pycache__/geocode.cpython-312.pyc",
+          "sha256": "fc30b2cf4ceb104d5c4476f9a809f0c7a6766e32fa57427431d8e4e0b59c530e",
+          "bytes": 2311,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/geometry/__pycache__/hull.cpython-312.pyc",
+          "sha256": "5c065f4605b01ad7f77b57befc181f582beedfd8305b6b527e5d9937ce4b3e0c",
+          "bytes": 3246,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/__pycache__/__init__.cpython-312.pyc",
+          "sha256": "cfebba934684a3415fcba1d6f220b2858e5120857388237fcfbb00f41930f7fd",
+          "bytes": 273,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/__pycache__/operational_snapshot.cpython-312.pyc",
+          "sha256": "e13917cdb503283fd805931545664d7bb5d0aeb172fac661020eac407db30c55",
+          "bytes": 68307,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/global_assignment.cpython-312.pyc",
+          "sha256": "149a56583764820f25f995b86c50d689614d6f46c576c752701bd108850e3f5d",
+          "bytes": 44567,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/cell_track.cpython-312.pyc",
+          "sha256": "8a2e4cf03d31676b17aac950aa7766b34a33b46594c79f4c4b8bc2feb81bf320",
+          "bytes": 7682,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/analysis_grid.cpython-312.pyc",
+          "sha256": "5b93a97ca2e26fcb4f67fb947e9c984e9c085c3c55e163156020fee8840b1c13",
+          "bytes": 12711,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/provider_handoff.cpython-312.pyc",
+          "sha256": "57ae1927099c1962ff7bdea357a69f2c70d77e0e74e5525ce3a30e6c14c01735",
+          "bytes": 65405,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/ground_observation_adapters.cpython-312.pyc",
+          "sha256": "d50361be58dabfb0541a246e5fe6060640f2918dc60a5d70792b079c9a694546",
+          "bytes": 36898,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/storm_engine.cpython-312.pyc",
+          "sha256": "1120b2600b102922649a2da0a81dc55a0ba68ae8273b6813cdbc9e55bd97c279",
+          "bytes": 87094,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/lucas_kanade_flow.cpython-312.pyc",
+          "sha256": "8e713f7441823bf0ad9110df236bbb93de682c37f21f25d8dae7f71318e07274",
+          "bytes": 35502,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/event_probability_calibration.cpython-312.pyc",
+          "sha256": "c67941cef9b9f974ab5f11f3941ddfc9020be59e0edcaefc352a1551f619f910",
+          "bytes": 38215,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/ground_fusion.cpython-312.pyc",
+          "sha256": "41a4c73f1a697f7c5f8dfbf3b66c28da191fa822505ad931b99f9f896d62732c",
+          "bytes": 45595,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/provider_artifact_contracts.cpython-312.pyc",
+          "sha256": "ed158a805693db60bbba8756c20a555b93d002e19655b189567b7219facd634d",
+          "bytes": 53716,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/canonical_ground_fusion_bridge.cpython-312.pyc",
+          "sha256": "308a0bdee9d1ff20da6e883f5136097aa4ed213cc0f319228875019c86a798ee",
+          "bytes": 47563,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/__init__.cpython-312.pyc",
+          "sha256": "283654c3ce91c19d0023feb2f3165b6132d3e9e089e6fa58701cd03ba9410ce3",
+          "bytes": 279,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/provider_quality_runtime.cpython-312.pyc",
+          "sha256": "f0c7764f5fb38a6f6d53011540fad80063921645858afb70d63c6c7756940edf",
+          "bytes": 24323,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/trajectory.cpython-312.pyc",
+          "sha256": "972c81415a77a40a6f3a952e55f83c2085f1ac61acffacd0378c07a962f64c67",
+          "bytes": 18628,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/association_features.cpython-312.pyc",
+          "sha256": "e52205e39f4af6fbac7496bff405fa947d9fddee64b7a47a3ba104092a84eaf5",
+          "bytes": 13359,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/observation_time_quality.cpython-312.pyc",
+          "sha256": "4d1e235cfcd879ec00a6861ea33234889162a40dea9a3ea06d1a79383bcfa19b",
+          "bytes": 13678,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/recursive_track_estimator.cpython-312.pyc",
+          "sha256": "f375c2d25977cc2f916234166748b4cbb46623b2da917536c4ad9fe82abf4cba",
+          "bytes": 32624,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/hierarchical_detection.cpython-312.pyc",
+          "sha256": "9a21adc88f4607a3ac5721bf96c2f933f4870474413d80a11894f41f8cbef03d",
+          "bytes": 27441,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/track_motion_prior.cpython-312.pyc",
+          "sha256": "0280cc4b34a2c3011b4bf57605693626de96f7438bf37f9eb4a483b1307f6259",
+          "bytes": 17842,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/kmi_radqpe_contract.cpython-312.pyc",
+          "sha256": "046e2bd7d5b41d7a29f4d63b0e50c04526caf078f8c06b9426019292b319dd3f",
+          "bytes": 50936,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/meteorological_evidence_store.cpython-312.pyc",
+          "sha256": "f075c7a6878b737233b5e28a43ce34ce437e75ec3f9750e797fb10a42683ebbf",
+          "bytes": 230916,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/cell_track_lifecycle.cpython-312.pyc",
+          "sha256": "fb60ae849649b5e4412a8249078a903f9d6679f0b8e643fc7c04a175826811be",
+          "bytes": 55260,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/motion_prediction.cpython-312.pyc",
+          "sha256": "db600eb1cbea1f319b6e06ce983c4afff42f1a4fa9c20693d20fcbf77113ee63",
+          "bytes": 15045,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/nowcast_baselines.cpython-312.pyc",
+          "sha256": "ebd265fc089c87881afd54f0aee35d8322459171c8de607db0611c9745bb1626",
+          "bytes": 23334,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/motion_identity_evidence.cpython-312.pyc",
+          "sha256": "9b4294a56e51b5aba006ee71788899dd4b523044e999bfdba6ffd6f80d7f0bcd",
+          "bytes": 27716,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/weather_system_grouping.cpython-312.pyc",
+          "sha256": "67d7b737e3a4c705f1896e57966fa0c09ea45f3fadfbeeca2c3c85d3677e4188",
+          "bytes": 61934,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/tracker_forecast_contract.cpython-312.pyc",
+          "sha256": "3f52f05ed6ab497599c39ba53705140f65de5c1817ae5568f4aedb17480fca3d",
+          "bytes": 82604,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/ground_verification.cpython-312.pyc",
+          "sha256": "f2f69116c3b4b82f5cb8fa12c420424fb2123d2d51ae1147c5d5769a5ef4a7b6",
+          "bytes": 39936,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/association_graph.cpython-312.pyc",
+          "sha256": "99dfe4b00093659b0f9194e0d2c9baf8608fee17bfae69ad5917d02ef67d32f0",
+          "bytes": 11415,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/raw_artifact_store.cpython-312.pyc",
+          "sha256": "11c721f71d7e6a65d23f00bfb41108d3d041d15bbf7f55e611f4b0f6e37df5b9",
+          "bytes": 68064,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/shared_system_translation.cpython-312.pyc",
+          "sha256": "a1f1b149152a2680ddfa1620951994435b76c1deb198e40bd4d30bf4c2114858",
+          "bytes": 45307,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/bounded_payload.cpython-312.pyc",
+          "sha256": "e9ba05c2434f2f7bf4c9397c0bee8b94e0716580420019c5601a9ab122defd66",
+          "bytes": 7642,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/cell_track_state_codec.cpython-312.pyc",
+          "sha256": "0439c87096fdb9b21d5ecd5c4f59b2046d946a41f707d67269c55caf7f141650",
+          "bytes": 8431,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/cell_track_engine.cpython-312.pyc",
+          "sha256": "5c660bd0772b534b31138d90f44773edb3043f1485a541d5e9a14393762cf08b",
+          "bytes": 127230,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/observation.cpython-312.pyc",
+          "sha256": "7f1c7dc06b8dd4928c8904b69a3e0773117dd441d4768c03bcbb748cf1a92aaa",
+          "bytes": 10354,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/pyramidal_sparse_flow.cpython-312.pyc",
+          "sha256": "a2e09fc2eeeaffbdeeaee9740d95722cb600e1ed388a6903672ac2d466a5b289",
+          "bytes": 58857,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/multi_hypothesis_identity.cpython-312.pyc",
+          "sha256": "f4d30e822ee3970dda71f229e7cc000abf7403ec30b7ecd2e3cb646050bc329c",
+          "bytes": 125030,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/artifact_retention_planner.cpython-312.pyc",
+          "sha256": "3e665e9c8b7fc7597482eb54ecbfbf41d23e2bbbc16b516e0d80d94314c7c3d4",
+          "bytes": 27485,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/forecast_verification.cpython-312.pyc",
+          "sha256": "fcbc48b85e8834994ff72e4009229c0e341c832f95302339bdf342e6ed701199",
+          "bytes": 89924,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/physical_site_catalog.cpython-312.pyc",
+          "sha256": "d48c4519573d17a5e8a8e0b1eaa8598a928a9fa77ccc0a6c7ca8fd2737259679",
+          "bytes": 73669,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/storm.cpython-312.pyc",
+          "sha256": "66b485b9b4bc2fed4ccf43dbea332c9f52db5b3f06908920fe60a381df975ab0",
+          "bytes": 60468,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/artifact_capture_admission.cpython-312.pyc",
+          "sha256": "d5febb92607d8be1374b8d9e240bae7dd504f8ce1990b02a867432484b77705f",
+          "bytes": 40771,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/pysteps_challenger.cpython-312.pyc",
+          "sha256": "c51647731b70daea9cbafbb7853952cf873f04f6106a4c4639c4c4866ea4213b",
+          "bytes": 64226,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/motion_consensus.cpython-312.pyc",
+          "sha256": "2190e9ea4eed7fd28a5a721cad0ddcfcf2ba03e455141aa611b1950d1444add1",
+          "bytes": 18522,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/tracking_core/engine/__pycache__/advected_footprint_evidence.cpython-312.pyc",
+          "sha256": "6bc7cf79f67b52ae9e6e1463257d7f2a6fc409af4b6cb76e13126703eb9740c8",
+          "bytes": 53979,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/blitzortung_mqtt_raw_sidecar.cpython-312.pyc",
+          "sha256": "04701b20ac82fbcd93fdab5e4e8584db4ee5feeb9ccc90f649ce4a77a66e0253",
+          "bytes": 42189,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/terminal_raw_completion_router.cpython-312.pyc",
+          "sha256": "d621455ffd43676a93c21e589bcdb7f81dacd1be406dcc38b7f7acb93495584a",
+          "bytes": 46376,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_fusion.cpython-312.pyc",
+          "sha256": "c828d07066db04278d76eb348d380a0db13879506d64c75ac4e98f00bb82af6c",
+          "bytes": 11200,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/dwd_rv_science_sequence.cpython-312.pyc",
+          "sha256": "b8d21914bc9be632fcde6211a3cfe5c034f35d8ebad0e03a9540b2606e99bd74",
+          "bytes": 57781,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/autonomous_scheduler.cpython-312.pyc",
+          "sha256": "aac201a703b1b5334f25543ad5b9c043aceba95ccbe7b48a63fec15dce92872b",
+          "bytes": 70360,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/met_office_rate_quantitative.cpython-312.pyc",
+          "sha256": "6c606039a4546962111201fad5e4b64178366b0ffa919e5f1ddadea1c455181e",
+          "bytes": 99863,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/science_shadow_dwd_roi_shared_translation.cpython-312.pyc",
+          "sha256": "404659451a18d370044fc6d8e3a7eaa075d14e6e24d69228639f523bc54190e2",
+          "bytes": 40673,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_mqtt_service.cpython-312.pyc",
+          "sha256": "6d2c9a650d2d8cfc248043154926ec282189cde50853633948e2960dd3639a17",
+          "bytes": 33488,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/kmi_appv4_raw_capture.cpython-312.pyc",
+          "sha256": "866b21f5fc8475b877b349bd235982699c95d7060c2b21201961379f99ecbfb0",
+          "bytes": 69051,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/calibration_replay.cpython-312.pyc",
+          "sha256": "7017a2704049d5a49a3c585ca257956ef71a7e246d32f8b9f279da65859f472e",
+          "bytes": 129622,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/worker_only_motion_snapshot.cpython-312.pyc",
+          "sha256": "428507efd320607a12c9a565a68a19a1fd70fc1a1651f4c0a50fdcaa02663024",
+          "bytes": 11922,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/city_survey_cli.cpython-312.pyc",
+          "sha256": "b28d6d45665a1ee2f735e510f24fc34019cf9a080a9efaef15c84dd0ae9976d4",
+          "bytes": 8328,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/probe_core.cpython-312.pyc",
+          "sha256": "fa3224aad0798942eb1ed0829a8ff5f4860a5009c51cf0d43bd5b26bebfaee4f",
+          "bytes": 34957,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/worker_first_service_composition.cpython-312.pyc",
+          "sha256": "0f9739489a02b154975215d33edc560f496bb6e5d65554042c3dabc26872eb8a",
+          "bytes": 69621,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/virtual_probe.cpython-312.pyc",
+          "sha256": "223735f608fbd68b69674e03f597fd24a240892199f103d212755824275c4d47",
+          "bytes": 7032,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/lightning_exact_raw.cpython-312.pyc",
+          "sha256": "6b298349c2b70aae8fdfee868028cfa297a219de917556886592d21ae2ca10b3",
+          "bytes": 89145,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/aemet_product_gate.cpython-312.pyc",
+          "sha256": "6df7400c064d230bed5255d9116af00bb86993904b306ad177f6a64b9ba1715c",
+          "bytes": 16485,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/acquisition_source_reclamation_authority.cpython-312.pyc",
+          "sha256": "0762b9af10cab9f809f34b5c5a60beeda0513da77924cff4815c9276973299ac",
+          "bytes": 148472,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/opera_dbzh_quantitative.cpython-312.pyc",
+          "sha256": "861bc369cb188bf7fb93926a138db8d3aa3565587895102001a24a08524fe7e3",
+          "bytes": 122348,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/knmi_rtcor_analysis_grid_gate.cpython-312.pyc",
+          "sha256": "0adc40213e60e0a6c3ab049cbc1e79d39d93d5c230c232fe22e17e855f2a7d2d",
+          "bytes": 24483,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/multi_source_radar_facts.cpython-312.pyc",
+          "sha256": "dc6afa4ecac2358709ea008922d0e68235079373578e1fd0710f577494898f13",
+          "bytes": 67575,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/operational_slo_evidence.cpython-312.pyc",
+          "sha256": "68d7063fce465159f194b012dc84dac41c7e8635db99efab83f6b3c86167684f",
+          "bytes": 40231,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/canonical_radar_field_bridge.cpython-312.pyc",
+          "sha256": "df6fa8d50550f5b0415f7c6f9bae2408a27c1fa3d5caf26e795cc6bae2240dda",
+          "bytes": 73496,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/acquisition_handler_child.cpython-312.pyc",
+          "sha256": "35380be0f27f4dcc164e9021e5dd4053f0e3ea528278977b694955aef7e78daa",
+          "bytes": 59235,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_satellite_adapters.cpython-312.pyc",
+          "sha256": "ad47c7c37ecd6145a94ab4ac187a08cad0ba999a0f48a541ced6e2ff46965dd6",
+          "bytes": 21155,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_nowcast.cpython-312.pyc",
+          "sha256": "39e66154c400c3aa23322ee6d4db7fffcb7542e5fca55c87ba0b9c71a70c8b9f",
+          "bytes": 22041,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/evidence_to_cells_shadow.cpython-312.pyc",
+          "sha256": "901ef22b6fd8de845ccb268aa55f76fdc26976c1ae3ea51af774f49b1829c3cf",
+          "bytes": 73927,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/operational_snapshot_builder.cpython-312.pyc",
+          "sha256": "88ca3eb3aadd19dd326d6418517329f80af21b70ce709cb71013728d1e29b1d9",
+          "bytes": 11598,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/external_annotation_pack.cpython-312.pyc",
+          "sha256": "38998fc9f13e61500769dab751486f9ee7a62ce6318520cc85900da94c995c88",
+          "bytes": 122722,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/__init__.cpython-312.pyc",
+          "sha256": "cf0cd6b77fa89868d239251f22c9d804d31abe7af38c227473c6ba1584b75116",
+          "bytes": 267,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/aemet_native.cpython-312.pyc",
+          "sha256": "b12679eb16b6f092ad386905867783f7986f8e4b94da69b1490629b3a5da200f",
+          "bytes": 42582,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/netatmo_native.cpython-312.pyc",
+          "sha256": "a854a1f9fef1a354b7e7ca389732bafbba51c97eb7606c89e5bec12337209d7a",
+          "bytes": 75222,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/meteofrance_native.cpython-312.pyc",
+          "sha256": "7e5ff8788941591f773b8d5c3314296b0719e3d9bcf40a88f678ddb3b000928e",
+          "bytes": 50401,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/netatmo.cpython-312.pyc",
+          "sha256": "d3659a8044c3c3439d26d18b6e4a5c3f3796e00643e2a84fe45fc04eb487da88",
+          "bytes": 30543,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/rainviewer_native.cpython-312.pyc",
+          "sha256": "0363b654b8a6e3dd3b81b5b565b4a441a20e5c2015e3fe30a7d626865af808a5",
+          "bytes": 70756,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/multi_source_satellite_facts.cpython-312.pyc",
+          "sha256": "d129bab719195259a87be380b9d9390f4827226cc276aaaa5d09c11f65f04201",
+          "bytes": 64423,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_station_measurement.cpython-312.pyc",
+          "sha256": "993fa1f0e5c53d34b61dd916d761034156e72b67f98c5f107e2c6e58df786525",
+          "bytes": 5977,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_station_catalog.cpython-312.pyc",
+          "sha256": "817bb6685c1fd4cac3d73243b46f430448708e046c33a560beb19c5fe04a15e0",
+          "bytes": 24732,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/multi_source_cycle_assembler.cpython-312.pyc",
+          "sha256": "d8a3d23353d660b0f4f4661ce4633513ef84c5bd88e696a3ca63b8c221fed982",
+          "bytes": 14716,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/geojson.cpython-312.pyc",
+          "sha256": "ee6624bdaa699082b59886f18ae75bfcd6630eef8b5bf6085c4d596c11d5448f",
+          "bytes": 20021,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/dwd_rv_completion_process_isolation.cpython-312.pyc",
+          "sha256": "65b214d3896a9aee5db2ac4ae9dab7be9dad31ba68a1702c27b7e1f5c49d0111",
+          "bytes": 47174,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/science_shadow_dwd_roi_baselines.cpython-312.pyc",
+          "sha256": "df0ff9a7b53fbe41f0f473917a79bdf6376ac148fb511587463823f20c00b3fb",
+          "bytes": 22052,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/multi_source_operational_cycle.cpython-312.pyc",
+          "sha256": "5ec3ed05bdcec838c590532a3202b6d440ee0efea77d443772fd3f0cd144bcce",
+          "bytes": 82342,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/openmeteo_usage_authority.cpython-312.pyc",
+          "sha256": "bdddd1f885087c5abd5fdb99f958292fd539105074668eb7a9520b17d7e18e56",
+          "bytes": 121883,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/hsaf_h40b_native.cpython-312.pyc",
+          "sha256": "93882aa1add5a4cac227c98b191ddf05b25a8c98beec82fb3c25ef63ec6ba5fa",
+          "bytes": 59574,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/worker_acquisition_plan.cpython-312.pyc",
+          "sha256": "00f1750522d01b1b1c269fe6a01cc14107be7d2d9802dff9b96ddb20f54fae45",
+          "bytes": 91716,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/radar.cpython-312.pyc",
+          "sha256": "32dc95698d0a5f762f8059efa2b191a4a1a1be21c814d2798b69335d975e3b53",
+          "bytes": 46785,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/tracking.cpython-312.pyc",
+          "sha256": "8c663a054d56d2ff6666389959c814253ddd724a480e8140d112b4e0e8c8c37a",
+          "bytes": 12201,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/metar_ground_completion_consumer.cpython-312.pyc",
+          "sha256": "95dd3539e9a211d35945708376f040ba2e6ff3089037599676163db3fcd094a1",
+          "bytes": 137109,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/dwd_rv_quantitative.cpython-312.pyc",
+          "sha256": "687f88a80fdef3c87f048e7bc94ad6e220e60c1192427696b7a0d82e62ff348f",
+          "bytes": 84073,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_ground_station_runtime.cpython-312.pyc",
+          "sha256": "12a33649cda92fb4cdcacbd8904323e1196061d8df7a27c90b30970dcfb25cd7",
+          "bytes": 6063,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/dwd_rv_analysis_grid_certificate.cpython-312.pyc",
+          "sha256": "b8b15b1efa7b31281948b5729ac232002ec8d6852e3d421c9a058a064a50af5a",
+          "bytes": 17906,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_operational_runtime.cpython-312.pyc",
+          "sha256": "b958fa7c6063c3a161e8d9d00f56fa0cf76efbb1e6f6e2023f2e023ec7145cba",
+          "bytes": 66157,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/completion_route_adapters.cpython-312.pyc",
+          "sha256": "db5ed08fe99f159d1b36930834d890e5f22f26e5aa093955765040a484e914c4",
+          "bytes": 59888,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/raw_capture_release_requirements.cpython-312.pyc",
+          "sha256": "e9d35ee05789e898feaec920b9a2ae995a6566eb9dfcbc0d865a519d29c99d32",
+          "bytes": 155287,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/provider_capture_registry.cpython-312.pyc",
+          "sha256": "ce0ee9e8a4d15a737cd16e7d132c7db30bafed22b50f88dbb03de202cf0b19df",
+          "bytes": 13035,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/radar_cycle_contract.cpython-312.pyc",
+          "sha256": "e144f7125ed3e3b3610f728f15f1f081b238305b55947946ad0eba6b71ba36da",
+          "bytes": 64384,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/science_shadow_orchestrator.cpython-312.pyc",
+          "sha256": "d3b902dbdfa968195955f8bdf56ecc28bc34db3e8a9fc651c9ad38ba8f0ea099",
+          "bytes": 150788,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/bounded_archive_headers.cpython-312.pyc",
+          "sha256": "5f701adba1e9188ed5a97b80625376f1e447cd703e8e66d1086a551207e67c7c",
+          "bytes": 52304,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/science_shadow_calibration_replay.cpython-312.pyc",
+          "sha256": "622a014a8466bde22c5cd2a2b88291ac3a67ac05a4239f45db4e4716d6cfcde7",
+          "bytes": 53702,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/raw_capture_service_composition.cpython-312.pyc",
+          "sha256": "6d13fb1a42fd5cffd25c3122258ffc265053dd3570993eebc7ad01fdabdca2be",
+          "bytes": 71682,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/service.cpython-312.pyc",
+          "sha256": "a60a2587abb75da7d4d0b2ba56d1d6c09d693f27553603833adedf9254d122d7",
+          "bytes": 254553,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/ground_fusion_shadow_process_isolation.cpython-312.pyc",
+          "sha256": "5cc2284267dd1d1620ef8e9a9fb244907e9f76be44804b4b0b2c18f3040ae2d7",
+          "bytes": 64772,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/operational_snapshot_publication.cpython-312.pyc",
+          "sha256": "2652b0afcf9ba4cdac61e83bbee724f2b4a8a3a4bcb99662c79837089ffec3a5",
+          "bytes": 64786,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/metar_native.cpython-312.pyc",
+          "sha256": "464bc61516ca24e14037be56e68160a7cd3e29772a9829523b960282dd73b4a0",
+          "bytes": 53142,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/raw_calibration_index.cpython-312.pyc",
+          "sha256": "305ac98101e188b119e396c7cf1b3236059f4a813cb5ca16e177aadbac96c8bf",
+          "bytes": 26659,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/multi_source_snapshot.cpython-312.pyc",
+          "sha256": "db0820a4f0c03889155cf083c6c913cb82185a477eff05f7f8d4b6049d6b1fd9",
+          "bytes": 19292,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/synoptic_ground_decoder.cpython-312.pyc",
+          "sha256": "8a04a5f0ec72b00acafc5f1a7cc1851c0c9da8208cb499fd778f53d1c0327e95",
+          "bytes": 68823,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/goes_rrqpe_native.cpython-312.pyc",
+          "sha256": "48b5ee967bd41a747ce2f399e854b130440b2557ec30126fd2af8d16bea24655",
+          "bytes": 88124,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/knmi_native.cpython-312.pyc",
+          "sha256": "c740710e86e5d12b74fa24a4f98fb0cbc0235672041ff616af9b5aec7d09caaa",
+          "bytes": 77714,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/raw_capacity_ledger.cpython-312.pyc",
+          "sha256": "2c63d5b55c0e96419b6ed623b4a5f5542723a9c20f710c964e0b2a861ad3f3f3",
+          "bytes": 71654,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/blitzortung_event_ingress.cpython-312.pyc",
+          "sha256": "73eeb56d0aa6409fe7f22af591fb1457a76a5c86c11556db1450d81123e86169",
+          "bytes": 93138,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/multi_provider_replay_matrix.cpython-312.pyc",
+          "sha256": "147dc909d79c11de1257a6b132f1af8617c446abd02bdbc0e13d648aba3c1bc0",
+          "bytes": 89231,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/worker_first_composition.cpython-312.pyc",
+          "sha256": "9c2ad7b2424e5b5e5c16d97ab5aa8d0ffcfa9dc228647d0499782b4366c12604",
+          "bytes": 44034,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/acquisition_source_reclamation_apply_authority.cpython-312.pyc",
+          "sha256": "de97d36d32db11d86598627c83bf5eedaa345975259cb55fa3a458d21ae1bee2",
+          "bytes": 178956,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/acquisition_location_shadow.cpython-312.pyc",
+          "sha256": "dd016ef74a70b891a614a5dc49012cddb2cfb8842fb63cdf17dfa0b940bf98a3",
+          "bytes": 16275,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/scientific_validation.cpython-312.pyc",
+          "sha256": "06474d27a9dc183d4ef3efea795473850cc66c76fdcde71763a6b5c65f6a7bb1",
+          "bytes": 58097,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/worker_first_ownership.cpython-312.pyc",
+          "sha256": "1987847587d82917ca108388509fe327e64f8b515e45e6a825396b46b06eeb98",
+          "bytes": 41800,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/synoptic.cpython-312.pyc",
+          "sha256": "631628ff2a4aa264b46493b71d9fe0cd79c32e7400c2ea0b575d14dcefc8b602",
+          "bytes": 21857,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/metar_ground_evidence.cpython-312.pyc",
+          "sha256": "3ffa82fec4ea483a98236cb20fd2ad610b63bb1446ba2d16a7fe7c852627eca1",
+          "bytes": 55993,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/acquisition_activation.cpython-312.pyc",
+          "sha256": "b987db8f917fb07153e7be0aa11c78d9e4caff98ac64d2cc7754c683c0049de6",
+          "bytes": 37719,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/dwd_rv_capture_handoff.cpython-312.pyc",
+          "sha256": "ac6a3c8f1b6046f16eacc5775e0aa59cb22288b2b2d18fac7014da19a27a5944",
+          "bytes": 32144,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/dpc_native.cpython-312.pyc",
+          "sha256": "1d61d6671e5764fbde935284f2967bdc3e31abbaac2ab3555d5f7ca0345f0e1a",
+          "bytes": 57775,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/acquisition_evidence_lifecycle.cpython-312.pyc",
+          "sha256": "4515aadeb6737b8f039ae83ced5621d9b0ad53521453e577198689d7d9de29d9",
+          "bytes": 407952,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_postgis_station_migration.cpython-312.pyc",
+          "sha256": "28fb789c31e679500172dede2b90f5a7d5fbcf2cfc55d379b698240823d8e015",
+          "bytes": 20156,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/acquisition_source_retention.cpython-312.pyc",
+          "sha256": "5f8a172b3ebd362e0071d4bb5f8ca3dbd12accd5240cf4dd1817778f32eaf6bf",
+          "bytes": 262454,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/multi_source_radar_snapshot.cpython-312.pyc",
+          "sha256": "3309e292b93a8902b285255996b4e003b4922b377a3a3d01bbe02d763b512d87",
+          "bytes": 30047,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_provider_adapters.cpython-312.pyc",
+          "sha256": "e05f5b8e59a175fd8da9a421f92a6994cdc3acc4531826f0a8ac22c789b25eaf",
+          "bytes": 180640,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/postgis_projection.cpython-312.pyc",
+          "sha256": "e91281743a0867825970c103ed73bfa012cc48f9fb33d7bb2ffd1356110f6514",
+          "bytes": 15334,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/worker_only_radar_processing.cpython-312.pyc",
+          "sha256": "c4ac423ae8af7ac43bbed19347b49fc311c9b15ded4e0d1152a3a46883206216",
+          "bytes": 30117,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/raw_capture_activation_artifacts.cpython-312.pyc",
+          "sha256": "188dcac15e0e192c0805ad5d2bee1c910c10f5f727e8dd624ed604abb2476d4e",
+          "bytes": 72985,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/archive_member_stream.cpython-312.pyc",
+          "sha256": "bbc11240ca75b0d88d5623bad7d0f25e59d91813f3c78cad89eefe4dfb1e0041",
+          "bytes": 8640,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/acquisition_execution_store.cpython-312.pyc",
+          "sha256": "e362074a491805bd54879d16cd58fabfaae6245bcbd8a365c1c827d208e5be07",
+          "bytes": 29436,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/protocol.cpython-312.pyc",
+          "sha256": "59a6711f760984a430863525edb6500096cb87ead23805370a2b07788948a7a4",
+          "bytes": 3689,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/netatmo_world_importer.cpython-312.pyc",
+          "sha256": "872b8e28d1408780fda3ab94689ebd366e3ea503a70b15ff251d6316254e922a",
+          "bytes": 9634,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/met_office_native.cpython-312.pyc",
+          "sha256": "41656ba4d3c0a27e3dbfdf640975f1d6ffde58886ccbea5e6e8c1c4cda0c3b27",
+          "bytes": 61556,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/enterprise_rainrate.cpython-312.pyc",
+          "sha256": "16d2f8c9fc2e80af163fd979ff3a832df988819d88db57cf809da030dda69a71",
+          "bytes": 17981,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_blitzortung.cpython-312.pyc",
+          "sha256": "ca4f8283025a1133368207a9fe880366532e1e022769c754aaf6a592b7eefca1",
+          "bytes": 8899,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/offline_replay_remaining_baseline_audit.cpython-312.pyc",
+          "sha256": "db3bdd905f89bde11ce134b225c54b310c2c5369f2ea59b3f5fd70f15558ba08",
+          "bytes": 43710,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/metar.cpython-312.pyc",
+          "sha256": "52df49657b4adec06cd180a72e59a485e30cde7a9d8496045f2f2ba6783f60fc",
+          "bytes": 16038,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_provider_catalog.cpython-312.pyc",
+          "sha256": "9ba4bb7a887cd6cc6c6d44c5619864b3be6725f8c3606d6319ac165a0991e63a",
+          "bytes": 9348,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/openmeteo_native.cpython-312.pyc",
+          "sha256": "3e5a1fc0a368602d66d140478179e270969544a9ce327f6c304818a52b3a197c",
+          "bytes": 47296,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/raw_capture_retention_guard.cpython-312.pyc",
+          "sha256": "d16a069e412c6a60f7f4a092cc358326bf40b6679db29455546d51fba6378fab",
+          "bytes": 45357,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/dwd_rv_completion_consumer.cpython-312.pyc",
+          "sha256": "1faaad9f61628dea70d0dc05bf6926f4bf9b363b84ce14e6208e8e7b3543dc94",
+          "bytes": 100033,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/worker_only_bootstrap.cpython-312.pyc",
+          "sha256": "f7c115f1c17a0befb9a29689897c08197f1cc354b2335c542319cba44ccf39ca",
+          "bytes": 28830,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/science_shadow_dwd_roi_replay.cpython-312.pyc",
+          "sha256": "28c9532b7ac026c97e68966d7e3b1b218022f0c4e7f00422e87439272622a535",
+          "bytes": 42882,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/provider_radar.cpython-312.pyc",
+          "sha256": "f996eca7e49e89c75ff01487234afde2feee6ae633c802efcfaa24f5b57961d2",
+          "bytes": 48959,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/cpu_topology.cpython-312.pyc",
+          "sha256": "5ffc1330f661508c8c14c6b84007b4cc790c59c1438cdb2e6b9294b1468d5819",
+          "bytes": 5223,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/serial_completion_dispatcher.cpython-312.pyc",
+          "sha256": "b867f0000391d8c5b1f126e460da77ccbf42cebeaad7755a5a99fe8438b4e0e8",
+          "bytes": 108107,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/public_source_raw_capture.cpython-312.pyc",
+          "sha256": "c39abfe37aee5a80e04bb86bb639a266f6ec10e5bb75deca3a2de81603dd2793",
+          "bytes": 50474,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/release_artifacts.cpython-312.pyc",
+          "sha256": "0e4354f5f3fce52886f05a68e4209721b174fdf06d0ebcb52965b679b6fef80b",
+          "bytes": 59661,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/kmi_aws_ground_decoder.cpython-312.pyc",
+          "sha256": "44d584e8add21c508be12403bcbc87b91f8e2841266ac6ad349b0697a7f51d5e",
+          "bytes": 25844,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/survey_cli.cpython-312.pyc",
+          "sha256": "8353f7cfd76b59ec29d93dccc4bf28d168b5f6647ff07e58ec97a2be4311cb52",
+          "bytes": 4694,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/science_operational_fact_bridge.cpython-312.pyc",
+          "sha256": "87feb4bf52df5fcbaaa658f26ad24211aaf3fc20b871c4c87407949709be526e",
+          "bytes": 56282,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/multi_source_ground_facts.cpython-312.pyc",
+          "sha256": "a4299287c68ab27a34e2e27e5a205d4d465d5e86a0024a8b71a33e0d44f5a7f2",
+          "bytes": 105854,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/offline_replay_nowcast_runner.cpython-312.pyc",
+          "sha256": "10e1a8157e3f96609ee65f23d607c824257252ad9a127441edd9747f01321e36",
+          "bytes": 46016,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/offline_replay_acceptance.cpython-312.pyc",
+          "sha256": "99c5f413620cda6dddf2ce194432b8d1bfcd3cd7ae13b4060d7a1e8c055072db",
+          "bytes": 68072,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/acquisition_source_reclamation_views.cpython-312.pyc",
+          "sha256": "26acb8dfd16857dd45bf6585dd5ded03d697b663ea12cd9284d877e7cfb9d35f",
+          "bytes": 7518,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/blitzortung_raw_ingress.cpython-312.pyc",
+          "sha256": "f231e3a5dbd99392974b9e7cf327933a6516d301d49023753ca69aab762bde8b",
+          "bytes": 17659,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/hard_decoder_isolation.cpython-312.pyc",
+          "sha256": "d2d4d6663de4238875760a7df8df10be1fa4d529b8b4da6aad3e63a7fd2b9316",
+          "bytes": 73996,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/worker_first_runtime.cpython-312.pyc",
+          "sha256": "6ff485524354e8b19fdc8c7d31bbdf0bf3167d42cfdd78a4d4b6da6cb9184c2c",
+          "bytes": 78641,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_observation.cpython-312.pyc",
+          "sha256": "ba4bbb01b2d8f997608ca21e2ba777700732a892c14b79f2052698b30deb9f0e",
+          "bytes": 12985,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_regional_radar_runtime.cpython-312.pyc",
+          "sha256": "ee526925f25a150069750dc18a6f0fccaa15c052afdc976cf54f3b05208a55df",
+          "bytes": 9166,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/acquisition_control_reclamation.cpython-312.pyc",
+          "sha256": "1c8c370ed01663c458af609efeb1d7450276ee412091af8947ebc5391de0f4e6",
+          "bytes": 138542,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/acquisition_consumer_registry.cpython-312.pyc",
+          "sha256": "5ae6806d9c5bade1b3ec8e2110064474e68b0f63e92b5c67c777bf103cc003a2",
+          "bytes": 124192,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/acquisition_source_reclamation_protocol.cpython-312.pyc",
+          "sha256": "deb119d081964e893111f82614d9d8c69612f81b1cd850c07571d749e1814ab0",
+          "bytes": 70008,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/completion_output_archive_adapters.cpython-312.pyc",
+          "sha256": "a20e9bb920a3f85babc422253603585178cbd358204fcb51c355b55e4e920b07",
+          "bytes": 69252,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/raw_capture_reclamation_controller.cpython-312.pyc",
+          "sha256": "c578a5b846cfee44eaaa884acec9df7729a2165944f624c5f2420928fafc23e4",
+          "bytes": 56348,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/native_capture.cpython-312.pyc",
+          "sha256": "26512bc09313f7372ca6e3d0f946e4edb823b2eb906d8d26d1f4b1d78585cd78",
+          "bytes": 11338,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/dwd_rv_native.cpython-312.pyc",
+          "sha256": "53fcd1eaf4698422ec01e026c18485b1cb474b6b393f071d1084c5b58a495f30",
+          "bytes": 13982,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/satellite_radar.cpython-312.pyc",
+          "sha256": "2c0611c9597b916ca9bfe6a752a4264639aa06560cdd1538a45bbbff75b1d09b",
+          "bytes": 43617,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/netatmo_ground_decoder.cpython-312.pyc",
+          "sha256": "0e6c3636f030e1cb013dcc915dad1916381b9eb7053eae4ff7e6443f4de85079",
+          "bytes": 50397,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/dwd_rv_observation_replay.cpython-312.pyc",
+          "sha256": "f7c06274096771466b1a1ef7de703f03512c151f103eafcc353d32597b527a2d",
+          "bytes": 26115,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/artifacts.cpython-312.pyc",
+          "sha256": "c7039533eb1a322caa26aa429e776a0946064147e2152f06d3c7140248e8ef22",
+          "bytes": 9137,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/multi_source_nowcast_snapshot.cpython-312.pyc",
+          "sha256": "01e5eb850667b632168d1dedcd8a7e7c820a60870b2fb637fec00d6f2ca32bff",
+          "bytes": 15372,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/raw_manifest_audit_completion_consumer.cpython-312.pyc",
+          "sha256": "bd203addecce53404848b19709cc7f88eeddd6c1dbd29b9c451964c643a5fb8e",
+          "bytes": 126188,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/certified_shadow_fact_pipeline.cpython-312.pyc",
+          "sha256": "1ced41c22815fb48fbeccb1df17dd246e558573dd097c631de4b054b5c54521b",
+          "bytes": 73505,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/science_shadow_dwd_roi_export.cpython-312.pyc",
+          "sha256": "9f4bd36670723170ccecd98abb8c9e6c9dc77e6ffd7ef0e3650bde886b883ec7",
+          "bytes": 24291,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/worker_cutover_manifest.cpython-312.pyc",
+          "sha256": "705206e36424b99cb621a7424454f05226db8d6d9889df44081f91abac7905ee",
+          "bytes": 18920,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/opera.cpython-312.pyc",
+          "sha256": "9b6cd5819bb40f81b201dbe071da8d2939d67faea7b1dde0f81eefb9656a51c5",
+          "bytes": 24208,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/operational_fact_store.cpython-312.pyc",
+          "sha256": "9702d800dda358e2efb27abbcdd938833c28a363fd7e899518b45a5c1a08146d",
+          "bytes": 59411,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_station_bootstrap.cpython-312.pyc",
+          "sha256": "041c1f41adfa642a570bc0c8c01bacfedbf0b38df3178133265cdef4497d7964",
+          "bytes": 29743,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/knmi_rtcor_completion_consumer.cpython-312.pyc",
+          "sha256": "8824bab4a879c67a00c4aed739a2a93845881a928a8bd7e62c1991e948967623",
+          "bytes": 131685,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/acquisition_scheduler_bridge.cpython-312.pyc",
+          "sha256": "d76ed71f20a8b2092100cf9ca2d91bf0445ee160782d745b43e7258e2e94ea69",
+          "bytes": 22879,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_ground_validation.cpython-312.pyc",
+          "sha256": "2ada211238632411cef1a69ed61dd7f0fe1d564032de246d307fd7c2384be832",
+          "bytes": 12560,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/calibration.cpython-312.pyc",
+          "sha256": "438a03c9231abf5880054554535871b59e42021c65c8db98197d0d507d745976",
+          "bytes": 4846,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/noaa_err_quantitative.cpython-312.pyc",
+          "sha256": "323505c40a9dbd4fdc06b2b84b0b49c493972c09a4ba340e2c13b0ca15b565ef",
+          "bytes": 94243,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/ground_fusion_shadow_runtime.cpython-312.pyc",
+          "sha256": "40daa0b5ae318911c5cd8dd795163a45762be9b9b9b4997fdfbdc1fa99f2c09e",
+          "bytes": 190944,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/radflood21_validation_contract.cpython-312.pyc",
+          "sha256": "d1f845d64144733f4d170fe48304d1f5f5c0baae3d92469ec719d11181654e9e",
+          "bytes": 34833,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/noaa_err_completion_consumer.cpython-312.pyc",
+          "sha256": "4d839d3beab70e3852a1b0eb4b0a15dbb9332657acdbd516648fa68d7f3f86da",
+          "bytes": 165223,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/science_shadow_dwd_replay.cpython-312.pyc",
+          "sha256": "b0600da7fa558519d5896c3d18f76a4a8be5dda0dca99ea9bc89088a185ef01f",
+          "bytes": 53632,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/desired_state.cpython-312.pyc",
+          "sha256": "eff871016ede1956a53a3205df72c2cb43da0aee6a9864530e29b586fa9efe90",
+          "bytes": 51946,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/openmeteo_operational_guidance.cpython-312.pyc",
+          "sha256": "0c02d193b4180cff7770d1fa0db4332a5f1417fa6cd3968b42f2de2982f3b240",
+          "bytes": 21762,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/metar_survey_cli.cpython-312.pyc",
+          "sha256": "4cf9af2a32ea725ed503dfa51aceef74b5e5ea0be6da75e48253c736c4c92ab1",
+          "bytes": 12814,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/raw_artifacts.cpython-312.pyc",
+          "sha256": "928ab304dded15d26d3b307c55ad954a6bc7999c4ada3d5c8c73f1dec3cd5bcd",
+          "bytes": 377810,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_radar_overlay.cpython-312.pyc",
+          "sha256": "0468faea3fefd49f9bbaf60947a5da402456464fe05dd775b97fc5c50008f6d4",
+          "bytes": 7134,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/radar_cycle_store.cpython-312.pyc",
+          "sha256": "40af4865c0a56d8c9c26ee3114850345665d4b3ed716c592636f69ed104d5b4a",
+          "bytes": 84418,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/worker_first_service_activation.cpython-312.pyc",
+          "sha256": "e38c28fa366926295c24cfe879a4e52d47082095393751d3763043bca2c8a4d1",
+          "bytes": 22650,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/synop_survey_cli.cpython-312.pyc",
+          "sha256": "1c434ab13c3017411109cd3b94ad12bf2c82a4adfb51448f930eba159e64db01",
+          "bytes": 8467,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_footprint_forecast.cpython-312.pyc",
+          "sha256": "96dde9571065d7478d07e9c5c307a6cb1da6e88ab5c68bc7235bd6b06340680b",
+          "bytes": 14418,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/replay.cpython-312.pyc",
+          "sha256": "a26d50798ed4337b7af1a5668a580276029160bf5d493f3043cc78274c736cf1",
+          "bytes": 14774,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/knmi_rtcor_quantitative.cpython-312.pyc",
+          "sha256": "5036ef0ec328665291ad6a36eef65f07d0a237722bf69d9c8d2b119c7dd74c96",
+          "bytes": 93864,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/operational_snapshot_runtime.cpython-312.pyc",
+          "sha256": "c5c2be50ea2f5c1b35d70d518b76a88f2689be73e87977d1dd29c2de1c820984",
+          "bytes": 33576,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/motion.cpython-312.pyc",
+          "sha256": "8e5c7007177711f680c1c4989dd3d6f3b1292f3a8ae9cc2056016494e4b296d8",
+          "bytes": 29518,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/operational_fact_revision.cpython-312.pyc",
+          "sha256": "d480bc12c9cc70c972c8eeebc7a56922aa883c130d7b96faeec9d468d12186eb",
+          "bytes": 30198,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_regional_radar_fusion.cpython-312.pyc",
+          "sha256": "a28acdfc6b7884f5123da4378c4760eb238663e71f8d1b7fe034b238acbdfce5",
+          "bytes": 34309,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/metar_ground_shadow_factory.cpython-312.pyc",
+          "sha256": "874ab4918f1d93ff7b2920369d4d3095acaa24322ecd0ef69cf8bebe758b3335",
+          "bytes": 54137,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/radar_frame.cpython-312.pyc",
+          "sha256": "55f115f3a98a16f5ea110f258e8321ef2ab73619c16a076ea1f3b5983aa9de2e",
+          "bytes": 14035,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/canonical_evidence_store.cpython-312.pyc",
+          "sha256": "3c81ccf0bebe20639d3a98f0094751e5e90b1a9ea963384d2f336ec31aca9b8e",
+          "bytes": 81567,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/operational_snapshot_store.cpython-312.pyc",
+          "sha256": "5acc47fa3f361cff673ae67f098bd22d75463dd5c95cda8251d448c7514b3f29",
+          "bytes": 69849,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/calibration_corpus.cpython-312.pyc",
+          "sha256": "c78352d16b253f7399fc61753784562f2d2fbf9f55b113e6df81bdebafa6f5e3",
+          "bytes": 53072,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/synoptic_native.cpython-312.pyc",
+          "sha256": "8934ce61cb3aed6269c9ec144976eaea50d5253aaf485c983e7a2acd4453aec2",
+          "bytes": 74518,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/met_office_rate_completion_consumer.cpython-312.pyc",
+          "sha256": "ead4db52f31076c5ced20844be61da150bbe6b053dee263533e8bc48767dfc7f",
+          "bytes": 141826,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/worker_only_service_runtime.cpython-312.pyc",
+          "sha256": "05fb1c932e85f79f285cdc954a5cbb7968bfd09943464c1e85464f699b47b84a",
+          "bytes": 95266,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/analysis_grid_transform.cpython-312.pyc",
+          "sha256": "b61047e1c4e6dc56f761f5889d2b3730c882d17c5e6c9c82e6f468a821679a8c",
+          "bytes": 90889,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/validation_corpus.cpython-312.pyc",
+          "sha256": "c2441bf1efa669bf6a069e01393282d964e03b58670da24006aad0f9910bb926",
+          "bytes": 41973,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_provider_runtime.cpython-312.pyc",
+          "sha256": "087723a2270c57dfcbd6a854f8abbaf4b35e65288f2387df3ab9d23703b00bf1",
+          "bytes": 10120,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/completion_output_archive.cpython-312.pyc",
+          "sha256": "6d3cb62fe276fd56ae3812592803bf9db1aba9dc4aa8115fd0a6af9ddb50faa5",
+          "bytes": 81433,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/ground_coverage.cpython-312.pyc",
+          "sha256": "d5313cf4894e9f4693d9999dc8fae83e1c3b8c76afe039ca3b8bc7f5e7a76667",
+          "bytes": 5498,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/worker_only_ground_processing.cpython-312.pyc",
+          "sha256": "4e554c737c91ba29c4984b8b45267036259002721fe16697199b7d3374b63520",
+          "bytes": 5105,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/kmi_opendata_raw.cpython-312.pyc",
+          "sha256": "a1077090b5f38bab916d45817a1499bb31c499ebf237b868df6ba7064ac11f6b",
+          "bytes": 47675,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/calibration_stage.cpython-312.pyc",
+          "sha256": "9210cc98c4698e69f6dab2e8105e6d27397fc9626331dea1033e00b1445875ef",
+          "bytes": 45507,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/lightning.cpython-312.pyc",
+          "sha256": "7ae964b3dbd71299c0528f46d0039c03fb51d7919b6adf1b32c3a8800f485555",
+          "bytes": 18521,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_radar_tracking.cpython-312.pyc",
+          "sha256": "74f8c0dd7ef195a1a48d2a5d1d0e283913277f96cb56f560a67aa43b7596672a",
+          "bytes": 18951,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_region_planner.cpython-312.pyc",
+          "sha256": "30823951ccca6a1a504c278f08850d73f46c316f578d8f2a72f04a1f3886ed1c",
+          "bytes": 23423,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/acquisition_runtime.cpython-312.pyc",
+          "sha256": "2558ab3516346d4b429ad7b62d9b51485855e281402c75416f488790c505778a",
+          "bytes": 100183,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_postgis.cpython-312.pyc",
+          "sha256": "7fc826d61fd26a2a4f572d44dec2ea5a37e4611456d6628b530c1d149f016e7f",
+          "bytes": 44292,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/acquisition_capture_recovery.cpython-312.pyc",
+          "sha256": "aaa8edbc91321b07ba9990db2e9d5ed75ae7a17c5581e08a866a7fbfa970cb45",
+          "bytes": 171761,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/opera_native.cpython-312.pyc",
+          "sha256": "a315a53f8cc1b1fc3954eef845d918c52f1eddcc5af7b83791c9f88206938937",
+          "bytes": 127897,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/science_shadow_process_isolation.cpython-312.pyc",
+          "sha256": "7aff0a7dd040036b337673dc1165a7087d55aca7a8fe388508ad510c6f922ccd",
+          "bytes": 48524,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/noaa_err_native.cpython-312.pyc",
+          "sha256": "e57e838d4c07e77074012f2e827963ac8d5d27bbe78ec0298fad32137d3e1b79",
+          "bytes": 71000,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/thin_replay.cpython-312.pyc",
+          "sha256": "e3f0cc4e929c8cdb6eace7fab79034f02b6acbcc38e7447f8bcd2b5ba038cd99",
+          "bytes": 41562,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/canonical_ground_evidence_store.cpython-312.pyc",
+          "sha256": "0b6a8ac0cdffeafb46d7220312a990759dd72b81eaddc4757fc02b550543073d",
+          "bytes": 112965,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/worker_only_cell_tracking.cpython-312.pyc",
+          "sha256": "c69cb2b069c91d343ac771d1002677a2c6f0c9dd3015c574f81126bfd637812b",
+          "bytes": 92642,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/cpu_limited_launcher.cpython-312.pyc",
+          "sha256": "f58584c4232256a2eabcce128b3c07dc8003bd502e373c2374d720456f60e85e",
+          "bytes": 9712,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/dwd_acquisition_completion_bridge.cpython-312.pyc",
+          "sha256": "42299600812af811bbde59998000cdd5200d9154e855de9a5022d8c393f4b181",
+          "bytes": 12616,
+          "reason": "generated_python_bytecode_not_source"
+        },
+        {
+          "path": "storm_tracker_worker/__pycache__/acquisition_query_authority.cpython-312.pyc",
+          "sha256": "1f4debc34f01c1e522c2f232ba6052c992537d42c0d4f4298aa3b4e0e1badecc",
+          "bytes": 62223,
+          "reason": "generated_python_bytecode_not_source"
         }
       ]
     }

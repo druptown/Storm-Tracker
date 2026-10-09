@@ -488,11 +488,32 @@ class ThinMqttService:
             return
         payload = bytes(message.payload)
         incoming_topic = str(message.topic)
-        self._loop.call_soon_threadsafe(
-            lambda: asyncio.create_task(self.handle_message(incoming_topic, payload))
-        )
+        # Paho invokes this callback on its own network thread.  Process the
+        # bounded control envelope there so a CPU-heavy fusion/nowcast section
+        # on the asyncio loop cannot make a desired-state request expire.
+        # Runtime state replacement is atomic and each weather cycle captures
+        # its state once at the start, so the new state applies next cycle.
+        self._handle_message(incoming_topic, payload)
 
     async def handle_message(self, incoming_topic: str, payload: bytes | str) -> None:
+        """Compatibility wrapper for direct async callers and unit tests."""
+
+        self._handle_message(incoming_topic, payload)
+
+    def _wake_cycle(self) -> None:
+        loop = self._loop
+        if loop is None:
+            return
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is loop:
+            self._wake.set()
+        else:
+            loop.call_soon_threadsafe(self._wake.set)
+
+    def _handle_message(self, incoming_topic: str, payload: bytes | str) -> None:
         if incoming_topic != topic(self.topic_root, "jobs/request"):
             return
         request: dict[str, Any] | None = None
@@ -519,7 +540,7 @@ class ThinMqttService:
                 result = self.runtime.apply_desired_state(values["desired_state"])
                 if self.lightning_feed is not None:
                     self.lightning_feed.update_targets(self.runtime.targets)
-                self._wake.set()
+                self._wake_cycle()
             elif job_type == "geojson_operational":
                 result = {"collection": self.runtime.geojson_collection()}
             elif job_type == "ping":
