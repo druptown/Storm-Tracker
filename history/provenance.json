@@ -2,14 +2,14 @@
   "kind": "recovered_archive_source",
   "component": "integration",
   "version": "1.14.110",
-  "source_id": "af2f9e54b4d3707a55f493170ea67ead6b6bd6faea0d2657459fb8262919c0bf",
+  "source_id": "fe618ba6fb64490f77405a7aa84b4884ad5dc2daafa5b0ec8a083d83c8fa7e8d",
   "recovered_on": "2026-10-09",
   "files": [
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "a825cf895099f8aabbda1e5676aa23455168affb79edc1deec84ad307e2cea1a",
-      "size": 268462
+      "sha256": "9afbc1eaf6ec940352a4b4587331be0867988e05020721621e230a94a33ce439",
+      "size": 268460
     },
     {
       "path": "config_flow.py",
@@ -711,11 +711,63 @@
   "artifacts": [
     {
       "filename": "storm_tracker_v3_v1.14.110_deploy.zip",
-      "archive_sha256": "9686b7fec452b6671913450f73a6480f9b6ee8739b9c3e6dec0b9d5157821296",
-      "bytes": 679633,
+      "archive_sha256": "b13765674db464b9fe1d4a03b28ebfa32fc8e8f9c6053bdf55afc41afe67543b",
+      "bytes": 679630,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.110_worker_v1.17.128_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.110_worker_v1.18.0_evidence.json",
+          "archive_and_source_match": true
+        },
+        {
+          "manifest": "storm_tracker_release_v1.14.110_worker_v1.18.0_evidence.json",
+          "archive_and_source_match": true
+        },
+        {
+          "manifest": "storm_tracker_release_v1.14.110_worker_v1.18.0_evidence.json",
+          "archive_and_source_match": true
+        },
+        {
+          "manifest": "storm_tracker_release_v1.14.110_worker_v1.18.0_evidence.json",
+          "archive_and_source_match": true
+        },
+        {
+          "manifest": "storm_tracker_release_v1.14.110_worker_v1.18.0_evidence.json",
+          "archive_and_source_match": true
+        },
+        {
+          "manifest": "storm_tracker_release_v1.14.110_worker_v1.18.0_evidence.json",
+          "archive_and_source_match": true
+        },
+        {
+          "manifest": "storm_tracker_release_v1.14.110_worker_v1.18.0_evidence.json",
+          "archive_and_source_match": true
+        },
+        {
+          "manifest": "storm_tracker_release_v1.14.110_worker_v1.18.0_evidence.json",
+          "archive_and_source_match": true
+        },
+        {
+          "manifest": "storm_tracker_release_v1.14.110_worker_v1.18.0_evidence.json",
+          "archive_and_source_match": true
+        },
+        {
+          "manifest": "storm_tracker_release_v1.14.110_worker_v1.18.0_evidence.json",
+          "archive_and_source_match": true
+        },
+        {
+          "manifest": "storm_tracker_release_v1.14.110_worker_v1.18.0_evidence.json",
+          "archive_and_source_match": true
+        },
+        {
+          "manifest": "storm_tracker_release_v1.14.110_worker_v1.18.0_evidence.json",
+          "archive_and_source_match": true
+        },
+        {
+          "manifest": "storm_tracker_release_v1.14.110_worker_v1.18.0_evidence.json",
+          "archive_and_source_match": true
+        },
+        {
+          "manifest": "storm_tracker_release_v1.14.110_worker_v1.18.0_evidence.json",
           "archive_and_source_match": true
         }
       ]
