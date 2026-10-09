@@ -823,6 +823,10 @@ class SnapshotWorkerStatusSensor(SnapshotOnlySensorEntity):
                 kind=_KIND_WORKER,
             ),
         )
+        # Preserve the public entity identity used by the legacy runtime and
+        # existing dashboards.  Worker-only and legacy are mutually exclusive,
+        # so the active implementation can safely take over this registry row.
+        self._attr_unique_id = "stv3_worker_status"
 
 
 class SnapshotHomePrecipitationSensor(SnapshotOnlySensorEntity):
