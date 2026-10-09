@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -29,7 +30,7 @@ from .tracking_core.operational_snapshot import encode_control_envelope
 
 
 _LOGGER = logging.getLogger(__name__)
-WORKER_VERSION = "1.18.0"
+WORKER_VERSION = "1.18.1"
 
 
 class ThinMqttService:
@@ -57,6 +58,7 @@ class ThinMqttService:
         self._last_snapshot_revision = 0
         self._last_error: str | None = None
         self._last_cycle_summary: tuple[Any, ...] | None = None
+        self._last_geojson_summary: tuple[int, int] | None = None
 
     def _heartbeat(self, state: str = "online") -> bytes:
         return encode(envelope(
@@ -202,6 +204,32 @@ class ThinMqttService:
                     qos=1,
                     retain=True,
                 )
+                geojson_payload = json.dumps(
+                    self.runtime.geojson_collection(),
+                    allow_nan=False,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+                if len(geojson_payload) > 900_000:
+                    raise ValueError("geojson_payload_too_large")
+                self.client.publish(
+                    topic(self.topic_root, "operational/geojson"),
+                    geojson_payload,
+                    qos=1,
+                    retain=True,
+                )
+                geojson_summary = (
+                    len(self.runtime.geojson_collection().get("features", [])),
+                    len(geojson_payload),
+                )
+                if geojson_summary != self._last_geojson_summary:
+                    _LOGGER.info(
+                        "Dunne kaart gepubliceerd: features=%d bytes=%d",
+                        geojson_summary[0],
+                        geojson_summary[1],
+                    )
+                    self._last_geojson_summary = geojson_summary
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -249,6 +277,8 @@ class ThinMqttService:
                 if self.lightning_feed is not None:
                     self.lightning_feed.update_targets(self.runtime.targets)
                 self._wake.set()
+            elif job_type == "geojson_operational":
+                result = {"collection": self.runtime.geojson_collection()}
             elif job_type == "ping":
                 result = {"pong": True}
             else:

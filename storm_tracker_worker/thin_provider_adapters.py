@@ -25,6 +25,7 @@ OPERA_LISTING_ENDPOINT = "https://s3.waw3-1.cloudferro.com/openradar-24h/"
 OPERA_OBJECT_BASE = "https://s3.waw3-1.cloudferro.com/openradar-24h"
 METAR_ENDPOINT = "https://aviationweather.gov/api/data/metar"
 NETATMO_ENDPOINT = "https://api.netatmo.com/api/getpublicdata"
+MAX_OPERA_SPATIAL_CELLS = 64
 
 
 class ProviderBlocked(RuntimeError):
@@ -582,7 +583,7 @@ def _decode_opera_targets(
                 spatial.values(),
                 key=lambda item: item.value,
                 reverse=True,
-            )[:256]
+            )[:MAX_OPERA_SPATIAL_CELLS]
         )
     return tuple(observations)
 

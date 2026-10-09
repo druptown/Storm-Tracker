@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import math
 import time
 from typing import Any, Callable, Mapping
 
@@ -11,7 +13,7 @@ from .thin_fusion import FusionCycle, fuse_observations
 from .thin_nowcast import ThinNowcast, ThinNowcastRuntime
 from .thin_postgis import PostGISWriteResult
 from .thin_provider_catalog import PROVIDERS, build_due_requests
-from .tracking_core.operational_snapshot import validate_snapshot
+from .tracking_core.operational_snapshot import MAX_UI_STORM_SUMMARIES, validate_snapshot
 
 
 SNAPSHOT_TTL_SECONDS = 120.0
@@ -43,6 +45,25 @@ class ThinCycleResult:
 
 def _collection(items: list[dict[str, Any]]) -> dict[str, Any]:
     return {"complete": True, "overflow_count": 0, "items": items}
+
+
+def _storm_collection(items: list[dict[str, Any]]) -> dict[str, Any]:
+    """Keep the strongest cells within the existing HA snapshot contract."""
+    overflow = max(0, len(items) - MAX_UI_STORM_SUMMARIES)
+    retained = sorted(
+        items,
+        key=lambda item: (
+            item.get("max_dbz") is not None,
+            float(item.get("max_dbz") or -100.0),
+        ),
+        reverse=True,
+    )[:MAX_UI_STORM_SUMMARIES]
+    retained.sort(key=lambda item: item["storm_id"])
+    return {
+        "complete": overflow == 0,
+        "overflow_count": overflow,
+        "items": retained,
+    }
 
 
 class ThinOperationalRuntime:
@@ -77,6 +98,16 @@ class ThinOperationalRuntime:
             int(float(self._clock())) - SNAPSHOT_REVISION_EPOCH_SECONDS,
         )
         self._failed_cycles = 0
+        self._latest_geojson: dict[str, Any] = {
+            "type": "FeatureCollection",
+            "features": [],
+            "metadata": {
+                "schema_version": 1,
+                "feature_count": 0,
+                "state": "waiting_for_first_cycle",
+                "builder": "thin_worker",
+            },
+        }
 
     @property
     def has_state(self) -> bool:
@@ -85,6 +116,10 @@ class ThinOperationalRuntime:
     @property
     def targets(self) -> tuple[Any, ...]:
         return () if self._state is None else self._state.targets
+
+    def geojson_collection(self) -> dict[str, Any]:
+        """Return a detached, bounded map derived from the latest nowcast."""
+        return json.loads(json.dumps(self._latest_geojson, allow_nan=False))
 
     def claim_authority(self, producer_id: str, claim_id: str) -> dict[str, Any]:
         producer = str(producer_id).strip()
@@ -202,6 +237,7 @@ class ThinOperationalRuntime:
             target_ids=tuple(item.target_id for item in state.targets if item.available),
         )
         nowcast = self._nowcast.advance(fusion)
+        self._latest_geojson = self._build_geojson(fusion, nowcast)
         if self._postgis is None:
             postgis = PostGISWriteResult(
                 status="disabled",
@@ -215,6 +251,122 @@ class ThinOperationalRuntime:
         self._revision += 1
         snapshot = self._build_snapshot(fusion, nowcast, postgis)
         return ThinCycleResult(snapshot=snapshot, fusion=fusion, nowcast=nowcast, postgis=postgis)
+
+    def _build_geojson(
+        self,
+        fusion: FusionCycle,
+        nowcast: ThinNowcast,
+    ) -> dict[str, Any]:
+        assert self._state is not None
+        features: list[dict[str, Any]] = []
+        region_id = "thin-operational"
+        for target in self._state.targets:
+            if not target.available:
+                continue
+            features.append({
+                "type": "Feature",
+                "id": f"target:{target.target_id}",
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [target.longitude, target.latitude],
+                },
+                "properties": {
+                    "layer": "target",
+                    "target_id": target.target_id,
+                    "name": target.display_name,
+                    "available": True,
+                    "primary": target.kind == "home",
+                    "radar_covered": True,
+                    "region_engine": region_id,
+                },
+            })
+
+        for cell in nowcast.storm_cells[:64]:
+            geometry = json.loads(json.dumps(dict(cell.geometry), allow_nan=False))
+            features.append({
+                "type": "Feature",
+                "id": f"cell:{cell.cell_id}",
+                "geometry": geometry,
+                "properties": {
+                    "layer": "radar_cell",
+                    "engine_id": region_id,
+                    "storm_id": cell.cell_id,
+                    "intensity": cell.precipitation_rate_mm_h,
+                    "max_dbz": cell.reflectivity_dbz,
+                    "radar_level": cell.radar_level,
+                    "speed_kmh": cell.speed_kmh,
+                    "heading_deg": cell.heading_deg,
+                    "provider_id": cell.provider_id,
+                    "observed_at": cell.observed_at,
+                },
+            })
+            if cell.heading_deg is None or cell.speed_kmh < 0.5:
+                continue
+            hours = 1.0
+            latitude_delta = cell.velocity_north_kmh * hours / 110.574
+            longitude_delta = cell.velocity_east_kmh * hours / (
+                111.320 * max(0.05, abs(math.cos(math.radians(cell.latitude))))
+            )
+            features.append({
+                "type": "Feature",
+                "id": f"motion:{cell.cell_id}",
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [
+                        [cell.longitude, cell.latitude],
+                        [cell.longitude + longitude_delta, cell.latitude + latitude_delta],
+                    ],
+                },
+                "properties": {
+                    "layer": "motion",
+                    "engine_id": region_id,
+                    "storm_id": cell.cell_id,
+                    "minutes": 60,
+                    "speed_kmh": cell.speed_kmh,
+                    "heading_deg": cell.heading_deg,
+                    "motion_model": "linear",
+                },
+            })
+
+        lightning_count = 0
+        for index, observation in enumerate(fusion.observations):
+            if observation.kind.value != "lightning_strike" or lightning_count >= 300:
+                continue
+            features.append({
+                "type": "Feature",
+                "id": f"lightning:{observation.observed_at:.3f}:{index}",
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [observation.longitude, observation.latitude],
+                },
+                "properties": {
+                    "layer": "lightning",
+                    "engine_id": region_id,
+                    "source": observation.provider_id,
+                    "timestamp": observation.observed_at,
+                    "age_seconds": max(
+                        0,
+                        round(fusion.evaluated_at - observation.observed_at),
+                    ),
+                },
+            })
+            lightning_count += 1
+
+        return {
+            "type": "FeatureCollection",
+            "features": features,
+            "metadata": {
+                "schema_version": 1,
+                "feature_count": len(features),
+                "radar_cells_included": len(nowcast.storm_cells[:64]),
+                "radar_cells_total": len(nowcast.storm_cells),
+                "lightning_events_included": lightning_count,
+                "truncated": len(nowcast.storm_cells) > 64,
+                "state": "operational",
+                "builder": "thin_worker",
+                "built_at": fusion.evaluated_at,
+            },
+        }
 
     def _build_snapshot(
         self,
@@ -290,8 +442,10 @@ class ThinOperationalRuntime:
             if result.forecast_state == "regen_op_komst" and result.eta_minutes is not None:
                 threat_state, threat_freshness = "available", "current"
                 track_id = nowcast.storm_cells[0].cell_id if nowcast.storm_cells else None
-                probability = round(max(0.0, min(1.0, result.confidence)) * 100.0, 1)
-                calibration = "diagnostic:thin-v1"
+                # Confidence currently ranks tracking evidence; it is not an
+                # empirically calibrated probability. Keep the nullable
+                # probability pair empty until calibration data exists.
+                probability = calibration = None
                 passage = "expected"
             elif result.forecast_state == "geen_dreiging" and providers:
                 threat_state, threat_freshness = "none", "current"
@@ -403,7 +557,7 @@ class ThinOperationalRuntime:
             "regions": _collection(region_items),
             "targets": _collection(target_items),
             "providers": _collection(provider_items),
-            "ui_storms": _collection(storm_items),
+            "ui_storms": _storm_collection(storm_items),
             "map_artifact": {"artifact_handle": None, "etag": None},
         }
         return validate_snapshot(snapshot)
