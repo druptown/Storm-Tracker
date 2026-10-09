@@ -204,7 +204,7 @@ class DesiredStateController:
         producer_id: str,
         boot_id: str | None = None,
         requester: WorkerRequester = async_request_worker_job,
-        authority_callback: Callable[[str | None], None] | None = None,
+        authority_callback: Callable[..., None] | None = None,
         clock: Callable[[], float] = time.time,
         debounce_seconds: float = 0.35,
         request_timeout: float = 35.0,
@@ -254,6 +254,7 @@ class DesiredStateController:
         self._last_issued_at = 0.0
         self._last_applied_at: float | None = None
         self._lease_refresh_pending = False
+        self._preserve_current_snapshot_transition = False
 
         self._started = False
         self._stopped = False
@@ -288,10 +289,18 @@ class DesiredStateController:
             MAX_DIAGNOSTIC_COUNT, self._counters[name] + 1
         )
 
-    def _notify_authority(self, value: str | None) -> None:
+    def _notify_authority(
+        self,
+        value: str | None,
+        *,
+        preserve_current_snapshot: bool = False,
+    ) -> None:
         callback = self._authority_callback
         if callback is not None:
-            callback(value)
+            callback(
+                value,
+                preserve_current_snapshot=preserve_current_snapshot,
+            )
 
     def _normalize_inputs(
         self,
@@ -456,7 +465,11 @@ class DesiredStateController:
                 self._lease_refresh_pending = False
                 self._cancel_lease_refresh()
                 self._dirty = True
-                self._notify_authority(None)
+                self._preserve_current_snapshot_transition = True
+                self._notify_authority(
+                    None,
+                    preserve_current_snapshot=True,
+                )
                 self._increment("accepted_updates")
                 self._increment("lease_refreshes")
                 return True
@@ -472,6 +485,7 @@ class DesiredStateController:
         self._semantic_sha256 = semantic_sha
         self._dirty = semantic_sha != self._published_semantic_sha256
         if self._dirty:
+            self._preserve_current_snapshot_transition = False
             self._notify_authority(None)
         self._increment("accepted_updates")
         return True
@@ -583,7 +597,11 @@ class DesiredStateController:
             return
         self._lease_refresh_pending = False
         self._dirty = True
-        self._notify_authority(None)
+        self._preserve_current_snapshot_transition = True
+        self._notify_authority(
+            None,
+            preserve_current_snapshot=True,
+        )
         self._increment("accepted_updates")
         self._increment("lease_refreshes")
         self._state = "dirty"
@@ -888,7 +906,15 @@ class DesiredStateController:
             self._schedule_lease_refresh()
         else:
             self._cancel_lease_refresh()
-        self._notify_authority(None if self._dirty else self._head.state_sha256)
+        preserve_current_snapshot = (
+            self._preserve_current_snapshot_transition and not self._dirty
+        )
+        self._notify_authority(
+            None if self._dirty else self._head.state_sha256,
+            preserve_current_snapshot=preserve_current_snapshot,
+        )
+        if not self._dirty:
+            self._preserve_current_snapshot_transition = False
         self._increment("applied_states")
         if recovered:
             self._increment("recovered_receipts")
@@ -917,6 +943,7 @@ class DesiredStateController:
                     and self._head.state_sha256 != previous_head_sha256
                 ):
                     self._dirty = True
+                    self._preserve_current_snapshot_transition = False
                     self._notify_authority(None)
             if not self._dirty:
                 self._state = "idle"

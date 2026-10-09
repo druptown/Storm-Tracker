@@ -421,12 +421,18 @@ class WorkerOnlyRuntimeCandidate:
     def _increment(self, name: str) -> None:
         self._counts[name] = min(MAX_DIAGNOSTIC_COUNT, self._counts[name] + 1)
 
-    def _snapshot_authority_changed(self, value: str | None) -> None:
+    def _snapshot_authority_changed(
+        self,
+        value: str | None,
+        *,
+        preserve_current_snapshot: bool = False,
+    ) -> None:
         """Bind snapshot acceptance to the controller's confirmed head."""
 
         mark_operational_snapshot_authority_changed(
             self._hass,
             expected_desired_state_sha256=value,
+            preserve_current_snapshot=preserve_current_snapshot,
         )
 
     def prepare(self) -> PreparedWorkerOnlyRuntime:

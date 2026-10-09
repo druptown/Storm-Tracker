@@ -873,13 +873,23 @@ def mark_operational_snapshot_authority_changed(
     hass: HomeAssistant,
     *,
     expected_desired_state_sha256: str | None,
+    preserve_current_snapshot: bool = False,
 ) -> bool:
-    """Install receiver authority and fail the prior projection closed."""
+    """Install receiver authority and normally fail the prior projection closed.
+
+    A liveness-only desired-state renewal may preserve the meteorologically
+    identical current projection until its existing validity deadline.  A
+    semantic location/settings transition must keep the default fail-closed
+    behaviour.
+    """
 
     data = hass.data.get(DOMAIN)
     if not isinstance(data, dict):
         return False
-    _cancel_timer(data, _SNAPSHOT_EXPIRY_HANDLE)
+    if type(preserve_current_snapshot) is not bool:
+        raise TypeError("preserve_current_snapshot moet bool zijn")
+    if not preserve_current_snapshot:
+        _cancel_timer(data, _SNAPSHOT_EXPIRY_HANDLE)
     previous_authority = data.get(
         "operational_snapshot_expected_desired_state_sha256"
     )
@@ -905,6 +915,13 @@ def mark_operational_snapshot_authority_changed(
         diagnostics, dict
     ):
         return False
+    if preserve_current_snapshot:
+        replayed = (
+            _apply_operational_snapshot_payload(hass, data, pending_payload)
+            if pending_payload is not None
+            else None
+        )
+        return replayed is not None
     transitioned = cache.mark_stale(
         reason="desired_state_transition", worker_state="unknown"
     )
