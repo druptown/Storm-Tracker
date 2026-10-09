@@ -87,7 +87,7 @@ class GroundStationRuntime:
             if request.regions:
                 for region in request.regions:
                     for target in region.targets:
-                        selection_id = f"{region.region_id}:{target.target_id}"
+                        selection_id = target.target_id
                         selections.setdefault(selection_id, StationSelectionRequest(
                             region_id=selection_id,
                             latitude=target.latitude,
@@ -205,6 +205,9 @@ class GroundStationRuntime:
             )
             for provider_id in self._enabled_providers
         }
+        selections_by_target = {
+            selection.region_id: selection for selection in selections
+        }
         return tuple(
             replace(
                 request,
@@ -216,6 +219,18 @@ class GroundStationRuntime:
                     and not ids_by_provider.get(request.provider_id)
                     else None
                 ),
+                station_discovery_target_ids=tuple(sorted(
+                    target.target_id
+                    for target in request.targets
+                    if request.provider_id in self._enabled_providers
+                    and target.target_id in selections_by_target
+                    and not self._selected_station_ids(
+                        inventory.values(),
+                        (selections_by_target[target.target_id],),
+                        provider_id=request.provider_id,
+                        now=now,
+                    )
+                )),
             )
             if request.provider_id in GROUND_PROVIDERS
             else request

@@ -3099,6 +3099,9 @@ class NetatmoAdapter:
         catalog_discovery = (
             request.station_selection_reason == "station_catalog_no_match"
         )
+        discovery_target_ids = set(request.station_discovery_target_ids)
+        if catalog_discovery:
+            discovery_target_ids.update(target.target_id for target in request.targets)
         if request.station_selection_reason and not catalog_discovery:
             raise ProviderBlocked(request.station_selection_reason)
         access_token = self._access_token
@@ -3109,7 +3112,7 @@ class NetatmoAdapter:
         if (
             request.station_selection_applied
             and not request.selected_station_ids
-            and not catalog_discovery
+            and not discovery_target_ids
         ):
             return ()
         observations: dict[
@@ -3169,12 +3172,6 @@ class NetatmoAdapter:
                 measures = station.get("measures", {})
                 measurements = _netatmo_measurements(measures)
                 station_id = str(station.get("_id", "unknown"))
-                if (
-                    request.station_selection_applied
-                    and not catalog_discovery
-                    and station_id.casefold() not in allowed_station_ids
-                ):
-                    continue
                 for target in group:
                     distance_km = _haversine_km(
                         latitude,
@@ -3183,6 +3180,12 @@ class NetatmoAdapter:
                         target.longitude,
                     )
                     if distance_km > local_radius_km:
+                        continue
+                    if (
+                        request.station_selection_applied
+                        and target.target_id not in discovery_target_ids
+                        and station_id.casefold() not in allowed_station_ids
+                    ):
                         continue
                     station_observations: list[NormalizedObservation] = []
                     for kind, value, unit, label in measurements:
