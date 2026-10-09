@@ -249,6 +249,8 @@ class ThinMqttService:
                 if self.lightning_feed is not None:
                     self.lightning_feed.update_targets(self.runtime.targets)
                 self._wake.set()
+            elif job_type == "geojson_operational":
+                result = {"collection": self.runtime.geojson_collection()}
             elif job_type == "ping":
                 result = {"pong": True}
             else:
