@@ -2,13 +2,13 @@
   "kind": "recovered_archive_source",
   "component": "integration",
   "version": "1.14.98",
-  "source_id": "ceaf1b403b645b37c858bd9f88888b1035ecc5add662b1991f26f1171c72bd1d",
+  "source_id": "fba378b20b9e0b434ce7326ad747e2d1b46db08b2fc8d9cfc9ab6a2ed875bdf3",
   "recovered_on": "2026-10-09",
   "files": [
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "eccaa71bfaf616910e44a74c42336e7851366b7538ac443edabb40a28679d62a",
+      "sha256": "a45e6245c38bc2fd529ffe2f17b37f5ceb56c3be1def4d887e393a23fef178d5",
       "size": 268461
     },
     {
@@ -711,11 +711,11 @@
   "artifacts": [
     {
       "filename": "storm_tracker_v3_v1.14.98_deploy.zip",
-      "archive_sha256": "6c887a928a96a2e7455815c7f2b5cc1c0da81d3798e26e88a9dcc8193311af54",
+      "archive_sha256": "fbbe0082bd07bd489fadc8d6c189ff297f85ab4abcc1e69e84706aa189838403",
       "bytes": 677807,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.98_worker_v1.17.109_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.98_worker_v1.17.110_evidence.json",
           "archive_and_source_match": true
         }
       ]
