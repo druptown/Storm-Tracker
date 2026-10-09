@@ -145,9 +145,13 @@ def _capacity_contract(
         maximum_object_bytes * 2,
     )
     global_entries = max(PRODUCTION_ENTRY_CAPACITY, required_entries * 2)
-    # Keep the removed AWN provider as storage-only ledger history. No AWN
-    # workload remains executable, so this can never schedule new AWN data.
-    providers = tuple(sorted({rule.provider_id for rule in active} | {"awn"}))
+    # Keep the removed AWN provider as storage-only ledger history.  Its
+    # immutable provider ID was ``ambientweather``; ``awn`` was only the
+    # workload/source label.  No AWN workload remains executable, so this can
+    # never schedule new AWN data.
+    providers = tuple(
+        sorted({rule.provider_id for rule in active} | {"ambientweather"})
+    )
     return (
         RawCapacityProfile(
             global_max_bytes=global_bytes,
@@ -260,7 +264,7 @@ def _previous_awn_payload(config: RawCaptureServiceConfig) -> bytes:
     awn_providers = [
         item
         for item in providers
-        if isinstance(item, dict) and item.get("provider") == "awn"
+        if isinstance(item, dict) and item.get("provider") == "ambientweather"
     ]
     if (
         not isinstance(global_max_bytes, int)
