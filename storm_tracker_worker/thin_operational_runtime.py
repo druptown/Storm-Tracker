@@ -597,7 +597,10 @@ class ThinOperationalRuntime:
         state: DesiredState,
         region_plan: ThinRegionPlan,
     ) -> dict[str, Any]:
-        evaluated_at = float(fusion.evaluated_at)
+        # The PostGIS projection can take longer than the snapshot TTL for a
+        # large first cycle.  Start the control-plane validity window when the
+        # completed cycle is published, not when fusion began.
+        evaluated_at = float(self._clock())
         observations = fusion.observations
         product_valid_at = max((item.observed_at for item in observations), default=None)
         received_at = max((item.received_at for item in observations), default=None)
