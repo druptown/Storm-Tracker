@@ -561,6 +561,20 @@ def _compact_worker_status(status: dict, current: dict, *, now: float) -> dict:
             compact["acquisition_parallel_last_unhealthy_reasons"] = parallel[
                 "last_unhealthy_reasons"
             ]
+        for key in (
+            "tracking_active_tracks",
+            "tracking_tracked_tracks",
+            "tracking_motion_ready_tracks",
+            "tracking_region_count",
+            "tracking_shadow_arrival_candidates",
+            "tracking_shadow_future_arrivals",
+        ):
+            value = _bounded_worker_counter(runtime.get(key))
+            if value is not None:
+                compact[key] = value
+        tracking_status = runtime.get("tracking_shadow_arrival_status")
+        if tracking_status == "shadow_candidate_unadmitted":
+            compact["tracking_shadow_arrival_status"] = tracking_status
     return compact
 
 

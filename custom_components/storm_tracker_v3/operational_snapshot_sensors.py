@@ -307,6 +307,12 @@ def _worker_runtime_attribute_projection(hass: Any) -> dict[str, Any]:
         "acquisition_parallel_lane_limit",
         "acquisition_parallel_maximum_lanes",
         "acquisition_parallel_last_batch_jobs",
+        "tracking_active_tracks",
+        "tracking_tracked_tracks",
+        "tracking_motion_ready_tracks",
+        "tracking_region_count",
+        "tracking_shadow_arrival_candidates",
+        "tracking_shadow_future_arrivals",
     ):
         value = status.get(key)
         if (
@@ -344,6 +350,9 @@ def _worker_runtime_attribute_projection(hass: Any) -> dict[str, Any]:
         projection["acquisition_parallel_last_unhealthy_reasons"] = list(
             parallel_reasons
         )
+    tracking_status = status.get("tracking_shadow_arrival_status")
+    if tracking_status == "shadow_candidate_unadmitted":
+        projection["tracking_shadow_arrival_status"] = tracking_status
     postgis_enabled = status.get("postgis_projection_enabled")
     if isinstance(postgis_enabled, bool):
         projection["postgis_projection_enabled"] = postgis_enabled
