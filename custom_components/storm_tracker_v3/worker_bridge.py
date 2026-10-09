@@ -7,6 +7,7 @@ import gzip
 import json
 import logging
 import math
+import re
 import time
 import uuid
 from datetime import timedelta
@@ -48,6 +49,8 @@ MAX_MQTT_MESSAGE_BYTES = 900_000
 MAX_DIAGNOSTIC_TEXT_CHARS = 160
 MAX_DIAGNOSTIC_COUNT = 1_000_000_000
 _LIVE_WORKER_STATES = frozenset({"online", "busy", "degraded"})
+_SAFE_WORKER_ERROR_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,95}")
+_SAFE_WORKER_REASON_CODE = re.compile(r"[a-z][a-z0-9_]{0,95}")
 _SNAPSHOT_EXPIRY_HANDLE = "_operational_snapshot_expiry_handle"
 _WORKER_STALE_HANDLE = "_worker_stale_handle"
 _PENDING_OPERATIONAL_SNAPSHOT_PAYLOAD = (
@@ -108,6 +111,22 @@ def _bounded_diagnostic_text(error: Exception) -> str:
     """Collapse an exception to one small line without retaining its payload."""
     text = " ".join(str(error).split())
     return text[:MAX_DIAGNOSTIC_TEXT_CHARS]
+
+
+def _worker_job_error(status: dict) -> str:
+    """Expose only fixed worker error tokens and secret-free reason codes."""
+
+    error = status.get("error")
+    if not isinstance(error, str) or _SAFE_WORKER_ERROR_TOKEN.fullmatch(error) is None:
+        error = "geen_detail"
+    detail = status.get("error_detail")
+    if (
+        isinstance(detail, str)
+        and _SAFE_WORKER_REASON_CODE.fullmatch(detail) is not None
+        and detail != error
+    ):
+        return f"{error}: {detail}"
+    return error
 
 
 def _increment_diagnostic(diagnostics: dict, key: str) -> None:
@@ -947,7 +966,7 @@ async def async_setup_worker_bridge(hass: HomeAssistant) -> None:
         elif state in {"failed", "expired", "cancelled"}:
             future.set_exception(
                 RuntimeError(
-                    f"Workerjob {state}: {status.get('error') or 'geen detail'}"
+                    f"Workerjob {state}: {_worker_job_error(status)}"
                 )
             )
 
