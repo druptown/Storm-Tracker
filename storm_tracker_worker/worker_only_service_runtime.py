@@ -85,6 +85,7 @@ SUCCESS_STATUSES = frozenset({"completed_shadow_raw", "completion_replayed"})
 MAX_COUNTER = 1_000_000_000
 MAX_SNAPSHOT_SETTLE_TICKS = 16
 SNAPSHOT_MAINTENANCE_POLL_SECONDS = 10.0
+CPU_DECODE_LANES = 2
 BLITZORTUNG_SOURCE_ID = "lightning.blitzortung.event_ingress"
 BLITZORTUNG_READINESS_REASONS = frozenset({
     "desired_state_unconfigured",
@@ -1629,12 +1630,10 @@ class WorkerOnlyServiceRuntime:
         """Re-sample retained raw captures after any target-location change."""
 
         self._radar_observations.clear()
-        for workload_id, capture_id in sorted(self._capture_ids.items()):
-            await self._process_quantitative_capture(
-                workload_id=workload_id,
-                capture_id=capture_id,
-                desired=desired,
-            )
+        await self._process_quantitative_jobs(
+            tuple(sorted(self._capture_ids.items())),
+            desired,
+        )
         self._quantitative_desired_state_sha256 = desired.state_sha256
 
     async def _process_latest_quantitative(self, desired) -> None:
@@ -1656,17 +1655,43 @@ class WorkerOnlyServiceRuntime:
         results: tuple[Any, ...],
         desired,
     ) -> None:
+        latest_by_source = {}
         for result in results:
             if (
                 result.status in SUCCESS_STATUSES
                 and result.source_capture_id is not None
                 and result.workload_id is not None
             ):
+                # A recovery batch may contain more than one terminal receipt
+                # for the same provider.  Decode only its newest result so one
+                # provider can never occupy two CPU lanes simultaneously.
+                latest_by_source[result.workload_id] = result.source_capture_id
+        await self._process_quantitative_jobs(
+            tuple(sorted(latest_by_source.items())),
+            desired,
+        )
+
+    async def _process_quantitative_jobs(
+        self,
+        jobs: tuple[tuple[str, str], ...],
+        desired,
+    ) -> None:
+        """Decode unique sources concurrently within the two-thread budget."""
+
+        semaphore = asyncio.Semaphore(CPU_DECODE_LANES)
+
+        async def process(workload_id: str, capture_id: str) -> None:
+            async with semaphore:
                 await self._process_quantitative_capture(
-                    workload_id=result.workload_id,
-                    capture_id=result.source_capture_id,
+                    workload_id=workload_id,
+                    capture_id=capture_id,
                     desired=desired,
                 )
+
+        await asyncio.gather(*(
+            process(workload_id, capture_id)
+            for workload_id, capture_id in jobs
+        ))
 
     async def async_start(self) -> dict[str, Any]:
         async with self._gate:
