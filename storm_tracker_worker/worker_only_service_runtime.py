@@ -14,6 +14,7 @@ import math
 import time
 from typing import Any, Awaitable, Callable, Mapping
 
+from .desired_state import DesiredState
 from .multi_source_cycle_assembler import (
     CapturedSourceEvidence,
     DEFAULT_FRESHNESS_SECONDS,
@@ -194,6 +195,44 @@ def _safe_failure_reason(error: BaseException) -> str:
 
     reason = str(error)
     return reason if reason in _SAFE_FAILURE_REASON_CODES else "unclassified"
+
+
+def _meteorological_authority_equivalent(
+    previous: DesiredState | None,
+    current: DesiredState,
+) -> bool:
+    """Return whether retained target-bound science remains exactly reusable.
+
+    A periodic Life360 lease refresh changes CAS metadata and observation
+    timestamps, but not the coordinates/settings used for acquisition,
+    sampling or fusion. Re-decoding every retained radar product for that
+    control-plane-only change can take longer than the lease interval and keep
+    the product permanently in ``desired_state_transition``.
+    """
+
+    if not isinstance(previous, DesiredState) or not isinstance(
+        current, DesiredState
+    ):
+        return False
+    if previous.settings != current.settings or not any(
+        target.available
+        and target.kind in {"device_tracker", "person", "test"}
+        for target in current.targets
+    ):
+        return False
+
+    def science_targets(state: DesiredState) -> tuple[tuple[Any, ...], ...]:
+        return tuple(sorted((
+            target.target_id,
+            target.kind,
+            target.available,
+            target.latitude,
+            target.longitude,
+            target.observation_radius_km,
+            target.country_code,
+        ) for target in state.targets))
+
+    return science_targets(previous) == science_targets(current)
 
 
 class WorkerOnlyServiceRuntime:
@@ -1696,6 +1735,27 @@ class WorkerOnlyServiceRuntime:
                     and desired.state_sha256
                     != self._quantitative_desired_state_sha256
                 )
+                if (
+                    quantitative_authority_changed
+                    and self._quantitative_desired_state_sha256 is not None
+                ):
+                    previous_quantitative_desired = (
+                        self._raw.desired_state_store.load_version(
+                            self._quantitative_desired_state_sha256
+                        )
+                    )
+                    if _meteorological_authority_equivalent(
+                        previous_quantitative_desired,
+                        desired,
+                    ):
+                        # Rebind retained radar/model/ground facts to the new
+                        # CAS head in the normal snapshot stage. Their exact
+                        # sampling geometry is unchanged, so a heavy replay
+                        # would add no meteorological information.
+                        self._quantitative_desired_state_sha256 = (
+                            desired.state_sha256
+                        )
+                        quantitative_authority_changed = False
                 authority_snapshot_published = (
                     maintenance_snapshot_published
                     and quantitative_authority_changed
