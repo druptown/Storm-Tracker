@@ -253,6 +253,7 @@ class DesiredStateController:
         self._snapshot_sequence = 0
         self._last_issued_at = 0.0
         self._last_applied_at: float | None = None
+        self._lease_refresh_pending = False
 
         self._started = False
         self._stopped = False
@@ -264,6 +265,7 @@ class DesiredStateController:
         self._last_error_type: str | None = None
         self._drive_task: asyncio.Task[None] | None = None
         self._debounce_handle: asyncio.TimerHandle | None = None
+        self._lease_refresh_handle: asyncio.TimerHandle | None = None
         self._counters = {
             "accepted_updates": 0,
             "coalesced_updates": 0,
@@ -429,20 +431,21 @@ class DesiredStateController:
             # Retain the latest observation time for regression filtering and
             # freshness scheduling.  Periodically publish that liveness-only
             # change before the worker's dynamic-position lease can expire.
+            liveness_changed = normalized_targets != self._targets
             self._targets = normalized_targets
             self._settings = normalized_settings
             lease_elapsed = False
+            has_available_dynamic_target = any(
+                target.get("kind") in _DYNAMIC_TARGET_KINDS
+                and target.get("available") is True
+                and target.get("position_observed_at") is not None
+                for target in normalized_targets
+            )
             if self._last_applied_at is not None and not self._dirty:
                 try:
                     now = float(self._clock())
                 except (TypeError, ValueError, OverflowError):
                     now = math.nan
-                has_available_dynamic_target = any(
-                    target.get("kind") in _DYNAMIC_TARGET_KINDS
-                    and target.get("available") is True
-                    and target.get("position_observed_at") is not None
-                    for target in normalized_targets
-                )
                 lease_elapsed = (
                     has_available_dynamic_target
                     and math.isfinite(now)
@@ -450,13 +453,20 @@ class DesiredStateController:
                     + MAX_SEMANTIC_SILENCE_SECONDS
                 )
             if lease_elapsed:
+                self._lease_refresh_pending = False
+                self._cancel_lease_refresh()
                 self._dirty = True
                 self._notify_authority(None)
                 self._increment("accepted_updates")
                 self._increment("lease_refreshes")
                 return True
+            if liveness_changed and has_available_dynamic_target:
+                self._lease_refresh_pending = True
+                self._schedule_lease_refresh()
             self._increment("coalesced_updates")
             return False
+        self._lease_refresh_pending = False
+        self._cancel_lease_refresh()
         self._targets = normalized_targets
         self._settings = normalized_settings
         self._semantic_sha256 = semantic_sha
@@ -512,6 +522,72 @@ class DesiredStateController:
         self._debounce_handle = loop.call_later(
             self._debounce_seconds, self._debounce_ready
         )
+
+    def _cancel_lease_refresh(self) -> None:
+        if self._lease_refresh_handle is not None:
+            self._lease_refresh_handle.cancel()
+            self._lease_refresh_handle = None
+
+    def _schedule_lease_refresh(self) -> None:
+        self._cancel_lease_refresh()
+        if (
+            self._stopped
+            or not self._started
+            or not self._lease_refresh_pending
+            or self._last_applied_at is None
+            or self._targets is None
+        ):
+            return
+        if not any(
+            target.get("kind") in _DYNAMIC_TARGET_KINDS
+            and target.get("available") is True
+            and target.get("position_observed_at") is not None
+            for target in self._targets
+        ):
+            self._lease_refresh_pending = False
+            return
+        try:
+            now = float(self._clock())
+        except (TypeError, ValueError, OverflowError):
+            return
+        if not math.isfinite(now):
+            return
+        delay = max(
+            0.0,
+            self._last_applied_at + MAX_SEMANTIC_SILENCE_SECONDS - now,
+        )
+        loop = asyncio.get_running_loop()
+        self._lease_refresh_handle = loop.call_later(
+            delay, self._lease_refresh_ready
+        )
+
+    def _lease_refresh_ready(self) -> None:
+        self._lease_refresh_handle = None
+        if (
+            self._stopped
+            or not self._started
+            or not self._lease_refresh_pending
+            or self._dirty
+            or self._last_applied_at is None
+        ):
+            return
+        try:
+            now = float(self._clock())
+        except (TypeError, ValueError, OverflowError):
+            return
+        deadline = self._last_applied_at + MAX_SEMANTIC_SILENCE_SECONDS
+        if not math.isfinite(now):
+            return
+        if now < deadline:
+            self._schedule_lease_refresh()
+            return
+        self._lease_refresh_pending = False
+        self._dirty = True
+        self._notify_authority(None)
+        self._increment("accepted_updates")
+        self._increment("lease_refreshes")
+        self._state = "dirty"
+        self._schedule_debounce()
 
     def _debounce_ready(self) -> None:
         self._debounce_handle = None
@@ -580,6 +656,7 @@ class DesiredStateController:
         if self._debounce_handle is not None:
             self._debounce_handle.cancel()
             self._debounce_handle = None
+        self._cancel_lease_refresh()
         task = self._drive_task
         if task is not None and not task.done():
             task.cancel()
@@ -807,6 +884,10 @@ class DesiredStateController:
         self._last_applied_at = float(attempt.document["issued_at"])
         self._pending_attempt = None
         self._dirty = self._semantic_sha256 != self._published_semantic_sha256
+        if self._lease_refresh_pending:
+            self._schedule_lease_refresh()
+        else:
+            self._cancel_lease_refresh()
         self._notify_authority(None if self._dirty else self._head.state_sha256)
         self._increment("applied_states")
         if recovered:
