@@ -43,6 +43,7 @@ STATUS_TOPIC = f"{TOPIC_ROOT}/worker/status"
 REQUEST_TOPIC = f"{TOPIC_ROOT}/jobs/request"
 JOB_STATUS_TOPIC = f"{TOPIC_ROOT}/jobs/+/status"
 OPERATIONAL_SNAPSHOT_TOPIC = f"{TOPIC_ROOT}/operational/snapshot"
+OPERATIONAL_GEOJSON_TOPIC = f"{TOPIC_ROOT}/operational/geojson"
 PING_INTERVAL = timedelta(seconds=30)
 WORKER_STALE_SECONDS = 35.0
 COMPRESS_PAYLOAD_FROM_BYTES = 128_000
@@ -1185,6 +1186,47 @@ async def async_setup_worker_bridge(hass: HomeAssistant) -> None:
         _apply_operational_snapshot(payload)
 
     @callback
+    def _apply_operational_geojson(payload: bytes | str) -> None:
+        try:
+            raw = payload.decode("utf-8") if isinstance(payload, bytes) else payload
+            if not isinstance(raw, str) or len(raw.encode("utf-8")) > 900_000:
+                raise ValueError("kaartpayload overschrijdt de grens")
+            collection = json.loads(raw)
+            if not isinstance(collection, dict):
+                raise ValueError("operationele GeoJSON moet een object zijn")
+            features = collection.get("features")
+            metadata = collection.get("metadata")
+            if (
+                collection.get("type") != "FeatureCollection"
+                or not isinstance(features, list)
+                or len(features) > 1200
+                or not all(isinstance(item, dict) for item in features)
+                or not isinstance(metadata, dict)
+            ):
+                raise ValueError("ongeldige operationele GeoJSON")
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as err:
+            _LOGGER.warning("Ongeldige operationele workerkaart: %s", err)
+            return
+        data["geojson_worker_collection"] = collection
+        data["geojson_worker_status"] = {
+            "state": "operationeel",
+            "mode": "thin_mqtt",
+            "fallback_active": False,
+            "updated_at": time.time(),
+            "feature_count": len(features),
+        }
+        hass.bus.async_fire(f"{DOMAIN}_geojson_worker_update")
+
+    @callback
+    def _operational_geojson(message) -> None:
+        payload = message.payload
+        if _dispatch_to_hass_event_loop(
+            hass, _apply_operational_geojson, payload
+        ):
+            return
+        _apply_operational_geojson(payload)
+
+    @callback
     def _apply_worker_status(payload: bytes | str) -> None:
         try:
             status = _decode(payload)
@@ -1278,6 +1320,15 @@ async def async_setup_worker_bridge(hass: HomeAssistant) -> None:
             # Home Assistant decodes MQTT payloads to UTF-8 text by default;
             # explicitly disable that conversion for this one binary-safe
             # subscription so the receiver does not reject every live frame.
+            encoding=None,
+        )
+    )
+    data["unsubscribers"].append(
+        await mqtt.async_subscribe(
+            hass,
+            OPERATIONAL_GEOJSON_TOPIC,
+            _operational_geojson,
+            qos=1,
             encoding=None,
         )
     )
