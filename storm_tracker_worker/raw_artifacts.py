@@ -3093,6 +3093,79 @@ class RawArtifactStore:
             "issues": issues,
         }
 
+    def startup_integrity_check(self) -> dict[str, Any]:
+        """Validate the durable catalog without re-hashing the full raw corpus.
+
+        Object bytes are content-addressed and are still verified by every
+        read path.  Re-reading the complete historical corpus during every
+        process start made control-plane admission grow linearly with the
+        database and could delay provider acquisition for nearly an hour.
+        Startup instead proves the SQLite catalog, foreign-key graph and
+        bounded row inventories.  The retention guard separately compares
+        those inventories with a fresh filesystem scan before admission.
+        """
+
+        self._require_initialized()
+        issues: list[str] = []
+        object_count = 0
+        receipt_count = 0
+        capture_count = 0
+        reclamation_audit: dict[str, Any] = {
+            "enabled": False,
+            "checked_prepares": 0,
+        }
+        try:
+            self._assert_safe_layout()
+            with self._lock, closing(self._connect()) as database:
+                self._validate_schema(database)
+                quick_check = database.execute("PRAGMA quick_check").fetchone()
+                if quick_check is None or str(quick_check[0]) != "ok":
+                    raise RawArtifactIntegrityError(
+                        "raw-artifactcatalogus quick-check faalde"
+                    )
+                foreign_key_issue = database.execute(
+                    "PRAGMA foreign_key_check"
+                ).fetchone()
+                if foreign_key_issue is not None:
+                    raise RawArtifactIntegrityError(
+                        "raw-artifactcatalogus foreign-keycheck faalde"
+                    )
+                counts = database.execute(
+                    """
+                    SELECT
+                      (SELECT count(*) FROM raw_artifact_objects),
+                      (SELECT count(*) FROM raw_artifact_receipts),
+                      (SELECT count(*) FROM raw_artifact_captures)
+                    """
+                ).fetchone()
+                object_count = int(counts[0])
+                receipt_count = int(counts[1])
+                capture_count = int(counts[2])
+                if object_count > self.limits.max_object_entries:
+                    raise RawArtifactIntegrityError(
+                        "raw-artifactobjectinventory overschrijdt zijn vaste grens"
+                    )
+                if receipt_count > self.limits.max_receipt_entries:
+                    raise RawArtifactIntegrityError(
+                        "raw-artifactreceiptinventory overschrijdt zijn vaste grens"
+                    )
+                if capture_count > self.limits.max_capture_entries:
+                    raise RawArtifactIntegrityError(
+                        "raw-artifactcaptureinventory overschrijdt zijn vaste grens"
+                    )
+                reclamation_audit = self._audit_reclamation_extension(database)
+        except (RawArtifactError, sqlite3.DatabaseError, OSError, ValueError) as exc:
+            issues.append(str(exc))
+        return {
+            "healthy": not issues,
+            "checked_objects": object_count,
+            "checked_receipts": receipt_count,
+            "checked_captures": capture_count,
+            "reclamation": reclamation_audit,
+            "issues": issues,
+            "verification_scope": "startup_catalog_metadata",
+        }
+
     def _audit_reclamation_extension(
         self,
         database: sqlite3.Connection,

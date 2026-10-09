@@ -52,20 +52,20 @@ SANITIZED_OPTIONS_SHA256: Final = (
     "b6662a7be1f42ebce40888eeae93b70b145914c084add29a187f901b9ddbfd6c"
 )
 FROZEN_MATERIALIZER_SHA256: Final = (
-    "4394770562360c761941fe0e5827fc413fc5415b28958a4acb4b7a3979847994"
+    "e0939b0e07e74952741bc3d85fe729469fd447289589eaebaafa98f1a90e94b1"
 )
 FROZEN_CATALOG_SHA256: Final = (
     "9cd9af5bf6324cea930e6eb044a7af5ed2f7783bedbceacb9056faf0a88199fb"
 )
 FROZEN_ACTIVATION_MATRIX_SHA256: Final = (
-    "73b18e32becef60baf9288aab54f2e1cffb6271eb8840a77035ad0739716bc91"
+    "341c0cc8a28b76679397f8ee4fed7203632d872bd11418c2168c4d928224a31b"
 )
 FROZEN_RECOVERY_BINDING_COUNT: Final = 26
 FROZEN_RECOVERY_INVENTORY_SHA256: Final = (
     "b0635f77c6f2ffa0e8a278f8f7bd03500c59058e56f8d46eb86b7ef78f731675"
 )
 FROZEN_RAW_CAPTURE_COMPOSITION_SHA256: Final = (
-    "9def687c5adb891f231428f1a9b4ea17baadede1b6fe974b391602d623986a8d"
+    "704e902d7c6142d125dbf7e77f10eea7e3232c4243a37f87ddce72cdef416d6b"
 )
 FROZEN_WORKER_SERVICE_SHA256: Final = (
     "5d8da0f3136a520e56318ce0ecf7157910c9df1bbcce221e6c680de625ec4cf3"
@@ -80,7 +80,7 @@ FROZEN_BLITZORTUNG_EVENT_RAW_LIMITS_SHA256: Final = (
     "a032d8ff63e8009a87013039dfb5e9485e0dc2cd62837b9af05dddaec8427d9c"
 )
 FROZEN_DERIVATION_FIXTURE_SHA256: Final = (
-    "4dac4241a21a5f58cbb423d87960d5db699cf87241f46a90e36b39bd5716d467"
+    "0050eb94b7da6d699b10f9fd96f47684e54b1db88a974cd3964fee20e869b9ff"
 )
 FROZEN_REQUIRED_SAME_FILESYSTEM_BYTES: Final = 20_594_032_640
 FROZEN_CAPTURE_WINDOW_HOURS: Final = 1
@@ -2063,6 +2063,7 @@ def _rollback_raw_quartet(
     stage_identity: object | None,
     names: tuple[str, str, str, str],
     source_identities: Mapping[str, object],
+    expected_hashes: Mapping[str, str],
     published_identities: dict[str, object],
 ) -> list[BaseException]:
     """Remove only exact-owned quartet state and report every uncertainty."""
@@ -2093,6 +2094,16 @@ def _rollback_raw_quartet(
             if not current.same_object(published_identity):
                 raise RawCaptureReleaseRequirementsError(
                     "published RAW quartet ownership became indeterminate"
+                )
+            with rollback_authority.open_file(relative) as current_file:
+                current_body = current_file.read_bounded(
+                    MAX_DOCUMENT_BYTES * 16
+                    if name.endswith(".json")
+                    else 2 * 1024 * 1024 * 1024
+                )
+            if _sha_bytes(current_body) != expected_hashes[name]:
+                raise RawCaptureReleaseRequirementsError(
+                    "published RAW quartet bytes changed during rollback"
                 )
             rollback_authority.remove_owned_tree(
                 relative,
@@ -2230,6 +2241,7 @@ def build_raw_capture_release_quartet(
     staged_release: BuiltReleaseCandidate | None = None
     staged_requirements: BuiltRawCaptureReleaseRequirements | None = None
     source_identities: dict[str, object] = {}
+    expected_hashes: dict[str, str] = {}
     published_identities: dict[str, object] = {}
     authority_root_identity = None
     with authority_module.DirectoryAuthority.open_absolute(
@@ -2427,6 +2439,7 @@ def build_raw_capture_release_quartet(
                     stage_identity=stage_identity,
                     names=names,
                     source_identities=source_identities,
+                    expected_hashes=expected_hashes,
                     published_identities=published_identities,
                 ))
             if (

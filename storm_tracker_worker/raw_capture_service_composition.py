@@ -1850,7 +1850,12 @@ def build_raw_capture_service(
             ledger_stats_supplier=acquisition.capacity_ledger.stats,
             ledger_audit_supplier=acquisition.capacity_ledger.audit,
             raw_store_stats_supplier=acquisition.raw_store.stats,
-            raw_store_audit_supplier=acquisition.raw_store.integrity_check,
+            # Startup admission needs a complete durable catalog proof, not a
+            # byte-for-byte replay of an ever-growing historical corpus.
+            # Individual object reads remain content-hash verified.
+            raw_store_audit_supplier=(
+                acquisition.raw_store.startup_integrity_check
+            ),
             event_diagnostics_supplier=(
                 blitzortung_sidecar.diagnostics
                 if blitzortung_sidecar is not None
