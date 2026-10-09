@@ -112,6 +112,10 @@ _SAFE_FAILURE_REASON_CODES = frozenset({
     "ground fact row bound reached",
     "ground member-link row bound reached",
     "ground QC row bound reached",
+    "motion_arrival_horizon_invalid",
+    "motion_arrival_shadow_contract_changed",
+    "motion_arrival_target_not_available",
+    "motion_arrivals_contain_invalid_type",
     "desired_state_changed_during_plan",
     "desired_state_future",
     "desired_state_inconsistent",
@@ -373,6 +377,7 @@ class WorkerOnlyServiceRuntime:
             "model_guidance_failures": 0,
             "model_guidance_skipped_stale": 0,
             "model_guidance_successes": 0,
+            "motion_enrichment_failures": 0,
             "ground_failures": 0,
             "ground_successes": 0,
             "ground_track_match_failures": 0,
@@ -912,12 +917,48 @@ class WorkerOnlyServiceRuntime:
                     else getattr(self._cell_tracker, "shadow_arrivals", None)
                 )
                 arrivals = () if not callable(arrival_reader) else arrival_reader()
-                committed = (
-                    build_radar_motion_nowcast_revision(
+                if arrivals:
+                    try:
+                        committed = build_radar_motion_nowcast_revision(
+                            desired,
+                            cycle,
+                            observations,
+                            arrivals,
+                            revision=next_revision,
+                            evaluated_at=now,
+                            worker_state=worker_state,
+                            queue_depth=queue_depth,
+                            failed_jobs=failed_jobs,
+                            provider_status_overrides=provider_status_overrides,
+                            ready_source_ids=ready_source_ids,
+                        )
+                    except WorkerOnlyMotionSnapshotError as error:
+                        # Motion is optional enrichment on top of an already
+                        # certified radar fact. A stale/invalid shadow arrival
+                        # may withhold ETA, but must never erase current radar
+                        # precipitation or reflectivity evidence.
+                        self._increment("motion_enrichment_failures")
+                        _LOGGER.warning(
+                            "Worker-only motion enrichment withheld: reason=%s",
+                            _safe_failure_reason(error),
+                        )
+                        committed = build_positive_radar_fact_revision(
+                            desired,
+                            cycle,
+                            observations,
+                            revision=next_revision,
+                            evaluated_at=now,
+                            worker_state=worker_state,
+                            queue_depth=queue_depth,
+                            failed_jobs=failed_jobs,
+                            provider_status_overrides=provider_status_overrides,
+                            ready_source_ids=ready_source_ids,
+                        )
+                else:
+                    committed = build_positive_radar_fact_revision(
                         desired,
                         cycle,
                         observations,
-                        arrivals,
                         revision=next_revision,
                         evaluated_at=now,
                         worker_state=worker_state,
@@ -926,24 +967,7 @@ class WorkerOnlyServiceRuntime:
                         provider_status_overrides=provider_status_overrides,
                         ready_source_ids=ready_source_ids,
                     )
-                    if arrivals
-                    else build_positive_radar_fact_revision(
-                        desired,
-                        cycle,
-                        observations,
-                        revision=next_revision,
-                        evaluated_at=now,
-                        worker_state=worker_state,
-                        queue_depth=queue_depth,
-                        failed_jobs=failed_jobs,
-                        provider_status_overrides=provider_status_overrides,
-                        ready_source_ids=ready_source_ids,
-                    )
-                )
-            except (
-                MultiSourceRadarSnapshotError,
-                WorkerOnlyMotionSnapshotError,
-            ):
+            except MultiSourceRadarSnapshotError:
                 # Quantitative evidence is optional enrichment.  A source
                 # becoming stale or authority-incompatible while a parallel
                 # batch is being restaged must withhold that enrichment, not
@@ -1210,6 +1234,18 @@ class WorkerOnlyServiceRuntime:
             if self._consume_terminal_result(result):
                 changed.append(result)
         return tuple(changed)
+
+    def _raw_batch_waited_for_desired_state(self) -> bool:
+        """Return whether this batch raced ahead of initial HA authority."""
+
+        results = self._latest_tick_results()
+        return (
+            all(result.workload_id is None for result in results)
+            and any(
+                result.reason_code == "desired_state_unconfigured"
+                for result in results
+            )
+        )
 
     def _consume_latest_terminal(self) -> bool:
         """Compatibility wrapper for callers that only need a change flag."""
@@ -1801,6 +1837,27 @@ class WorkerOnlyServiceRuntime:
                 terminal_results = self._consume_terminal_results()
                 changed = bool(terminal_results)
                 desired = self._raw.desired_state_store.load_active()
+                if (
+                    desired is not None
+                    and self._raw_batch_waited_for_desired_state()
+                ):
+                    # MQTT admission opens before HA can publish its first
+                    # desired-state document.  When that document arrives
+                    # during the first provider tick, fetch the now-due raw
+                    # sources before starting minutes of retained-evidence
+                    # reprojection.  Otherwise every live provider is delayed
+                    # by the startup science replay despite authority already
+                    # being available.
+                    stage = "raw_tick_after_authority"
+                    maintenance_snapshot_published = (
+                        await self._raw_tick_with_snapshot_maintenance()
+                        or maintenance_snapshot_published
+                    )
+                    stage = "consume_terminal_after_authority"
+                    authority_results = self._consume_terminal_results()
+                    terminal_results = terminal_results + authority_results
+                    changed = bool(terminal_results)
+                    desired = self._raw.desired_state_store.load_active()
                 if changed and desired is not None:
                     stage = "ground_processing"
                     _result, ground_snapshot_published = (
