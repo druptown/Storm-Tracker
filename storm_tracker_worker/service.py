@@ -200,6 +200,15 @@ class _WorkerFirstRuntimeFatalError(RuntimeError):
     """The selected worker-first runtime failed and stopped the service."""
 
 
+def _worker_first_safe_error_reason(error: BaseException) -> str:
+    """Project only an explicit secret-free runtime reason code to logs."""
+
+    reason = str(error)
+    if re.fullmatch(r"[a-z][a-z0-9_]{0,95}", reason) is None:
+        return "unclassified"
+    return reason
+
+
 def _raw_capture_executor_factory(wall_seconds: float):
     """Build one fresh raw-capture child with an exact environment allowlist."""
 
@@ -2363,8 +2372,14 @@ class WorkerService:
                         "operational snapshot runtime mist lifecyclemethoden"
                     )
                 self._cache_operational_snapshot_health(runtime.diagnostics())
-            except BaseException:
+            except BaseException as error:
                 if self._runtime_role == "worker_first":
+                    _LOGGER.error(
+                        "Worker-first bootstrap fail-closed: class=%s "
+                        "reason=%s",
+                        type(error).__name__,
+                        _worker_first_safe_error_reason(error),
+                    )
                     self._abort_worker_first_bootstrap(
                         "worker_first_runtime_bootstrap_failed"
                     )
