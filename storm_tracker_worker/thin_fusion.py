@@ -151,6 +151,15 @@ def fuse_observations(
             if observation.provider_id != candidate.provider_id:
                 rejected.setdefault(str(provider_id), set()).add("provider_mismatch")
                 continue
+            if (
+                observation.target_id is not None
+                and observation.metadata.get("operational_use")
+                == "visualisation_only"
+            ):
+                rejected.setdefault(str(provider_id), set()).add(
+                    "visualisation_only"
+                )
+                continue
             accepted.append(observation)
 
     grouped: dict[tuple[str, ObservationKind], list[NormalizedObservation]] = {}

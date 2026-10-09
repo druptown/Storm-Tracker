@@ -1,8 +1,8 @@
 {
   "kind": "recovered_archive_source",
   "component": "worker",
-  "version": "1.18.64",
-  "source_id": "67e179c5b9c3b43b601bd8baeba66745955e17ad560bc7757e4d5561129d2672",
+  "version": "1.18.65",
+  "source_id": "781e75e48ae9d25299f8b753af34bcac68d8b420940908f8673f1198a90d2ac7",
   "recovered_on": "2026-10-09",
   "files": [
     {
@@ -32,7 +32,7 @@
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "4d0a67b7e27da90f3c4d49bdcb5e495b021f78c9213ba0eeac97a1b6982390db",
+      "sha256": "963879f4c42432b28a6b1f885c76926dfa46301223bf89bff49eaf0509d47d04",
       "size": 64
     },
     {
@@ -272,7 +272,7 @@
     {
       "path": "config.yaml",
       "mode": 420,
-      "sha256": "f83878f031ea566e3f7e627f739a5ed3532b998eebeb1d39bbb5aec4f9cf9a80",
+      "sha256": "d97030287762c99f9f4b7747e3af8e4a1c39a1ee9e85613831b0607f2454a20b",
       "size": 2669
     },
     {
@@ -1064,8 +1064,8 @@
     {
       "path": "thin_fusion.py",
       "mode": 420,
-      "sha256": "1614d54e23b30e51a7d6d2737f02131a0ad8fbf0a8b970a5a23b043d60033627",
-      "size": 8504
+      "sha256": "12dbc8c6abcca5f0088c01f19b3ac74e15e38aac653d31e5897831c951da27b8",
+      "size": 8840
     },
     {
       "path": "thin_ground_station_runtime.py",
@@ -1118,8 +1118,8 @@
     {
       "path": "thin_provider_adapters.py",
       "mode": 420,
-      "sha256": "9b332aed2647b59324c2b514dd4311deefecb9d4383ef2e0a9b797047a05ab9b",
-      "size": 150909
+      "sha256": "3db8d32b1588ef827c1181e8e8578899130e5749b8cd9cc676e231fda846b274",
+      "size": 153058
     },
     {
       "path": "thin_provider_catalog.py",
@@ -1610,16 +1610,12 @@
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_worker_v1.18.64_deploy.tar.gz",
-      "archive_sha256": "e041a3bdd27c0ca91603ed8fb344ba82daffe3ac7ec2b1d1346c65ad15284a68",
-      "bytes": 2394695,
+      "filename": "storm_tracker_worker_v1.18.65_deploy.tar.gz",
+      "archive_sha256": "689231ea14cec042cd26ed731761470d82020e57ab9ae447fc6fba90e8e9a37b",
+      "bytes": 2395288,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.149_worker_v1.18.64_evidence.json",
-          "archive_and_source_match": true
-        },
-        {
-          "manifest": "storm_tracker_release_v1.14.149_worker_v1.18.64_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.149_worker_v1.18.65_evidence.json",
           "archive_and_source_match": true
         }
       ]

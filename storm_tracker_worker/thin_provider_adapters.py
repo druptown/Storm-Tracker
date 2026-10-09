@@ -58,7 +58,6 @@ KMI_AWS_ENDPOINT = "https://opendata.meteo.be/geoserver/ows"
 KMI_APPV4_USER_AGENT = "be.meteo.app"
 KMI_APPV4_MAX_FRAME_AGE_SECONDS = 20 * 60
 KMI_APPV4_ALLOWED_IMAGE_HOSTS = frozenset({"app.meteo.be", "cdn.meteo.be"})
-KMI_APPV4_BOUNDS = (-2.5, 46.5, 10.5, 53.0)
 _KMI_APPV4_REQUEST_SECRET = "r9EnW374jkJ9acc"
 MAX_OPERA_SPATIAL_CELLS = 64
 OPERA_MAX_FRAME_AGE_SECONDS = 15 * 60
@@ -1137,14 +1136,20 @@ class MeteoLuxValidationAdapter:
 
 
 _KMI_COLORS = (
-    ((144, 238, 144), 1),
-    ((0, 200, 100), 2),
-    ((0, 150, 255), 3),
-    ((0, 0, 255), 4),
-    ((255, 255, 0), 5),
-    ((255, 150, 0), 6),
-    ((255, 0, 0), 7),
-    ((180, 0, 180), 8),
+    ((233, 255, 255, 144), 1),
+    ((82, 255, 241, 160), 2),
+    ((75, 209, 220, 192), 3),
+    ((68, 162, 200, 200), 4),
+)
+
+# The INCA-BE mobile images use Belgian Lambert 2008 (EPSG:3812).  The
+# image axes are very slightly rotated relative to the projected axes.  These
+# coefficients map projected metres to normalized image coordinates; the
+# translation is anchored from the coordinates returned with every AppV4
+# response so a server-side crop shift cannot move the radar layer.
+_KMI_LAMBERT_TO_IMAGE = (
+    (2.28737432e-6, -2.32300157e-8),
+    (-2.22248944e-8, -3.00083858e-6),
 )
 
 
@@ -1168,19 +1173,10 @@ def _kmi_appv4_frame_url(value: Any) -> str:
 
 
 def _kmi_level(pixel: tuple[int, int, int, int]) -> int:
-    red, green, blue, alpha = pixel
-    if alpha < 128:
-        return 0
-    distance, level = min(
-        (
-            (red - expected[0]) ** 2
-            + (green - expected[1]) ** 2
-            + (blue - expected[2]) ** 2,
-            value,
-        )
-        for expected, value in _KMI_COLORS
+    return next(
+        (level for expected, level in _KMI_COLORS if tuple(pixel) == expected),
+        0,
     )
-    return level if distance < 20_000 else 0
 
 
 class KmiRadarAdapter:
@@ -1209,7 +1205,8 @@ class KmiRadarAdapter:
             headers=self._headers,
             maximum_bytes=4 * 1024 * 1024,
         )
-        sequence = payload.get("animation", {}).get("sequence", [])
+        animation = payload.get("animation", {})
+        sequence = animation.get("sequence", [])
         if not isinstance(sequence, list) or not sequence:
             raise ValueError("kmi_sequence_missing")
         frames = [item for item in sequence if isinstance(item, Mapping) and item.get("uri")]
@@ -1239,17 +1236,63 @@ class KmiRadarAdapter:
         image = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
         width, height = image.size
         rgba = np.asarray(image, dtype=np.uint8)
-        rgb = rgba[..., :3].astype(np.int32)
-        palette = np.asarray([item[0] for item in _KMI_COLORS], dtype=np.int32)
-        distances = np.sum((rgb[..., None, :] - palette) ** 2, axis=3)
-        nearest = np.argmin(distances, axis=2)
-        minimum = np.min(distances, axis=2)
-        levels = (nearest + 1).astype(np.uint8)
-        levels[(rgba[..., 3] < 128) | (minimum >= 20_000)] = 0
+        levels = np.zeros((height, width), dtype=np.uint8)
+        for expected, level in _KMI_COLORS:
+            levels[np.all(rgba == np.asarray(expected, dtype=np.uint8), axis=2)] = level
+
+        try:
+            anchor_ratio_x = float(animation["localisationLayerRatioX"])
+            anchor_ratio_y = float(animation["localisationLayerRatioY"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("kmi_georeference_missing") from None
+        if not (
+            0.0 <= anchor_ratio_x <= 1.0
+            and 0.0 <= anchor_ratio_y <= 1.0
+        ):
+            raise ValueError("kmi_georeference_invalid")
+
+        from pyproj import Transformer
+
+        to_lambert = Transformer.from_crs("EPSG:4326", "EPSG:3812", always_xy=True)
+        to_geographic = Transformer.from_crs("EPSG:3812", "EPSG:4326", always_xy=True)
+        (ratio_x_x, ratio_x_y), (ratio_y_x, ratio_y_y) = _KMI_LAMBERT_TO_IMAGE
+        anchor_x, anchor_y = to_lambert.transform(
+            representative.longitude,
+            representative.latitude,
+        )
+        offset_x = anchor_ratio_x - ratio_x_x * anchor_x - ratio_x_y * anchor_y
+        offset_y = anchor_ratio_y - ratio_y_x * anchor_x - ratio_y_y * anchor_y
+
+        def projected_to_ratio(x: float, y: float) -> tuple[float, float]:
+            return (
+                ratio_x_x * x + ratio_x_y * y + offset_x,
+                ratio_y_x * x + ratio_y_y * y + offset_y,
+            )
+
+        determinant = ratio_x_x * ratio_y_y - ratio_x_y * ratio_y_x
+
+        def ratio_to_lonlat(ratio_x: float, ratio_y: float) -> tuple[float, float]:
+            shifted_x = ratio_x - offset_x
+            shifted_y = ratio_y - offset_y
+            projected_x = (
+                shifted_x * ratio_y_y - ratio_x_y * shifted_y
+            ) / determinant
+            projected_y = (
+                ratio_x_x * shifted_y - ratio_y_x * shifted_x
+            ) / determinant
+            return to_geographic.transform(projected_x, projected_y)
+
         observations: list[NormalizedObservation] = []
         for target in request.targets:
-            column = min(width - 1, max(0, int((target.longitude + 2.5) / 13.0 * width)))
-            row = min(height - 1, max(0, int((53.0 - target.latitude) / 6.5 * height)))
+            target_x, target_y = to_lambert.transform(
+                target.longitude,
+                target.latitude,
+            )
+            ratio_x, ratio_y = projected_to_ratio(target_x, target_y)
+            if not (0.0 <= ratio_x < 1.0 and 0.0 <= ratio_y < 1.0):
+                continue
+            column = min(width - 1, max(0, int(ratio_x * width)))
+            row = min(height - 1, max(0, int(ratio_y * height)))
             level = int(levels[row, column])
             if level <= 0:
                 continue
@@ -1272,30 +1315,41 @@ class KmiRadarAdapter:
                     "operational_use": "visualisation_only",
                     "quantitative_semantics_eligible": False,
                     "semantic_class": "categorical_visualisation",
+                    "source_projection": "EPSG:3812",
                 },
                 maximum_age_seconds=KMI_APPV4_MAX_FRAME_AGE_SECONDS,
             ))
 
-        left, bottom, right, top = KMI_APPV4_BOUNDS
         roi = np.zeros(levels.shape, dtype=bool)
         for target in request.targets:
-            latitude_radius = target.observation_radius_km / 110.574
-            longitude_radius = target.observation_radius_km / max(
-                1.0,
-                111.320 * math.cos(math.radians(target.latitude)),
+            center_x, center_y = to_lambert.transform(
+                target.longitude,
+                target.latitude,
             )
-            column0 = max(0, math.floor((target.longitude - longitude_radius - left) / (right - left) * width))
-            column1 = min(width, math.ceil((target.longitude + longitude_radius - left) / (right - left) * width))
-            row0 = max(0, math.floor((top - target.latitude - latitude_radius) / (top - bottom) * height))
-            row1 = min(height, math.ceil((top - target.latitude + latitude_radius) / (top - bottom) * height))
+            radius_m = target.observation_radius_km * 1_000.0
+            corners = (
+                projected_to_ratio(center_x - radius_m, center_y - radius_m),
+                projected_to_ratio(center_x - radius_m, center_y + radius_m),
+                projected_to_ratio(center_x + radius_m, center_y - radius_m),
+                projected_to_ratio(center_x + radius_m, center_y + radius_m),
+            )
+            columns = [ratio[0] * width for ratio in corners]
+            rows = [ratio[1] * height for ratio in corners]
+            column0 = max(0, math.floor(min(columns)))
+            column1 = min(width, math.ceil(max(columns)))
+            row0 = max(0, math.floor(min(rows)))
+            row1 = min(height, math.ceil(max(rows)))
             if row0 < row1 and column0 < column1:
                 roi[row0:row1, column0:column1] = True
 
-        pixel_height_km = (top - bottom) * 110.574 / height
-        mean_latitude = sum(item.latitude for item in request.targets) / len(request.targets)
-        pixel_width_km = (
-            (right - left) * 111.320 * math.cos(math.radians(mean_latitude)) / width
-        )
+        pixel_width_km = 1.0 / math.hypot(
+            ratio_x_x * width,
+            ratio_y_x * height,
+        ) / 1_000.0
+        pixel_height_km = 1.0 / math.hypot(
+            ratio_x_y * width,
+            ratio_y_y * height,
+        ) / 1_000.0
         block_rows = max(1, int(round(5.0 / pixel_height_km)))
         block_columns = max(1, int(round(5.0 / max(pixel_width_km, 0.1))))
         source = np.where(roi, levels, 0)
@@ -1337,17 +1391,16 @@ class KmiRadarAdapter:
             def corner_to_lonlat(grid_row: int, grid_column: int) -> tuple[float, float]:
                 pixel_row = min(height, grid_row * block_rows)
                 pixel_column = min(width, grid_column * block_columns)
-                return (
-                    left + pixel_column / width * (right - left),
-                    top - pixel_row / height * (top - bottom),
-                )
+                return ratio_to_lonlat(pixel_column / width, pixel_row / height)
 
             rows = [item[0] for item in component]
             columns = [item[1] for item in component]
             center_row = (min(rows) + max(rows) + 1) * block_rows / 2.0
             center_column = (min(columns) + max(columns) + 1) * block_columns / 2.0
-            longitude = left + center_column / width * (right - left)
-            latitude = top - center_row / height * (top - bottom)
+            longitude, latitude = ratio_to_lonlat(
+                center_column / width,
+                center_row / height,
+            )
             spatial.append(NormalizedObservation.create(
                 provider_id=request.provider_id,
                 product_id=request.product_id,
@@ -1367,6 +1420,7 @@ class KmiRadarAdapter:
                     "operational_use": "visualisation_only",
                     "quantitative_semantics_eligible": False,
                     "semantic_class": "categorical_visualisation",
+                    "source_projection": "EPSG:3812",
                 },
                 maximum_age_seconds=KMI_APPV4_MAX_FRAME_AGE_SECONDS,
             ))
