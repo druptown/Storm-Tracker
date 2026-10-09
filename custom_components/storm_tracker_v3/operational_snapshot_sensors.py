@@ -819,7 +819,7 @@ class SnapshotWorkerStatusSensor(SnapshotOnlySensorEntity):
             unique_id_prefix=unique_id_prefix,
             description=SnapshotSensorDescription(
                 key="worker_status",
-                name="Storm Tracker workerstatus",
+                name="STV3 Worker Status",
                 kind=_KIND_WORKER,
             ),
         )
