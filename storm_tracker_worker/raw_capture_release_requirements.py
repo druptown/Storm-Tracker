@@ -52,13 +52,13 @@ SANITIZED_OPTIONS_SHA256: Final = (
     "6f750d7a69b46b5fc4c7e8bd3f786824e085adf3fff6a39006a1d6603d96462b"
 )
 FROZEN_MATERIALIZER_SHA256: Final = (
-    "495468707e2faee9185779b2308d40f893cc2fbe2bbe6db18f197e8d8a10d7df"
+    "fd0ddee01a1c45cdc37990fb9781dd20fc8b1bb3ffde0ccc354d1a021f192e21"
 )
 FROZEN_CATALOG_SHA256: Final = (
     "5f224f9aea2d5d77446a8df5b08dcaa44478611184fb312a7c5849399b9c4e6b"
 )
 FROZEN_ACTIVATION_MATRIX_SHA256: Final = (
-    "21c5dafae8936a4fd4a00141156124959382b0442bb7bdfa77ac098061db0ab7"
+    "4e2d45bee59fb2bfc48fbc5e1941eda9b7027f5bef83f2a710ade59e97e3338f"
 )
 FROZEN_RECOVERY_BINDING_COUNT: Final = 27
 FROZEN_RECOVERY_INVENTORY_SHA256: Final = (
@@ -68,7 +68,7 @@ FROZEN_RAW_CAPTURE_COMPOSITION_SHA256: Final = (
     "df65a977ddf45b5975b5c04815eea8d586264362c9604d66735adb275a1d5b2f"
 )
 FROZEN_WORKER_SERVICE_SHA256: Final = (
-    "b7ea86cd0b6ead607181982d8cfce172548224f7d7b1117e619c5407575cc246"
+    "bf319492bead14083611298c882567a943e7487ed92140a772cca81f57fbf6f0"
 )
 FROZEN_RETENTION_GUARD_SHA256: Final = (
     "a1c102b8846097f7ddd6511a9acd76bf3568900ef7141b7675fa4bba866db174"
@@ -80,7 +80,7 @@ FROZEN_BLITZORTUNG_EVENT_RAW_LIMITS_SHA256: Final = (
     "a032d8ff63e8009a87013039dfb5e9485e0dc2cd62837b9af05dddaec8427d9c"
 )
 FROZEN_DERIVATION_FIXTURE_SHA256: Final = (
-    "753bbe5629e08b9ccab4e86259870dc4ecec72c741f71c72f8d0ec6d71393dc5"
+    "fac5b5962218229a39e9e302ed3d0e23479fd5822116821570d8516827f37836"
 )
 FROZEN_REQUIRED_SAME_FILESYSTEM_BYTES: Final = 20_694_695_936
 FROZEN_CAPTURE_WINDOW_HOURS: Final = 1
@@ -241,6 +241,8 @@ FROZEN_WORKER_PACKAGE_MEMBER_PATHS: Final = (
     "operational_snapshot_publication.py",
     "operational_snapshot_runtime.py",
     "operational_snapshot_store.py",
+    "postgis_migrations/0001_storm_tracker_spatial_foundation.sql",
+    "postgis_projection.py",
     "probe_core.py",
     "protocol.py",
     "provider_capture_registry.py",

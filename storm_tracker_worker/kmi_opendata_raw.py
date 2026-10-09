@@ -471,6 +471,19 @@ KMI_AWS_10MIN_LATEST = KmiLayerDescriptor(
 )
 
 
+KMI_PUBLIC_RADAR_LATEST = KmiLayerDescriptor(
+    descriptor_id="kmi_public_radar_wcs_latest_default_v1",
+    service="WCS",
+    layer=PUBLIC_RADAR_COVERAGE,
+    # The KMI mosaic can lag the current wall-clock slot substantially.  Let
+    # GeoServer bind its declared default/latest time instead of requesting a
+    # slot which is not yet present and deterministically returns HTTP 404.
+    parameters=(("FORMAT", "image/tiff"),),
+    maximum_bytes=PUBLIC_RADAR_MAX_RESPONSE_BYTES,
+    expected_content_types=("image/tiff",),
+)
+
+
 def _utc_second(value: datetime, name: str) -> str:
     if (
         not isinstance(value, datetime)
@@ -1149,6 +1162,7 @@ __all__ = [
     "CANONICAL_REQUEST_SCHEMA",
     "CAPTURE_TOTAL_DEADLINE_SECONDS",
     "KMI_AWS_10MIN_LATEST",
+    "KMI_PUBLIC_RADAR_LATEST",
     "KMI_OPENDATA_ENDPOINT",
     "KMI_OPENDATA_HOST",
     "KMI_OPENDATA_PATH",

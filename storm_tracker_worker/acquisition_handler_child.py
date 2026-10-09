@@ -1398,18 +1398,13 @@ def _run_native(
         )
     if spec.handler_id == KMI_PUBLIC_RADAR_HANDLER_ID:
         from .kmi_opendata_raw import (
+            KMI_PUBLIC_RADAR_LATEST,
             capture_kmi_opendata,
-            public_radar_time_descriptor,
         )
 
-        if handler_payload is None:
-            raise ValueError("KMI radarhandler mist zijn tijdsbinding")
-        descriptor = public_radar_time_descriptor(datetime.fromtimestamp(
-            handler_payload["product_timestamp"], timezone.utc
-        ))
         return capture_kmi_opendata(
             SimpleNamespace(job_id=job_id, payload={}),
-            descriptor=descriptor,
+            descriptor=KMI_PUBLIC_RADAR_LATEST,
             raw_store=store,
         )
     if spec.handler_id == KMI_APPV4_HANDLER_ID:

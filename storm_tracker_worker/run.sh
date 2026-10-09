@@ -37,6 +37,14 @@ export STV3_EUMETSAT_CONSUMER_KEY
 export STV3_EUMETSAT_CONSUMER_SECRET
 export STV3_JOB_RECEIPT_DB
 export STV3_WORKER_ONLY_ROOT
+export STV3_POSTGIS_ENABLED
+export STV3_POSTGIS_HOST
+export STV3_POSTGIS_PORT
+export STV3_POSTGIS_DATABASE
+export STV3_POSTGIS_USER
+export STV3_POSTGIS_PASSWORD
+export STV3_POSTGIS_SSLMODE
+export STV3_POSTGIS_CONNECT_TIMEOUT
 
 if [[ -n "${STV3_MQTT_HOST:-}" ]]; then
   # Standalone/NAS mode.  Compose or the operator owns every value; secrets
@@ -80,6 +88,14 @@ if [[ -n "${STV3_MQTT_HOST:-}" ]]; then
   STV3_EUMETSAT_CONSUMER_KEY="${STV3_EUMETSAT_CONSUMER_KEY:-}"
   STV3_EUMETSAT_CONSUMER_SECRET="${STV3_EUMETSAT_CONSUMER_SECRET:-}"
   STV3_JOB_RECEIPT_DB="${STV3_JOB_RECEIPT_DB:-/share/storm_tracker_worker/state/service_job_receipts.sqlite3}"
+  STV3_POSTGIS_ENABLED="${STV3_POSTGIS_ENABLED:-false}"
+  STV3_POSTGIS_HOST="${STV3_POSTGIS_HOST:-}"
+  STV3_POSTGIS_PORT="${STV3_POSTGIS_PORT:-5432}"
+  STV3_POSTGIS_DATABASE="${STV3_POSTGIS_DATABASE:-storm_tracker}"
+  STV3_POSTGIS_USER="${STV3_POSTGIS_USER:-storm_ingest}"
+  STV3_POSTGIS_PASSWORD="${STV3_POSTGIS_PASSWORD:-}"
+  STV3_POSTGIS_SSLMODE="${STV3_POSTGIS_SSLMODE:-disable}"
+  STV3_POSTGIS_CONNECT_TIMEOUT="${STV3_POSTGIS_CONNECT_TIMEOUT:-3}"
 else
   # Home Assistant app mode.  Supervisor owns MQTT discovery and options.
   STV3_RUNNING_UNDER_HA="true"
@@ -176,6 +192,14 @@ else
   STV3_EUMETSAT_CONSUMER_KEY="$(bashio::config eumetsat_consumer_key)"
   STV3_EUMETSAT_CONSUMER_SECRET="$(bashio::config eumetsat_consumer_secret)"
   STV3_JOB_RECEIPT_DB="${STV3_JOB_RECEIPT_DB:-/data/storm_tracker_worker_receipts.sqlite3}"
+  STV3_POSTGIS_ENABLED="$(bashio::config postgis_projection_enabled)"
+  STV3_POSTGIS_HOST="$(bashio::config postgis_host)"
+  STV3_POSTGIS_PORT="$(bashio::config postgis_port)"
+  STV3_POSTGIS_DATABASE="$(bashio::config postgis_database)"
+  STV3_POSTGIS_USER="$(bashio::config postgis_user)"
+  STV3_POSTGIS_PASSWORD="$(bashio::config postgis_password)"
+  STV3_POSTGIS_SSLMODE="$(bashio::config postgis_sslmode)"
+  STV3_POSTGIS_CONNECT_TIMEOUT="3"
 
 fi
 

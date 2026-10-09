@@ -1239,17 +1239,40 @@ class AutonomousScheduler:
         owner = _identifier(lease_owner, "lease_owner")
         allowed = _validated_allowed_workload_ids(allowed_workload_ids)
         # A desired-state refresh creates new content-addressed slot rows even
-        # when the acquisition intent itself is unchanged. Looking only at the
-        # candidate row's attempt_count would therefore reset fairness on each
-        # stationary Life360 lease refresh. Select the least-recently attempted
-        # stable intent first, then use priority inside an equal-age cohort.
-        # This also prevents a daily slot's old absolute scheduled_for from
-        # monopolising every new desired-state generation.
+        # when the acquisition workload itself is unchanged. Moving Life360
+        # targets also change region-bound intent IDs, so intent-only history
+        # would restart the general provider queue every few minutes. Raw
+        # acquisition payloads carry one stable, validated workload_id; use it
+        # as the fairness identity across generations and positions. Generic
+        # scheduler clients without that field retain the legacy intent_id
+        # identity. Select the least-recently attempted stable workload first,
+        # then use priority inside an equal-age cohort. This also prevents a
+        # daily slot's old absolute scheduled_for from monopolising every new
+        # desired-state generation.
+        stable_candidate_identity = (
+            "CASE WHEN json_type(scheduler_outbox.payload_json,"
+            "'$.workload_id')='text' THEN 'workload:' || "
+            "json_extract(scheduler_outbox.payload_json,'$.workload_id') "
+            "ELSE 'intent:' || scheduler_outbox.intent_id END"
+        )
+        fair_select = (
+            "WITH stable_history AS (SELECT CASE WHEN json_type("
+            "history.payload_json,'$.workload_id')='text' THEN "
+            "'workload:' || json_extract(history.payload_json,"
+            "'$.workload_id') ELSE 'intent:' || history.intent_id END "
+            "AS stable_identity,MAX(COALESCE(history.terminal_at,"
+            "history.updated_at)) AS last_attempted FROM scheduler_outbox "
+            "AS history WHERE history.attempt_count>0 GROUP BY "
+            "stable_identity) SELECT scheduler_outbox.* FROM "
+            "scheduler_outbox LEFT JOIN stable_history ON "
+            "stable_history.stable_identity=("
+            + stable_candidate_identity
+            + ") "
+            if prefer_unattempted
+            else "SELECT * FROM scheduler_outbox "
+        )
         claim_order = (
-            "COALESCE((SELECT MAX(COALESCE(history.terminal_at,"
-            "history.updated_at)) FROM scheduler_outbox AS history "
-            "WHERE history.intent_id=scheduler_outbox.intent_id "
-            "AND history.attempt_count>0),-1.0) ASC,"
+            "COALESCE(stable_history.last_attempted,-1.0) ASC,"
             "priority ASC,attempt_count ASC,scheduled_for ASC,job_id ASC"
             if prefer_unattempted
             else "priority ASC,scheduled_for ASC,job_id ASC"
@@ -1278,8 +1301,7 @@ class AutonomousScheduler:
                     return None
                 if allowed is None:
                     row = db.execute(
-                        "SELECT * FROM scheduler_outbox "
-                        "WHERE state IN ('pending','retry') "
+                        fair_select + "WHERE state IN ('pending','retry') "
                         "AND desired_state_sha256=? AND scheduled_for<=? "
                         "AND next_attempt_at<=? AND deadline_at>? "
                         "ORDER BY " + claim_order + " LIMIT 1",
@@ -1295,8 +1317,7 @@ class AutonomousScheduler:
                     )
                 else:
                     ready_rows = db.execute(
-                        "SELECT * FROM scheduler_outbox "
-                        "WHERE state IN ('pending','retry') "
+                        fair_select + "WHERE state IN ('pending','retry') "
                         "AND desired_state_sha256=? AND scheduled_for<=? "
                         "AND next_attempt_at<=? AND deadline_at>? "
                         "ORDER BY " + claim_order,

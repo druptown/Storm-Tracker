@@ -22,9 +22,13 @@ SCHEMA_VERSION = 1
 MAX_INDEX_ENTRIES = 250_000
 MAX_DATABASE_BYTES = 256 * 1024 * 1024
 MAX_DIAGNOSTIC_GROUPS = 64
+MAX_PROJECTION_BATCH = 128
+MAX_PROJECTION_ERROR_CODE = 96
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+_LEASE_OWNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$")
+_ERROR_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,95}$")
 
 
 class RawCalibrationIndexError(RuntimeError):
@@ -72,6 +76,34 @@ class RawCalibrationIndex:
                     ON raw_calibration_captures(source_id, received_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_raw_calibration_provider_time
                     ON raw_calibration_captures(provider, received_at DESC);
+                CREATE TABLE IF NOT EXISTS raw_calibration_projection_outbox(
+                    capture_id TEXT PRIMARY KEY REFERENCES
+                        raw_calibration_captures(capture_id) ON DELETE RESTRICT,
+                    state TEXT NOT NULL DEFAULT 'ready'
+                        CHECK(state IN ('ready','leased','projected')),
+                    attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),
+                    next_attempt_at REAL NOT NULL DEFAULT 0,
+                    lease_owner TEXT,
+                    lease_until REAL,
+                    projected_at REAL,
+                    last_error_code TEXT,
+                    CHECK(
+                        (state='leased' AND lease_owner IS NOT NULL
+                            AND lease_until IS NOT NULL)
+                        OR
+                        (state!='leased' AND lease_owner IS NULL
+                            AND lease_until IS NULL)
+                    ),
+                    CHECK(
+                        (state='projected' AND projected_at IS NOT NULL)
+                        OR
+                        (state!='projected' AND projected_at IS NULL)
+                    )
+                ) WITHOUT ROWID;
+                CREATE INDEX IF NOT EXISTS idx_raw_calibration_projection_ready
+                    ON raw_calibration_projection_outbox(
+                        state,next_attempt_at,capture_id
+                    );
                 """
             )
             expected = {
@@ -93,6 +125,14 @@ class RawCalibrationIndex:
                 raise RawCalibrationIndexError(
                     "raw calibration index heeft onverenigbaar manifest"
                 )
+            # Existing v1 indexes are upgraded additively.  The raw capture
+            # row remains authoritative; this outbox is only a recoverable
+            # asynchronous projection into PostgreSQL/PostGIS.
+            database.execute(
+                "INSERT OR IGNORE INTO raw_calibration_projection_outbox("
+                "capture_id,state,attempts,next_attempt_at) "
+                "SELECT capture_id,'ready',0,0 FROM raw_calibration_captures"
+            )
             database.commit()
         self._enforce_file_bound()
         return self.statistics()
@@ -183,7 +223,13 @@ class RawCalibrationIndex:
                         raise RawCalibrationIndexError(
                             "raw calibration capture-ID botst met andere provenance"
                         )
-                    database.rollback()
+                    database.execute(
+                        "INSERT OR IGNORE INTO raw_calibration_projection_outbox("
+                        "capture_id,state,attempts,next_attempt_at) "
+                        "VALUES(?,'ready',0,0)",
+                        (capture.capture_id,),
+                    )
+                    database.commit()
                     result = self._statistics(database)
                     result["already_indexed"] = True
                     return result
@@ -203,6 +249,12 @@ class RawCalibrationIndex:
                     "received_at,raw_store_created_at,indexed_at,member_count"
                     ") VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                     row,
+                )
+                database.execute(
+                    "INSERT INTO raw_calibration_projection_outbox("
+                    "capture_id,state,attempts,next_attempt_at) "
+                    "VALUES(?,'ready',0,0)",
+                    (capture.capture_id,),
                 )
                 database.commit()
             except BaseException:
@@ -225,6 +277,12 @@ class RawCalibrationIndex:
             "count(DISTINCT provider) AS providers,max(received_at) AS latest "
             "FROM raw_calibration_captures"
         ).fetchone()
+        projection_rows = dict(
+            database.execute(
+                "SELECT state,count(*) FROM raw_calibration_projection_outbox "
+                "GROUP BY state"
+            )
+        )
         return {
             "contract": CONTRACT,
             "status": "ready",
@@ -235,6 +293,11 @@ class RawCalibrationIndex:
             "database_bytes": self.path.stat().st_size if self.path.exists() else 0,
             "payload_storage": "raw_artifact_store",
             "exact_raw": True,
+            "postgis_projection": {
+                "ready": int(projection_rows.get("ready", 0)),
+                "leased": int(projection_rows.get("leased", 0)),
+                "projected": int(projection_rows.get("projected", 0)),
+            },
         }
 
     def statistics(self) -> dict[str, Any]:
@@ -249,6 +312,11 @@ class RawCalibrationIndex:
                 "database_bytes": 0,
                 "payload_storage": "raw_artifact_store",
                 "exact_raw": True,
+                "postgis_projection": {
+                    "ready": 0,
+                    "leased": 0,
+                    "projected": 0,
+                },
             }
         with closing(self._connect()) as database:
             result = self._statistics(database)
@@ -274,11 +342,200 @@ class RawCalibrationIndex:
             )
         return tuple(dict(row) for row in rows)
 
+    @staticmethod
+    def _validated_projection_request(
+        lease_owner: str,
+        now: float,
+    ) -> tuple[str, float]:
+        if _LEASE_OWNER_RE.fullmatch(lease_owner) is None:
+            raise RawCalibrationIndexError(
+                "raw calibration projectie lease_owner is ongeldig"
+            )
+        moment = float(now)
+        if not math.isfinite(moment) or moment < 0.0:
+            raise RawCalibrationIndexError(
+                "raw calibration projectieklok is ongeldig"
+            )
+        return lease_owner, moment
+
+    def claim_projection_batch(
+        self,
+        *,
+        lease_owner: str,
+        now: float,
+        limit: int = 64,
+        lease_seconds: float = 120.0,
+    ) -> tuple[dict[str, Any], ...]:
+        """Lease a bounded provenance batch for asynchronous PostGIS ingest."""
+
+        owner, moment = self._validated_projection_request(lease_owner, now)
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise RawCalibrationIndexError(
+                "raw calibration projectiebatch is ongeldig"
+            )
+        if not 1 <= limit <= MAX_PROJECTION_BATCH:
+            raise RawCalibrationIndexError(
+                "raw calibration projectiebatch overschrijdt haar grens"
+            )
+        lease_duration = float(lease_seconds)
+        if not math.isfinite(lease_duration) or not 5.0 <= lease_duration <= 900.0:
+            raise RawCalibrationIndexError(
+                "raw calibration projectielease is ongeldig"
+            )
+        self.initialize()
+        with closing(self._connect()) as database:
+            database.execute("BEGIN IMMEDIATE")
+            try:
+                database.execute(
+                    "UPDATE raw_calibration_projection_outbox SET "
+                    "state='ready',lease_owner=NULL,lease_until=NULL," 
+                    "next_attempt_at=? WHERE state='leased' AND lease_until<=?",
+                    (moment, moment),
+                )
+                rows = database.execute(
+                    "SELECT c.capture_id,c.source_id,c.provider,c.product,"
+                    "c.capture_receipt_sha256,c.manifest_sha256,"
+                    "c.product_timestamp,c.received_at,c.raw_store_created_at,"
+                    "c.indexed_at,c.member_count,o.attempts "
+                    "FROM raw_calibration_projection_outbox AS o JOIN "
+                    "raw_calibration_captures AS c USING(capture_id) "
+                    "WHERE o.state='ready' AND o.next_attempt_at<=? "
+                    "ORDER BY c.indexed_at,c.capture_id LIMIT ?",
+                    (moment, limit),
+                ).fetchall()
+                capture_ids = [str(row["capture_id"]) for row in rows]
+                for capture_id in capture_ids:
+                    updated = database.execute(
+                        "UPDATE raw_calibration_projection_outbox SET "
+                        "state='leased',attempts=attempts+1,lease_owner=?,"
+                        "lease_until=?,last_error_code=NULL "
+                        "WHERE capture_id=? AND state='ready'",
+                        (owner, moment + lease_duration, capture_id),
+                    )
+                    if updated.rowcount != 1:
+                        raise RawCalibrationIndexError(
+                            "raw calibration projectielease botst"
+                        )
+                database.commit()
+            except BaseException:
+                database.rollback()
+                raise
+        return tuple(
+            {**dict(row), "attempts": int(row["attempts"]) + 1}
+            for row in rows
+        )
+
+    @staticmethod
+    def _validated_capture_ids(capture_ids: Any) -> tuple[str, ...]:
+        if not isinstance(capture_ids, (tuple, list)) or not capture_ids:
+            raise RawCalibrationIndexError(
+                "raw calibration projectiecapturelijst is ongeldig"
+            )
+        result = tuple(capture_ids)
+        if len(result) > MAX_PROJECTION_BATCH or len(set(result)) != len(result):
+            raise RawCalibrationIndexError(
+                "raw calibration projectiecapturelijst overschrijdt haar grens"
+            )
+        if any(
+            not isinstance(value, str)
+            or not 0 < len(value) <= 96
+            or "\x00" in value
+            for value in result
+        ):
+            raise RawCalibrationIndexError(
+                "raw calibration projectiecapture-ID is ongeldig"
+            )
+        return result
+
+    def complete_projection_batch(
+        self,
+        capture_ids: tuple[str, ...] | list[str],
+        *,
+        lease_owner: str,
+        projected_at: float,
+    ) -> None:
+        """Acknowledge only after the complete PostgreSQL transaction commits."""
+
+        owner, moment = self._validated_projection_request(
+            lease_owner, projected_at
+        )
+        ids = self._validated_capture_ids(capture_ids)
+        with closing(self._connect()) as database:
+            database.execute("BEGIN IMMEDIATE")
+            try:
+                for capture_id in ids:
+                    updated = database.execute(
+                        "UPDATE raw_calibration_projection_outbox SET "
+                        "state='projected',lease_owner=NULL,lease_until=NULL,"
+                        "projected_at=?,last_error_code=NULL "
+                        "WHERE capture_id=? AND state='leased' "
+                        "AND lease_owner=?",
+                        (moment, capture_id, owner),
+                    )
+                    if updated.rowcount != 1:
+                        raise RawCalibrationIndexError(
+                            "raw calibration projectieack botst"
+                        )
+                database.commit()
+            except BaseException:
+                database.rollback()
+                raise
+        self._enforce_file_bound()
+
+    def retry_projection_batch(
+        self,
+        capture_ids: tuple[str, ...] | list[str],
+        *,
+        lease_owner: str,
+        now: float,
+        delay_seconds: float,
+        error_code: str,
+    ) -> None:
+        """Release a failed batch with bounded backoff and no error payload."""
+
+        owner, moment = self._validated_projection_request(lease_owner, now)
+        ids = self._validated_capture_ids(capture_ids)
+        delay = float(delay_seconds)
+        if not math.isfinite(delay) or not 1.0 <= delay <= 3600.0:
+            raise RawCalibrationIndexError(
+                "raw calibration projectieretry is ongeldig"
+            )
+        if (
+            not isinstance(error_code, str)
+            or len(error_code) > MAX_PROJECTION_ERROR_CODE
+            or _ERROR_CODE_RE.fullmatch(error_code) is None
+        ):
+            raise RawCalibrationIndexError(
+                "raw calibration projectiefoutcode is ongeldig"
+            )
+        with closing(self._connect()) as database:
+            database.execute("BEGIN IMMEDIATE")
+            try:
+                for capture_id in ids:
+                    updated = database.execute(
+                        "UPDATE raw_calibration_projection_outbox SET "
+                        "state='ready',lease_owner=NULL,lease_until=NULL,"
+                        "next_attempt_at=?,projected_at=NULL,last_error_code=? "
+                        "WHERE capture_id=? AND state='leased' "
+                        "AND lease_owner=?",
+                        (moment + delay, error_code, capture_id, owner),
+                    )
+                    if updated.rowcount != 1:
+                        raise RawCalibrationIndexError(
+                            "raw calibration projectieretry botst"
+                        )
+                database.commit()
+            except BaseException:
+                database.rollback()
+                raise
+        self._enforce_file_bound()
+
 
 __all__ = [
     "CONTRACT",
     "MAX_DATABASE_BYTES",
     "MAX_INDEX_ENTRIES",
+    "MAX_PROJECTION_BATCH",
     "RawCalibrationIndex",
     "RawCalibrationIndexError",
     "SCHEMA_VERSION",

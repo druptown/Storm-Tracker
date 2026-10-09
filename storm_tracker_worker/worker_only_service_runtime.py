@@ -58,6 +58,10 @@ from .raw_capture_service_composition import (
     build_raw_capture_service,
 )
 from .raw_calibration_index import RawCalibrationIndex
+from .postgis_projection import (
+    PostGISProjectionSettings,
+    PostGISRawCalibrationProjector,
+)
 
 
 CONTRACT = "stv3-worker-only-service-runtime-v1"
@@ -145,6 +149,8 @@ class WorkerOnlyServiceRuntime:
         | None = None,
         cell_tracker=None,
         raw_calibration_path=None,
+        postgis_settings: PostGISProjectionSettings | None = None,
+        postgis_connect_factory: Callable[..., Any] | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         if not isinstance(raw_runtime, RawCaptureServiceRuntime):
@@ -184,6 +190,28 @@ class WorkerOnlyServiceRuntime:
             "database_bytes": 0,
             "exact_raw": True,
             "source_statistics": [],
+        }
+        self._postgis_projector = (
+            None
+            if self._raw_calibration_index is None or postgis_settings is None
+            else PostGISRawCalibrationProjector(
+                self._raw_calibration_index,
+                postgis_settings,
+                clock=clock,
+                connect_factory=postgis_connect_factory,
+            )
+        )
+        self._postgis_projection_stats: dict[str, Any] = {
+            "enabled": self._postgis_projector is not None,
+            "status": (
+                "waiting" if self._postgis_projector is not None else "disabled"
+            ),
+            "batch": 0,
+            "ready": 0,
+            "leased": 0,
+            "projected": 0,
+            "last_success_at": None,
+            "last_error_code": None,
         }
         self._clock = clock
         self._gate = asyncio.Lock()
@@ -240,6 +268,9 @@ class WorkerOnlyServiceRuntime:
             "restored_captures": 0,
             "raw_calibration_indexed": 0,
             "raw_calibration_index_failures": 0,
+            "postgis_projection_flushes": 0,
+            "postgis_projection_successes": 0,
+            "postgis_projection_failures": 0,
         }
 
     def _increment(self, name: str) -> None:
@@ -299,6 +330,30 @@ class WorkerOnlyServiceRuntime:
         self._raw_calibration_stats = result
         if not already_indexed:
             self._increment("raw_calibration_indexed")
+
+    async def _flush_postgis_projection_noncritical(self) -> None:
+        """Drain one optional batch without affecting raw acquisition truth."""
+
+        projector = self._postgis_projector
+        if projector is None:
+            return
+        self._increment("postgis_projection_flushes")
+        try:
+            result = await asyncio.to_thread(projector.flush_once)
+        except Exception:
+            self._increment("postgis_projection_failures")
+            self._postgis_projection_stats = {
+                **self._postgis_projection_stats,
+                "status": "degraded",
+                "last_error_code": "postgis_projection_runtime_failed",
+            }
+            return
+        self._postgis_projection_stats = dict(result)
+        if result.get("status") == "current":
+            if int(result.get("batch", 0)) > 0:
+                self._increment("postgis_projection_successes")
+        else:
+            self._increment("postgis_projection_failures")
 
     def _ensure_output(self) -> None:
         if self._output is not None:
@@ -1269,6 +1324,7 @@ class WorkerOnlyServiceRuntime:
                     output = await self._output.async_tick()
                     stage = "snapshot_settle"
                     await self._settle_snapshot_output(output)
+                await self._flush_postgis_projection_noncritical()
                 self._state = "running"
                 self._last_error_code = None
             except Exception as error:
@@ -1332,6 +1388,7 @@ class WorkerOnlyServiceRuntime:
             "provider_count": SOURCE_COUNT,
             "captured_provider_count": len(self._captures),
             "raw_calibration": dict(self._raw_calibration_stats),
+            "postgis_projection": dict(self._postgis_projection_stats),
             "quantitative_capture_count": len(
                 set(self._capture_ids).intersection(
                     {
@@ -1442,6 +1499,8 @@ def build_worker_only_service(
     )
     from .worker_only_cell_tracking import WorkerOnlyCellTrackingRuntime
 
+    postgis_settings = PostGISProjectionSettings.from_environment()
+
     return WorkerOnlyServiceRuntime(
         raw_runtime=raw,
         publisher=publisher,
@@ -1468,6 +1527,7 @@ def build_worker_only_service(
             paths.acquisition_completion_root
             / "worker_only_raw_calibration_index.sqlite3"
         ),
+        postgis_settings=postgis_settings,
         cell_tracker=WorkerOnlyCellTrackingRuntime(
             state_path=(
                 paths.acquisition_completion_root

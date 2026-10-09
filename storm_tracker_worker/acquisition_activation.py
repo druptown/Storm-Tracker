@@ -427,7 +427,7 @@ def _build_rules() -> MappingProxyType[str, ActivationRule]:
                 process_target=SHADOW_CAPTURE_TARGET,
                 required_roles=("geoserver_response",),
                 handler_payload_contract=(
-                    "canonical_scheduled_slot_timestamp_v1"
+                    "exact_empty_object_v1"
                 ),
                 maximum_transport_bytes=64 * 1024 * 1024,
                 maximum_artifacts=1,

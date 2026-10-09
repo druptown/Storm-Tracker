@@ -3330,6 +3330,7 @@ class WorkerService:
                 "meteorological_output",
                 "mode",
                 "ownership_fence_held",
+                "postgis_projection",
                 "provider_count",
                 "quantitative_capture_count",
                 "quantitative_errors",
@@ -3371,6 +3372,9 @@ class WorkerService:
                     "quantitative_failures",
                     "quantitative_skipped_stale",
                     "quantitative_successes",
+                    "postgis_projection_failures",
+                    "postgis_projection_flushes",
+                    "postgis_projection_successes",
                     "raw_calibration_index_failures",
                     "raw_calibration_indexed",
                     "restored_captures",
@@ -3426,6 +3430,7 @@ class WorkerService:
             )
             tracking_errors = diagnostics.get("tracking_errors")
             raw_calibration = diagnostics.get("raw_calibration")
+            postgis_projection = diagnostics.get("postgis_projection")
             snapshot_diagnostic_counts = tuple(
                 diagnostics.get(key)
                 for key in (
@@ -3435,6 +3440,83 @@ class WorkerService:
                     "snapshot_unknown_built",
                 )
             )
+            postgis_base_fields = {
+                "batch",
+                "enabled",
+                "last_error_code",
+                "last_success_at",
+                "leased",
+                "projected",
+                "ready",
+                "status",
+            }
+            postgis_projection_ready = False
+            if isinstance(postgis_projection, Mapping):
+                postgis_numbers_ready = all(
+                    type(postgis_projection.get(key)) is int
+                    and 0
+                    <= postgis_projection[key]
+                    <= OPERATIONAL_SNAPSHOT_MAX_COUNTER
+                    for key in ("batch", "ready", "leased", "projected")
+                )
+                last_success_at = postgis_projection.get("last_success_at")
+                postgis_time_ready = (
+                    last_success_at is None
+                    or (
+                        type(last_success_at) in {int, float}
+                        and math.isfinite(float(last_success_at))
+                        and float(last_success_at) >= 0.0
+                    )
+                )
+                last_projection_error = postgis_projection.get(
+                    "last_error_code"
+                )
+                postgis_error_ready = last_projection_error in {
+                    None,
+                    "postgis_projection_failed",
+                    "postgis_projection_runtime_failed",
+                    "postgis_provenance_conflict",
+                }
+                if postgis_projection.get("enabled") is False:
+                    postgis_projection_ready = (
+                        set(postgis_projection) == postgis_base_fields
+                        and postgis_projection.get("status") == "disabled"
+                        and last_success_at is None
+                        and last_projection_error is None
+                        and postgis_numbers_ready
+                    )
+                elif postgis_projection.get("enabled") is True:
+                    projection_fields = set(postgis_projection)
+                    if projection_fields == postgis_base_fields:
+                        postgis_projection_ready = (
+                            postgis_projection.get("status")
+                            in {"waiting", "degraded"}
+                            and postgis_numbers_ready
+                            and postgis_time_ready
+                            and postgis_error_ready
+                        )
+                    elif projection_fields == postgis_base_fields | {
+                        "contract",
+                        "counts",
+                    }:
+                        projection_counts = postgis_projection.get("counts")
+                        postgis_projection_ready = (
+                            postgis_projection.get("contract")
+                            == "stv3-postgis-raw-calibration-projection-v1"
+                            and postgis_projection.get("status")
+                            in {"current", "degraded"}
+                            and postgis_numbers_ready
+                            and postgis_time_ready
+                            and postgis_error_ready
+                            and isinstance(projection_counts, Mapping)
+                            and set(projection_counts)
+                            == {"conflicts", "flushes", "projected", "retries"}
+                            and all(
+                                type(value) is int
+                                and 0 <= value <= OPERATIONAL_SNAPSHOT_MAX_COUNTER
+                                for value in projection_counts.values()
+                            )
+                        )
             operation_ready = (
                 counts["start_calls"] >= 1
                 and counts["ticks"] == 0
@@ -3465,6 +3547,7 @@ class WorkerService:
                 )
                 and 0 <= raw_calibration["sources"] <= 29
                 and 0 <= raw_calibration["providers"] <= 29
+                and postgis_projection_ready
                 and all(
                     type(value) is int
                     and 0 <= value <= OPERATIONAL_SNAPSHOT_MAX_COUNTER
