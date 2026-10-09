@@ -22,6 +22,12 @@ from .thin_station_measurement import (
 
 
 MAX_RETRY_CYCLES = 8
+AUTO_DISCOVERY_GROUND_PROVIDERS = frozenset({
+    "kmi_aws",
+    "metar",
+    "netatmo",
+    "wunderground",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +162,34 @@ ON CONFLICT(provider_id,station_id,observed_at,measurement_type) DO UPDATE SET
           )
         THEN EXCLUDED.metadata ELSE stv3_station_measurement.metadata END,
     updated_at=clock_timestamp()
+"""
+
+_AUTO_UPSERT_GROUND_STATION = """
+INSERT INTO stv3_ground_station(
+    provider_id,station_id,position,discovered_at,last_seen_at,
+    quality_score,operational
+) VALUES(
+    %s,%s,ST_SetSRID(ST_MakePoint(%s,%s),4326),
+    to_timestamp(%s),to_timestamp(%s),%s,true
+)
+ON CONFLICT(provider_id,station_id) DO UPDATE SET
+    position=EXCLUDED.position,
+    last_seen_at=GREATEST(
+        stv3_ground_station.last_seen_at,
+        EXCLUDED.last_seen_at
+    ),
+    quality_score=GREATEST(
+        stv3_ground_station.quality_score,
+        EXCLUDED.quality_score
+    ),
+    operational=true,
+    updated_at=clock_timestamp()
+"""
+
+_AUTO_INSERT_STATION_CAPABILITY = """
+INSERT INTO stv3_station_capability(provider_id,station_id,capability)
+VALUES(%s,%s,%s)
+ON CONFLICT(provider_id,station_id,capability) DO NOTHING
 """
 
 _INSERT_FUSION = """
@@ -307,6 +341,83 @@ def _known_station_measurements(
     )
 
 
+def _auto_discover_ground_stations(
+    cursor: Any,
+    observations: tuple[Any, ...],
+    measurements: tuple[StationMeasurement, ...],
+) -> int:
+    """Upsert validated live ground stations without replacing the importer."""
+
+    observations_by_identity: dict[tuple[str, str, float, str], Any] = {}
+    for observation in observations:
+        measurement = StationMeasurement.from_observation(observation)
+        if measurement is not None:
+            observations_by_identity.setdefault(measurement.identity, observation)
+
+    stations: dict[tuple[str, str], dict[str, Any]] = {}
+    quality_score = {
+        "good": 1.0,
+        "suspect": 0.75,
+        "poor": 0.5,
+        "unknown": 0.25,
+    }
+    for measurement in measurements:
+        if measurement.provider_id not in AUTO_DISCOVERY_GROUND_PROVIDERS:
+            continue
+        observation = observations_by_identity.get(measurement.identity)
+        if observation is None:
+            continue
+        key = (measurement.provider_id, measurement.station_id)
+        item = stations.setdefault(key, {
+            "longitude": float(observation.longitude),
+            "latitude": float(observation.latitude),
+            "discovered_at": float(measurement.received_at),
+            "last_seen_at": float(measurement.observed_at),
+            "quality_score": quality_score[measurement.quality.value],
+            "capabilities": set(),
+        })
+        if measurement.observed_at >= item["last_seen_at"]:
+            item["longitude"] = float(observation.longitude)
+            item["latitude"] = float(observation.latitude)
+            item["last_seen_at"] = float(measurement.observed_at)
+        item["discovered_at"] = min(
+            item["discovered_at"],
+            float(measurement.received_at),
+        )
+        item["quality_score"] = max(
+            item["quality_score"],
+            quality_score[measurement.quality.value],
+        )
+        item["capabilities"].add(measurement.measurement_type)
+
+    if not stations:
+        return 0
+    cursor.executemany(
+        _AUTO_UPSERT_GROUND_STATION,
+        (
+            (
+                provider_id,
+                station_id,
+                item["longitude"],
+                item["latitude"],
+                item["discovered_at"],
+                item["last_seen_at"],
+                item["quality_score"],
+            )
+            for (provider_id, station_id), item in sorted(stations.items())
+        ),
+    )
+    cursor.executemany(
+        _AUTO_INSERT_STATION_CAPABILITY,
+        (
+            (provider_id, station_id, capability)
+            for (provider_id, station_id), item in sorted(stations.items())
+            for capability in sorted(item["capabilities"])
+        ),
+    )
+    return len(stations)
+
+
 class ThinPostGISWriter:
     def __init__(
         self,
@@ -351,6 +462,7 @@ class ThinPostGISWriter:
         counts = {
             "observations": 0,
             "station_measurements": 0,
+            "auto_discovered_stations": 0,
             "fusion_cycles": 0,
             "storm_cells": 0,
             "track_points": 0,
@@ -366,9 +478,19 @@ class ThinPostGISWriter:
                     for cycle, _nowcast, _validations, _regional_radar in batch
                     for observation in cycle.observations
                 )
+                station_candidates = deduplicate_station_measurements(
+                    all_observations,
+                )
+                counts["auto_discovered_stations"] = (
+                    _auto_discover_ground_stations(
+                        cursor,
+                        all_observations,
+                        station_candidates,
+                    )
+                )
                 station_measurements = _known_station_measurements(
                     cursor,
-                    deduplicate_station_measurements(all_observations),
+                    station_candidates,
                 )
                 station_identities = {
                     measurement.identity

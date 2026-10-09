@@ -8,9 +8,14 @@ import json
 import math
 from typing import Any, Callable, Mapping
 
-from .thin_observation import ObservationQuality
+from .thin_observation import (
+    ObservationKind,
+    ObservationQuality,
+    ThinObservationError,
+    normalize_unit,
+)
 from .thin_postgis import _INSERT_STATION_MEASUREMENT
-from .thin_station_catalog import normalize_capabilities
+from .thin_station_measurement import normalize_station_measurement_type
 
 
 MIGRATION_ID = "legacy_observation_v1"
@@ -64,7 +69,7 @@ SELECT observation.observation_key,observation.provider_id,
        observation.product_id,observation.value,observation.unit,
        EXTRACT(EPOCH FROM observation.observed_at),
        EXTRACT(EPOCH FROM observation.received_at),
-       observation.quality,observation.metadata,
+       observation.quality,observation.metadata,observation.kind,
        station.station_id IS NOT NULL
 FROM stv3_observation AS observation
 LEFT JOIN stv3_ground_station AS station
@@ -227,14 +232,21 @@ class StationMeasurementMigrationRepository:
                     try:
                         metadata = _decoded_metadata(row[8])
                         station_id = str(metadata.get("station_id", "")).strip()
-                        measurement_type = normalize_capabilities((
-                            str(metadata.get("measurement", "")),
-                        ))[0]
+                        kind = ObservationKind(str(row[9]))
+                        measurement_type = normalize_station_measurement_type(
+                            metadata.get("measurement"),
+                            fallback_kind=kind,
+                        )
                         quality = ObservationQuality(str(row[7])).value
+                        value, unit = normalize_unit(
+                            kind,
+                            float(row[3]),
+                            str(row[4]),
+                        )
                         observed_at = float(row[5])
                         received_at = float(row[6])
                         if (
-                            not bool(row[9])
+                            not bool(row[10])
                             or not station_id
                             or not math.isfinite(observed_at)
                             or not math.isfinite(received_at)
@@ -246,8 +258,8 @@ class StationMeasurementMigrationRepository:
                             observed_at,
                             measurement_type,
                             str(row[2]),
-                            float(row[3]),
-                            str(row[4]),
+                            value,
+                            unit,
                             received_at,
                             quality,
                             json.dumps(
@@ -257,7 +269,13 @@ class StationMeasurementMigrationRepository:
                                 allow_nan=False,
                             ),
                         ))
-                    except (IndexError, TypeError, ValueError, json.JSONDecodeError):
+                    except (
+                        IndexError,
+                        TypeError,
+                        ValueError,
+                        ThinObservationError,
+                        json.JSONDecodeError,
+                    ):
                         rejected += 1
                 if insert_rows:
                     cursor.executemany(_INSERT_STATION_MEASUREMENT, insert_rows)
