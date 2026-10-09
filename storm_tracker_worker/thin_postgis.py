@@ -273,6 +273,40 @@ def _sha(value: Any) -> str:
     return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
 
 
+def _known_station_measurements(
+    cursor: Any,
+    measurements: tuple[StationMeasurement, ...],
+) -> tuple[StationMeasurement, ...]:
+    """Keep the canonical route limited to stations present in the catalog.
+
+    Unknown stations deliberately stay on the legacy observation route.  This
+    prevents one foreign-key miss from rolling back the complete weather
+    cycle while station discovery catches up independently.
+    """
+
+    station_keys = tuple(sorted({
+        (measurement.provider_id, measurement.station_id)
+        for measurement in measurements
+    }))
+    if not station_keys:
+        return ()
+    values_sql = ",".join("(%s,%s)" for _item in station_keys)
+    parameters = tuple(value for key in station_keys for value in key)
+    cursor.execute(
+        "SELECT station.provider_id,station.station_id "
+        "FROM stv3_ground_station AS station "
+        f"JOIN (VALUES {values_sql}) AS requested(provider_id,station_id) "
+        "ON requested.provider_id=station.provider_id "
+        "AND requested.station_id=station.station_id",
+        parameters,
+    )
+    known = {(str(row[0]), str(row[1])) for row in cursor.fetchall()}
+    return tuple(
+        measurement for measurement in measurements
+        if (measurement.provider_id, measurement.station_id) in known
+    )
+
+
 class ThinPostGISWriter:
     def __init__(
         self,
@@ -332,8 +366,9 @@ class ThinPostGISWriter:
                     for cycle, _nowcast, _validations, _regional_radar in batch
                     for observation in cycle.observations
                 )
-                station_measurements = deduplicate_station_measurements(
-                    all_observations,
+                station_measurements = _known_station_measurements(
+                    cursor,
+                    deduplicate_station_measurements(all_observations),
                 )
                 station_identities = {
                     measurement.identity

@@ -59,6 +59,7 @@ def _parser() -> argparse.ArgumentParser:
     backfill = subparsers.add_parser("backfill")
     backfill.add_argument("--batch-size", type=int, default=5_000)
     backfill.add_argument("--max-batches", type=int, default=0)
+    backfill.add_argument("--days", type=int, default=21)
     return parser
 
 
@@ -78,8 +79,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if report.status in {"ready", "verified"} else 2
 
     batches = 0
+    if not 1 <= arguments.days <= 366:
+        raise ValueError("backfill_days_invalid")
+    observed_after = (
+        datetime.now(timezone.utc).timestamp() - arguments.days * 86_400
+    )
     while True:
-        report = repository.backfill_batch(limit=arguments.batch_size)
+        report = repository.backfill_batch(
+            limit=arguments.batch_size,
+            observed_after=observed_after,
+        )
         _write_report(report)
         batches += 1
         if report.status == "complete":

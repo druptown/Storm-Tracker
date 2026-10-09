@@ -71,8 +71,7 @@ LEFT JOIN stv3_ground_station AS station
   ON station.provider_id=observation.provider_id
  AND station.station_id=observation.metadata->>'station_id'
 WHERE (%s::text IS NULL OR observation.observation_key>%s)
-  AND observation.observed_at >=
-      date_trunc('month',CURRENT_TIMESTAMP)-interval '6 months'
+  AND observation.observed_at >= to_timestamp(%s)
   AND NULLIF(observation.metadata->>'station_id','') IS NOT NULL
   AND NULLIF(observation.metadata->>'measurement','') IS NOT NULL
 ORDER BY observation.observation_key
@@ -190,9 +189,17 @@ class StationMeasurementMigrationRepository:
         self._connect_factory = connect_factory
         self._connect_kwargs = dict(connect_kwargs)
 
-    def backfill_batch(self, *, limit: int) -> BackfillReport:
+    def backfill_batch(
+        self,
+        *,
+        limit: int,
+        observed_after: float,
+    ) -> BackfillReport:
         if isinstance(limit, bool) or not 1 <= int(limit) <= 100_000:
             raise ValueError("backfill_limit_invalid")
+        cutoff = float(observed_after)
+        if not math.isfinite(cutoff) or cutoff < 0.0:
+            raise ValueError("backfill_cutoff_invalid")
         connection = self._connect_factory(**self._connect_kwargs)
         try:
             with connection.cursor() as cursor:
@@ -209,7 +216,7 @@ class StationMeasurementMigrationRepository:
                 rejected_total = int(state[2])
                 cursor.execute(
                     _SELECT_LEGACY_BATCH,
-                    (source_cursor, source_cursor, int(limit) + 1),
+                    (source_cursor, source_cursor, cutoff, int(limit) + 1),
                 )
                 fetched = tuple(cursor.fetchall())
                 has_more = len(fetched) > int(limit)
