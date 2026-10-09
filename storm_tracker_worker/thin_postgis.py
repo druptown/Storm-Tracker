@@ -15,6 +15,10 @@ from .thin_fusion import FusionCycle
 from .thin_ground_validation import ForecastValidation
 from .thin_nowcast import ThinNowcast
 from .thin_regional_radar_fusion import RegionalFusionSummary
+from .thin_station_measurement import (
+    StationMeasurement,
+    deduplicate_station_measurements,
+)
 
 
 MAX_RETRY_CYCLES = 8
@@ -90,6 +94,67 @@ INSERT INTO stv3_observation(
 ON CONFLICT(observation_key) DO UPDATE SET
     value=EXCLUDED.value, quality=EXCLUDED.quality,
     metadata=EXCLUDED.metadata, geometry=EXCLUDED.geometry,
+    updated_at=clock_timestamp()
+"""
+
+_INSERT_STATION_MEASUREMENT = """
+INSERT INTO stv3_station_measurement(
+    provider_id,station_id,observed_at,measurement_type,product_id,
+    value,unit,received_at,quality,metadata
+) VALUES(
+    %s,%s,to_timestamp(%s),%s,%s,
+    %s,%s,to_timestamp(%s),%s,%s::jsonb
+)
+ON CONFLICT(provider_id,station_id,observed_at,measurement_type) DO UPDATE SET
+    product_id=CASE
+        WHEN stv3_quality_rank(EXCLUDED.quality) >
+             stv3_quality_rank(stv3_station_measurement.quality)
+          OR (
+             stv3_quality_rank(EXCLUDED.quality) =
+             stv3_quality_rank(stv3_station_measurement.quality)
+             AND EXCLUDED.received_at >= stv3_station_measurement.received_at
+          )
+        THEN EXCLUDED.product_id ELSE stv3_station_measurement.product_id END,
+    value=CASE
+        WHEN stv3_quality_rank(EXCLUDED.quality) >
+             stv3_quality_rank(stv3_station_measurement.quality)
+          OR (
+             stv3_quality_rank(EXCLUDED.quality) =
+             stv3_quality_rank(stv3_station_measurement.quality)
+             AND EXCLUDED.received_at >= stv3_station_measurement.received_at
+          )
+        THEN EXCLUDED.value ELSE stv3_station_measurement.value END,
+    unit=CASE
+        WHEN stv3_quality_rank(EXCLUDED.quality) >
+             stv3_quality_rank(stv3_station_measurement.quality)
+          OR (
+             stv3_quality_rank(EXCLUDED.quality) =
+             stv3_quality_rank(stv3_station_measurement.quality)
+             AND EXCLUDED.received_at >= stv3_station_measurement.received_at
+          )
+        THEN EXCLUDED.unit ELSE stv3_station_measurement.unit END,
+    received_at=GREATEST(
+        stv3_station_measurement.received_at,
+        EXCLUDED.received_at
+    ),
+    quality=CASE
+        WHEN stv3_quality_rank(EXCLUDED.quality) >
+             stv3_quality_rank(stv3_station_measurement.quality)
+          OR (
+             stv3_quality_rank(EXCLUDED.quality) =
+             stv3_quality_rank(stv3_station_measurement.quality)
+             AND EXCLUDED.received_at >= stv3_station_measurement.received_at
+          )
+        THEN EXCLUDED.quality ELSE stv3_station_measurement.quality END,
+    metadata=CASE
+        WHEN stv3_quality_rank(EXCLUDED.quality) >
+             stv3_quality_rank(stv3_station_measurement.quality)
+          OR (
+             stv3_quality_rank(EXCLUDED.quality) =
+             stv3_quality_rank(stv3_station_measurement.quality)
+             AND EXCLUDED.received_at >= stv3_station_measurement.received_at
+          )
+        THEN EXCLUDED.metadata ELSE stv3_station_measurement.metadata END,
     updated_at=clock_timestamp()
 """
 
@@ -187,7 +252,21 @@ ON CONFLICT(validation_key) DO UPDATE SET
 
 
 def _json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+        default=_json_default,
+    )
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, tuple):
+        return list(value)
+    raise TypeError(f"not_json_compatible:{type(value).__name__}")
 
 
 def _sha(value: Any) -> str:
@@ -237,6 +316,7 @@ class ThinPostGISWriter:
         connection = self._connect()
         counts = {
             "observations": 0,
+            "station_measurements": 0,
             "fusion_cycles": 0,
             "storm_cells": 0,
             "track_points": 0,
@@ -247,9 +327,51 @@ class ThinPostGISWriter:
         }
         try:
             with connection.cursor() as cursor:
+                all_observations = tuple(
+                    observation
+                    for cycle, _nowcast, _validations, _regional_radar in batch
+                    for observation in cycle.observations
+                )
+                station_measurements = deduplicate_station_measurements(
+                    all_observations,
+                )
+                station_identities = {
+                    measurement.identity
+                    for measurement in station_measurements
+                }
+                station_rows = [
+                    (
+                        measurement.provider_id,
+                        measurement.station_id,
+                        measurement.observed_at,
+                        measurement.measurement_type,
+                        measurement.product_id,
+                        measurement.value,
+                        measurement.unit,
+                        measurement.received_at,
+                        measurement.quality.value,
+                        _json(measurement.metadata),
+                    )
+                    for measurement in station_measurements
+                ]
+                if station_rows:
+                    cursor.executemany(
+                        _INSERT_STATION_MEASUREMENT,
+                        station_rows,
+                    )
+                    counts["station_measurements"] = len(station_rows)
+
                 observation_rows: list[tuple[Any, ...]] = []
                 for cycle, nowcast, _validations, _regional_radar in batch:
                     for observation in cycle.observations:
+                        station_measurement = StationMeasurement.from_observation(
+                            observation,
+                        )
+                        if (
+                            station_measurement is not None
+                            and station_measurement.identity in station_identities
+                        ):
+                            continue
                         payload = observation.as_dict()
                         geometry = payload["geometry"] or {
                             "type": "Point",

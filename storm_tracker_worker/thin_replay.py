@@ -492,14 +492,38 @@ ORDER BY cell.observed_at,cell.cell_id
 """
 
 _SELECT_GROUND = """
-SELECT provider_id,product_id,target_id,value,unit,
-       EXTRACT(EPOCH FROM observed_at),EXTRACT(EPOCH FROM received_at),
-       ST_Y(geometry),ST_X(geometry),quality,metadata,ST_AsGeoJSON(geometry)
-FROM stv3_observation
-WHERE target_id=%s AND kind='rain_rate'
-  AND observed_at>=to_timestamp(%s) AND observed_at<to_timestamp(%s)
-  AND metadata ? 'station_id'
-ORDER BY observed_at,provider_id
+SELECT measurement.provider_id,measurement.product_id,
+       measurement.value,measurement.unit,
+       EXTRACT(EPOCH FROM measurement.observed_at),
+       EXTRACT(EPOCH FROM measurement.received_at),
+       ST_Y(station.position),ST_X(station.position),
+       measurement.quality,measurement.metadata,
+       ST_AsGeoJSON(station.position)
+FROM stv3_station_measurement AS measurement
+JOIN stv3_ground_station AS station
+  ON station.provider_id=measurement.provider_id
+ AND station.station_id=measurement.station_id
+JOIN LATERAL (
+    SELECT candidate.position
+    FROM stv3_target_position AS candidate
+    WHERE candidate.target_id=%s
+      AND candidate.observed_at>=to_timestamp(%s)
+      AND candidate.observed_at<to_timestamp(%s)
+    ORDER BY ABS(EXTRACT(EPOCH FROM (
+        candidate.observed_at-measurement.observed_at
+    )))
+    LIMIT 1
+) AS target_position ON true
+WHERE measurement.measurement_type='rain_rate'
+  AND measurement.observed_at>=to_timestamp(%s)
+  AND measurement.observed_at<to_timestamp(%s)
+  AND ST_DWithin(
+      station.position::geography,
+      target_position.position::geography,
+      %s
+  )
+ORDER BY measurement.observed_at,measurement.provider_id,
+         measurement.station_id
 """
 
 _INSERT_REPLAY_RUN = """
@@ -561,7 +585,14 @@ class ReplayRepository:
                 cell_rows = tuple(cursor.fetchall())
                 cursor.execute(
                     _SELECT_GROUND,
-                    (target_id, start - 7200.0, end + 7200.0),
+                    (
+                        target_id,
+                        start,
+                        end,
+                        start - 7200.0,
+                        end + 7200.0,
+                        20_000.0,
+                    ),
                 )
                 ground_rows = tuple(cursor.fetchall())
         finally:
@@ -585,17 +616,17 @@ class ReplayRepository:
         ground = tuple(NormalizedObservation.create(
             provider_id=str(row[0]),
             product_id=str(row[1]),
-            target_id=None if row[2] is None else str(row[2]),
+            target_id=target_id,
             kind=ObservationKind.RAIN_RATE,
-            value=float(row[3]),
-            unit=str(row[4]),
-            observed_at=float(row[5]),
-            received_at=float(row[6]),
-            latitude=float(row[7]),
-            longitude=float(row[8]),
-            quality=ObservationQuality(str(row[9])),
-            metadata=dict(_decoded_json(row[10])),
-            geometry=dict(_decoded_json(row[11])),
+            value=float(row[2]),
+            unit=str(row[3]),
+            observed_at=float(row[4]),
+            received_at=float(row[5]),
+            latitude=float(row[6]),
+            longitude=float(row[7]),
+            quality=ObservationQuality(str(row[8])),
+            metadata=dict(_decoded_json(row[9])),
+            geometry=dict(_decoded_json(row[10])),
             maximum_age_seconds=10_000_000.0,
         ) for row in ground_rows)
         return tuple(ReplayFrame(

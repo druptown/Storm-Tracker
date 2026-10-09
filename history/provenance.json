@@ -1,8 +1,8 @@
 {
   "kind": "recovered_archive_source",
   "component": "worker",
-  "version": "1.18.52",
-  "source_id": "4c91965e96afe00ad1166d798c7de02205c24cf6418439191bd3610bb0fa05e4",
+  "version": "1.18.53",
+  "source_id": "2f4735d95b6226db5653fdd465f1d88309be62b79f7cb9a51aa0e95e2d38d02f",
   "recovered_on": "2026-10-09",
   "files": [
     {
@@ -32,7 +32,7 @@
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "2a79e9242d827b7b73863ee55500bad8eab1d4a4505cac3b56e60bc5b0c8c1d4",
+      "sha256": "f5d17cd7c00ab17fe01af6d4c9d5d75a5d52fc121d9484fa9eea5d242cfa0562",
       "size": 64
     },
     {
@@ -272,7 +272,7 @@
     {
       "path": "config.yaml",
       "mode": 420,
-      "sha256": "828d4275e241754e2f3afd5db346950d3d622e9f48db3efab6b77504004ae8dd",
+      "sha256": "ad4f00c4db595e689978343d9b5d2ee4c7488331771ee3f44f8a441dd818ab38",
       "size": 2669
     },
     {
@@ -466,6 +466,12 @@
       "mode": 420,
       "sha256": "f0e5974415f9d4a2a4d69742c335b54af08dcd5cce2524b9dc54648c49bc4afc",
       "size": 85122
+    },
+    {
+      "path": "manage_postgis_station_storage.py",
+      "mode": 420,
+      "sha256": "c484d3a5a95babcba62d4a687af248d074e329168bc0631f754809c537842f0f",
+      "size": 2990
     },
     {
       "path": "met_office_native.py",
@@ -760,6 +766,12 @@
       "mode": 420,
       "sha256": "fbea19977484f439ea3a8696194bc00e18f419b32914b5129bdae5a349e7f2dd",
       "size": 325
+    },
+    {
+      "path": "postgis_migrations/0005_station_measurements.sql",
+      "mode": 420,
+      "sha256": "d317e4dcbde0e38cbfce6233512713545d4427e81dd78d9b2db79fc1d6ce0a5e",
+      "size": 3045
     },
     {
       "path": "postgis_projection.py",
@@ -1088,8 +1100,14 @@
     {
       "path": "thin_postgis.py",
       "mode": 420,
-      "sha256": "98c2292c0e85885f9610bf2dc0665c05f00dd83a8324e5437a40317c3772a77a",
-      "size": 18458
+      "sha256": "892718d0c393957bcb3d0736feb283a8918223280a6f303eaa5ee77271abde9b",
+      "size": 23329
+    },
+    {
+      "path": "thin_postgis_station_migration.py",
+      "mode": 420,
+      "sha256": "b5912ef43bfb5bcea491a2097db2ed566c3b58aff5fa8c6a6b26227ed63448fb",
+      "size": 12348
     },
     {
       "path": "thin_provider_adapters.py",
@@ -1142,8 +1160,8 @@
     {
       "path": "thin_replay.py",
       "mode": 420,
-      "sha256": "90d9a18557700baccdcfba5b92f982b2abdd27d76cc50d0ff8d67b3d018000dd",
-      "size": 27885
+      "sha256": "0477b436193290716c89abd6cee6db7049a9f0073bc4ab1987aefc3b80341cb8",
+      "size": 28870
     },
     {
       "path": "thin_satellite_adapters.py",
@@ -1162,6 +1180,12 @@
       "mode": 420,
       "sha256": "4acedd328c75dd66e2e149c10a1206b2779ba5326afb2cd77e564879dacac3cd",
       "size": 17571
+    },
+    {
+      "path": "thin_station_measurement.py",
+      "mode": 420,
+      "sha256": "8ff8d13448870187a0fe9ad2f393bd9343567933bbe614bd24f25c54e185d81b",
+      "size": 3512
     },
     {
       "path": "tracking.py",
@@ -1580,12 +1604,12 @@
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_worker_v1.18.52_deploy.tar.gz",
-      "archive_sha256": "9f299f39cfed2f5464c130e8656c222882ffbe8827592f90f3961f84513eca98",
-      "bytes": 2379114,
+      "filename": "storm_tracker_worker_v1.18.53_deploy.tar.gz",
+      "archive_sha256": "87c586fa8190d7fd35937cce0392df4b52824cd27e0b95bfc5a1969637475ed2",
+      "bytes": 2384817,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.141_worker_v1.18.52_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.142_worker_v1.18.53_evidence.json",
           "archive_and_source_match": true
         }
       ]
