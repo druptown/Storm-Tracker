@@ -533,13 +533,19 @@ class Storm:
         return timestamps[-1] if timestamps else None
 
     def closest_radar_point(
-        self, target_lat: float, target_lon: float
+        self,
+        target_lat: float,
+        target_lon: float,
+        *,
+        min_timestamp: Optional[float] = None,
     ) -> Optional[tuple[float, float, float]]:
         """Geef (afstand_km, lat, lon) van de dichtste lokale radarcel."""
         if not self.radar_cells:
             return None
         closest = None
         for cell in self.radar_cells.values():
+            if min_timestamp is not None and float(cell.timestamp) < min_timestamp:
+                continue
             points = cell.footprint_points or ((cell.lat, cell.lon),)
             for lat, lon in points:
                 candidate = (

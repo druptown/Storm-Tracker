@@ -10,7 +10,7 @@ import threading
 from .provider_bias import profile_confidence, scope_from_region_key
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class CalibrationDataStore:
@@ -166,6 +166,16 @@ class CalibrationDataStore:
                     ON system_performance_samples(cycle_id, started_at);
                 CREATE INDEX IF NOT EXISTS idx_system_performance_stage
                     ON system_performance_samples(stage, started_at);
+                CREATE TABLE IF NOT EXISTS pysteps_frame_cache (
+                    region_id TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    nominal_timestamp INTEGER NOT NULL,
+                    saved_at REAL NOT NULL,
+                    frame_json TEXT NOT NULL,
+                    PRIMARY KEY(region_id, source, nominal_timestamp)
+                ) WITHOUT ROWID;
+                CREATE INDEX IF NOT EXISTS idx_pysteps_frame_cache_time
+                    ON pysteps_frame_cache(nominal_timestamp);
                 CREATE TABLE IF NOT EXISTS provider_bias_samples (
                     id INTEGER PRIMARY KEY,
                     region_key TEXT NOT NULL,
@@ -298,6 +308,55 @@ class CalibrationDataStore:
             self._oldest_timestamp, self._newest_timestamp = bounds
             self._analysis_summary = self._load_analysis_summary(db)
         return self.statistics()
+
+    def save_pysteps_frames(
+        self, frames_by_region: dict[str, list[dict]]
+    ) -> int:
+        """Bewaar de begrensde operationele framebuffer over deploys heen."""
+        saved_at = datetime.now(timezone.utc).timestamp()
+        rows = []
+        for region_id, frames in frames_by_region.items():
+            for frame in frames:
+                rows.append((
+                    str(region_id),
+                    str(frame["source"]),
+                    int(frame["nominal_timestamp"]),
+                    saved_at,
+                    json.dumps(
+                        frame, separators=(",", ":"), ensure_ascii=False
+                    ),
+                ))
+        with self._lock, self._connect() as db:
+            db.executemany("""
+                INSERT INTO pysteps_frame_cache(
+                    region_id, source, nominal_timestamp, saved_at, frame_json
+                ) VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(region_id, source, nominal_timestamp)
+                DO UPDATE SET saved_at=excluded.saved_at,
+                    frame_json=excluded.frame_json
+            """, rows)
+            cutoff = int(saved_at) - 6 * 3600
+            db.execute(
+                "DELETE FROM pysteps_frame_cache WHERE nominal_timestamp < ?",
+                (cutoff,),
+            )
+        return len(rows)
+
+    def load_pysteps_frames(self) -> dict[str, list[dict]]:
+        """Laad recente buffers; raster- en ouderdomscontrole gebeurt in history."""
+        with self._lock, self._connect() as db:
+            rows = db.execute(
+                "SELECT region_id, frame_json FROM pysteps_frame_cache "
+                "ORDER BY nominal_timestamp"
+            ).fetchall()
+        result: dict[str, list[dict]] = {}
+        for region_id, payload in rows:
+            try:
+                frame = json.loads(payload)
+            except (TypeError, ValueError):
+                continue
+            result.setdefault(str(region_id), []).append(frame)
+        return result
 
     @staticmethod
     def _ensure_preflight_v6_columns(db: sqlite3.Connection) -> None:
@@ -1032,11 +1091,10 @@ class CalibrationDataStore:
         best_cost = 99
         for shift_lat in range(-2, 3):
             for shift_lon in range(-2, 3):
-                shifted = {
-                    (lat + shift_lat, lon + shift_lon)
+                score = sum(
+                    (lat + shift_lat, lon + shift_lon) in from_cells
                     for lat, lon in to_cells
-                }
-                score = len(from_cells & shifted)
+                )
                 cost = abs(shift_lat) + abs(shift_lon)
                 if score > best_score or (
                     score == best_score and cost < best_cost
@@ -1055,17 +1113,19 @@ class CalibrationDataStore:
         """Geef gemiddelde `to - from` intensiteit op uitgelijnde natte cellen."""
         if shift is None:
             return None
-        differences: list[float] = []
+        difference_total = 0.0
+        difference_count = 0
         for (lat, lon), to_intensity in to_points.items():
             from_intensity = from_points.get(
                 (lat + shift[0], lon + shift[1])
             )
             if from_intensity is None or to_intensity is None:
                 continue
-            differences.append(float(to_intensity) - float(from_intensity))
+            difference_total += float(to_intensity) - float(from_intensity)
+            difference_count += 1
         return (
-            round(sum(differences) / len(differences), 4)
-            if differences else None
+            round(difference_total / difference_count, 4)
+            if difference_count else None
         )
 
     def _insert_directional_bias_sample(

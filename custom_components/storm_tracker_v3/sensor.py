@@ -28,10 +28,48 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
-from .engine.nowcast import build_precipitation_status
+from .engine.nowcast import build_precipitation_status, stabilize_eta_continuity
 from .engine.geojson import build_feature_collection
+from .engine.netatmo_local import build_local_netatmo_summary
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _netatmo_target_summary(data, engine_id, target_lat, target_lon):
+    if target_lat is None or target_lon is None:
+        return build_local_netatmo_summary([], 0.0, 0.0)
+    observations = (
+        data.get("netatmo_observations_by_engine", {}).get(engine_id, [])
+        if engine_id else []
+    )
+    return build_local_netatmo_summary(
+        observations, target_lat, target_lon
+    )
+
+
+def _apply_local_netatmo_confirmation(result, netatmo):
+    """Laat bevestigde regen ter plaatse primeren boven een naderende ETA."""
+    if not netatmo.get("netatmo_local_confirmed"):
+        return
+    result.update({
+        "status": "bevestigd",
+        "selected_reason": "netatmo_local_rain",
+        "distance_km": 0.0,
+        "eta_minutes": 0.0,
+        "eta_basis": "netatmo_grondmeting",
+        "eta_reliable": True,
+        "moving_towards": None,
+        "approach_speed_kmh": None,
+        "footprint_pass_distance_km": 0.0,
+        "footprint_pass_minutes": 0.0,
+        "passage_classification": "actueel",
+        "forecast_available": True,
+        "forecast_block_reason": None,
+        "forecast_horizon_minutes": 0,
+        "forecast_intensity_label": "grondmeting",
+        "forecast_intensity_dbz": None,
+        "forecast_confidence_percent": 100,
+    })
 
 
 def _lightning_only_summary(data, engine_id, target_lat, target_lon):
@@ -428,7 +466,10 @@ class PystepsPreflightSensor(StormTrackerBaseSensor):
 
     @property
     def _listen_events(self):
-        return [f"{DOMAIN}_radar_source_update"]
+        return [
+            f"{DOMAIN}_radar_source_update",
+            f"{DOMAIN}_targets_updated",
+        ]
 
     @property
     def native_value(self):
@@ -446,8 +487,14 @@ class PystepsPreflightSensor(StormTrackerBaseSensor):
         return {
             "contract": diagnostics.get("contract"),
             "max_frames": diagnostics.get("max_frames"),
-            "feeds_detection": False,
+            "feeds_detection": any(
+                result.get("feeds_detection")
+                for result in diagnostics.get("preflight", {}).values()
+            ),
             "regions": diagnostics.get("preflight", {}),
+            "restart_recovery_audit": self.hass.data.get(DOMAIN, {}).get(
+                "restart_recovery_audit", {}
+            ),
         }
 
 
@@ -940,6 +987,8 @@ class PrecipitationStatusSensor(StormTrackerBaseSensor):
     def __init__(self, hass: HomeAssistant) -> None:
         super().__init__(hass)
         self._cached_summary = None
+        self._last_published_summary = None
+        self._last_published_monotonic = None
 
     @property
     def _listen_events(self):
@@ -978,6 +1027,12 @@ class PrecipitationStatusSensor(StormTrackerBaseSensor):
                 data.get("netatmo_pressure_trends_by_engine", {}).get(engine_id)
                 if engine_id else data.get("netatmo_pressure_trend")
             ),
+            motion_guidance=(
+                data.get("pysteps_input", {}).get("preflight", {}).get(
+                    engine_id
+                )
+                if engine_id else None
+            ),
         )
         if result.get("status") == "droog" and engine_id:
             lightning = _lightning_only_summary(
@@ -990,17 +1045,36 @@ class PrecipitationStatusSensor(StormTrackerBaseSensor):
                 result.update(lightning)
         _apply_source_transition(result, transition)
         target = home_target
+        netatmo = _netatmo_target_summary(
+            data,
+            engine_id,
+            float(home_target.get("latitude", data.get("fictieve_lat", 0.0))),
+            float(home_target.get("longitude", data.get("fictieve_lon", 0.0))),
+        )
+        _apply_local_netatmo_confirmation(result, netatmo)
         return {
             **result,
             "location_place": target.get("location_place", "Thuis"),
             "location_address": target.get("location_address"),
             "country_code": target.get("country_code"),
             "location_accuracy_km": target.get("location_accuracy_km"),
+            **netatmo,
             **_open_meteo_target_summary(data, "home"),
         }
 
     def _prepare_update(self) -> None:
-        self._cached_summary = self._summary()
+        now_monotonic = time.monotonic()
+        elapsed_minutes = (
+            (now_monotonic - self._last_published_monotonic) / 60.0
+            if self._last_published_monotonic is not None else 0.0
+        )
+        self._cached_summary = stabilize_eta_continuity(
+            self._summary(),
+            self._last_published_summary,
+            elapsed_minutes=elapsed_minutes,
+        )
+        self._last_published_summary = dict(self._cached_summary)
+        self._last_published_monotonic = now_monotonic
 
     def _current_summary(self):
         if self._cached_summary is None:
@@ -1032,6 +1106,8 @@ class TargetPrecipitationStatusSensor(StormTrackerBaseSensor):
         super().__init__(hass)
         self._spec = spec
         self._cached_summary = None
+        self._last_published_summary = None
+        self._last_published_monotonic = None
         self._attr_name = f"STV3 {spec.name} Neerslagstatus"
         self._attr_unique_id = f"stv3_target_{spec.entity_suffix}_neerslagstatus"
 
@@ -1078,6 +1154,12 @@ class TargetPrecipitationStatusSensor(StormTrackerBaseSensor):
                 )
                 if region else None
             ),
+            motion_guidance=(
+                domain_data.get("pysteps_input", {}).get(
+                    "preflight", {}
+                ).get(region.engine_id)
+                if region else None
+            ),
         )
         if not target.get("radar_covered", False):
             result["status"] = "onvoldoende_data"
@@ -1091,6 +1173,13 @@ class TargetPrecipitationStatusSensor(StormTrackerBaseSensor):
             if lightning is not None:
                 result.update(lightning)
         _apply_source_transition(result, transition)
+        netatmo = _netatmo_target_summary(
+            domain_data,
+            region.engine_id if region else target.get("region_engine_id"),
+            target.get("latitude"),
+            target.get("longitude"),
+        )
+        _apply_local_netatmo_confirmation(result, netatmo)
         return {
             **result,
             "target_id": self._spec.target_id,
@@ -1104,13 +1193,25 @@ class TargetPrecipitationStatusSensor(StormTrackerBaseSensor):
             "location_address": target.get("location_address"),
             "country_code": target.get("country_code"),
             "location_accuracy_km": target.get("location_accuracy_km"),
+            **netatmo,
             **_open_meteo_target_summary(
                 domain_data, self._spec.target_id
             ),
         }
 
     def _prepare_update(self) -> None:
-        self._cached_summary = self._summary()
+        now_monotonic = time.monotonic()
+        elapsed_minutes = (
+            (now_monotonic - self._last_published_monotonic) / 60.0
+            if self._last_published_monotonic is not None else 0.0
+        )
+        self._cached_summary = stabilize_eta_continuity(
+            self._summary(),
+            self._last_published_summary,
+            elapsed_minutes=elapsed_minutes,
+        )
+        self._last_published_summary = dict(self._cached_summary)
+        self._last_published_monotonic = now_monotonic
 
     def _current_summary(self):
         if self._cached_summary is None:
@@ -1454,6 +1555,10 @@ class StormMapGeoJsonSensor(StormTrackerBaseSensor):
     _attr_unique_id = "stv3_map_geojson"
     _attr_icon = "mdi:map-marker-path"
 
+    def __init__(self, hass: HomeAssistant) -> None:
+        super().__init__(hass)
+        self._cached_collection = None
+
     @property
     def _listen_events(self):
         return [
@@ -1465,15 +1570,22 @@ class StormMapGeoJsonSensor(StormTrackerBaseSensor):
         ]
 
     def _collection(self):
+        if self._cached_collection is not None:
+            return self._cached_collection
         data = self.hass.data.get(DOMAIN, {})
         manager = data.get("storm_manager")
-        return build_feature_collection(
+        self._cached_collection = build_feature_collection(
             data.get("targets", {}),
             manager.get_all_engines() if manager else [],
             active_radar_source=data.get("active_radar_source"),
             radar_sources_by_engine=data.get("radar_sources_by_engine"),
             lightning_events=data.get("recent_lightning"),
         )
+        return self._cached_collection
+
+    def _prepare_update(self) -> None:
+        self._cached_collection = None
+        self._cached_collection = self._collection()
 
     @property
     def native_value(self):

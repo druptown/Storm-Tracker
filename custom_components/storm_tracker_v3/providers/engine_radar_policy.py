@@ -169,3 +169,42 @@ def apply_echo_availability(
             age,
         )
     return decision
+
+
+def apply_quality_fallback(
+    decision: EngineRadarDecision,
+    states: dict[str, SourceState],
+    *,
+    rainviewer_observations: int,
+    completeness_profile: dict | None,
+    now: float,
+) -> EngineRadarDecision:
+    """Vervang een structureel onvolledige bron door gezonde RainViewer-data."""
+    if decision.source in {None, "rainviewer"} or not completeness_profile:
+        return decision
+    rainviewer = states.get("rainviewer", SourceState(False, False))
+    samples = int(completeness_profile.get("sample_count") or 0)
+    detection = completeness_profile.get("mean_detection_ratio")
+    if (
+        samples < 30
+        or detection is None
+        or float(detection) >= 0.25
+        or rainviewer_observations <= 0
+        or not rainviewer.configured
+        or not rainviewer.healthy
+    ):
+        return decision
+    age = (
+        now - rainviewer.last_success
+        if rainviewer.last_success is not None else None
+    )
+    return EngineRadarDecision(
+        "rainviewer",
+        (
+            f"{decision.source} inhoudelijk onvolledig: slechts "
+            f"{float(detection) * 100:.1f}% van onafhankelijke natte cellen "
+            f"gezien over {samples} vergelijkingen; RainViewer kwaliteitsfallback"
+        ),
+        decision.country_codes,
+        age,
+    )

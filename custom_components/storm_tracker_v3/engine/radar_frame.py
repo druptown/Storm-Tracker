@@ -12,11 +12,41 @@ from collections import deque
 from dataclasses import dataclass
 from math import ceil, isfinite
 from typing import Any
+import time
 
 
 DEFAULT_GRID_DEG = 0.02
 MAX_GRID_CELLS = 160_000
 MAX_HISTORY_FRAMES = 6
+RECOVERY_OBJECT_MAX_GAP_SECONDS = 15 * 60
+
+
+def audit_storm_object_recovery(
+    frames: tuple["RadarFrame", ...],
+    storms,
+    *,
+    max_gap_seconds: int = RECOVERY_OBJECT_MAX_GAP_SECONDS,
+) -> dict[str, Any]:
+    """Controleer of een recente rastercache een hersteld stormobject heeft."""
+    if not frames:
+        return {
+            "status": "geen_recente_radarcache",
+            "latest_cached_frame": None,
+            "matched_storm_ids": [],
+        }
+    latest_cached = float(frames[-1].nominal_timestamp)
+    matched = []
+    for storm in storms:
+        latest_storm = getattr(storm, "last_radar_timestamp", None)
+        if latest_storm is None:
+            continue
+        if abs(float(latest_storm) - latest_cached) <= max_gap_seconds:
+            matched.append(str(storm.storm_id))
+    return {
+        "status": "hersteld" if matched else "ontbrekend_stormobject",
+        "latest_cached_frame": latest_cached,
+        "matched_storm_ids": sorted(matched),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +74,34 @@ class RadarFrame:
         for row, column, intensity in self.cells:
             values[row, column] = intensity
         return values
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source": self.source,
+            "nominal_timestamp": self.nominal_timestamp,
+            "bounds": list(self.bounds),
+            "grid_deg": self.grid_deg,
+            "height": self.height,
+            "width": self.width,
+            "cells": [list(cell) for cell in self.cells],
+            "input_runs": self.input_runs,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "RadarFrame":
+        return cls(
+            source=str(value["source"]),
+            nominal_timestamp=int(value["nominal_timestamp"]),
+            bounds=tuple(float(item) for item in value["bounds"]),
+            grid_deg=float(value["grid_deg"]),
+            height=int(value["height"]),
+            width=int(value["width"]),
+            cells=tuple(
+                (int(row), int(column), int(intensity))
+                for row, column, intensity in value["cells"]
+            ),
+            input_runs=int(value.get("input_runs", 0)),
+        )
 
 
 def _grid_shape(bounds: tuple[float, float, float, float]) -> tuple[float, int, int]:
@@ -141,7 +199,19 @@ class RadarFrameHistory:
         frame = frame_from_overlay(overlay, bounds)
         if frame is None:
             return None
+        return self.add_frame(region_id, frame)
+
+    def add_frame(self, region_id: str, frame: RadarFrame) -> RadarFrame:
+        """Voeg een gevalideerd frame toe en wis incompatibele oude rasters."""
         frames = self._frames.setdefault(region_id, deque(maxlen=self._max_frames))
+        if frames and (
+            frames[-1].source != frame.source
+            or frames[-1].bounds != frame.bounds
+            or frames[-1].grid_deg != frame.grid_deg
+            or frames[-1].height != frame.height
+            or frames[-1].width != frame.width
+        ):
+            frames.clear()
         for index, existing in enumerate(frames):
             if existing.nominal_timestamp == frame.nominal_timestamp:
                 frames[index] = frame
@@ -153,6 +223,42 @@ class RadarFrameHistory:
             maxlen=self._max_frames,
         )
         return frame
+
+    def restore(
+        self,
+        serialized: dict[str, list[dict[str, Any]]],
+        bounds_by_region: dict[str, tuple[float, float, float, float]],
+        *,
+        max_age_seconds: int = 30 * 60,
+        now: float | None = None,
+    ) -> int:
+        """Herstel alleen recente frames die nog exact op het regiogrid passen."""
+        reference = time.time() if now is None else float(now)
+        restored = 0
+        for region_id, values in serialized.items():
+            expected_bounds = bounds_by_region.get(region_id)
+            if expected_bounds is None:
+                continue
+            for value in values:
+                try:
+                    frame = RadarFrame.from_dict(value)
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if (
+                    reference - frame.nominal_timestamp > max_age_seconds
+                    or frame.nominal_timestamp > reference + 60
+                    or frame.bounds != expected_bounds
+                ):
+                    continue
+                self.add_frame(region_id, frame)
+                restored += 1
+        return restored
+
+    def serialized(self) -> dict[str, list[dict[str, Any]]]:
+        return {
+            region_id: [frame.to_dict() for frame in frames]
+            for region_id, frames in self._frames.items()
+        }
 
     def frames(self, region_id: str) -> tuple[RadarFrame, ...]:
         """Geef een onveranderlijke momentopname voor een externe worker."""
@@ -176,5 +282,7 @@ class RadarFrameHistory:
             "contract": "sparse_regular_grid_v1",
             "max_frames": self._max_frames,
             "regions": regions,
-            "feeds_detection": False,
+            "feeds_detection": any(
+                len(frames) >= 3 for frames in self._frames.values()
+            ),
         }

@@ -1,21 +1,21 @@
 {
   "kind": "recovered_archive_source",
   "component": "integration",
-  "version": "0.4.103",
-  "source_id": "335c1676a2ee7babd5521335bf65a4eb93d1b6cc6144e9ede4d8c1fbf85c51d6",
+  "version": "0.4.123",
+  "source_id": "ad75db61533c1d3c613930466dceedfafda4fa110745cd35442f4ada32c4071a",
   "recovered_on": "2026-10-09",
   "files": [
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "d79090d718a60fdcd58fa7d5608aaa1d1ec78d4850461b85352bee50fb20c923",
-      "size": 112206
+      "sha256": "0fa9c242c95acfb2680917045772526a90b3e79620b4692ce981d8437270ec68",
+      "size": 124097
     },
     {
       "path": "config_flow.py",
       "mode": 420,
-      "sha256": "1a7f0e92e84fe9230c49cdefbbc0dc88e4aa0403fca2a7cb9507ac9a1252ff34",
-      "size": 6803
+      "sha256": "5105930eb7ae4d5e404e99997c9f7fdea62fcb1e1a55f1a935f11683fe605b0a",
+      "size": 7239
     },
     {
       "path": "const.py",
@@ -32,14 +32,14 @@
     {
       "path": "engine/calibration_store.py",
       "mode": 420,
-      "sha256": "8882996242b7e6fe35f2ee29725650ceea5fcd46d23a18ee4132a81f5da1a791",
-      "size": 56544
+      "sha256": "1f1f21e6a7912e0a954d6f6799a97b2646a328c2b3d5396e3805e07652c50bc1",
+      "size": 59115
     },
     {
       "path": "engine/geojson.py",
       "mode": 420,
-      "sha256": "719a2fcdbe100bd7c750398d03058a8efa19385ded6a51cdb5a5d107ce84c1a7",
-      "size": 16280
+      "sha256": "d0790753a70d94d18c75433d2a0e627a99bd4fc9a0bb4e83c5430b52c04401d0",
+      "size": 16698
     },
     {
       "path": "engine/lightning_backpressure.py",
@@ -54,16 +54,22 @@
       "size": 1420
     },
     {
+      "path": "engine/netatmo_local.py",
+      "mode": 420,
+      "sha256": "8a372b5142d683c69d17b81eec8b80867a0c6cd9d7fc22f939b6da165352c636",
+      "size": 3627
+    },
+    {
       "path": "engine/nowcast.py",
       "mode": 420,
-      "sha256": "f1ff8671c345caa9c9049023d401c19347d97ae56a6893bdd8b3faea4af27712",
-      "size": 14191
+      "sha256": "68678223f98db3a8c664af56ea373a97984b3d1caa5c05230471ceebe62cbfe6",
+      "size": 26340
     },
     {
       "path": "engine/observation.py",
       "mode": 420,
-      "sha256": "c760adfd0fe516ca1622c8421dad5e9ea95fb7e03af7b38940d4370130312c4b",
-      "size": 3580
+      "sha256": "f28f853999a87cf397b340e19fc730301385fa2f2f6eb9a14dc6340278e183c5",
+      "size": 3647
     },
     {
       "path": "engine/observation_fusion_engine.py",
@@ -86,8 +92,8 @@
     {
       "path": "engine/pysteps_preflight.py",
       "mode": 420,
-      "sha256": "aee3044a246a8f063e55105f1f586f12b3b09d1807b7e07f410d1eb9d92a0dbf",
-      "size": 8224
+      "sha256": "d01327e2c5ba4c62df9cd0f27a05740b4794992eb35f2677fa0d3b7a5003892a",
+      "size": 10215
     },
     {
       "path": "engine/radar_calibration.py",
@@ -98,8 +104,8 @@
     {
       "path": "engine/radar_frame.py",
       "mode": 420,
-      "sha256": "e7722d9e54874196588d4826bd80e784f023807e97675cec670ad825c9c2500b",
-      "size": 6819
+      "sha256": "58916921e877a23c12055e3d90f0237c65893500eb6499beaa3adb20e32376eb",
+      "size": 10817
     },
     {
       "path": "engine/region_manager.py",
@@ -110,14 +116,14 @@
     {
       "path": "engine/storm.py",
       "mode": 420,
-      "sha256": "001ad83c31fe25c9cd889db4d8252a80846b19ac45264553e460de588ad13899",
-      "size": 39018
+      "sha256": "c2b19baee76e4ddad64417ece056e438d842b80869c03d77ad7847aa08b58ad4",
+      "size": 39196
     },
     {
       "path": "engine/storm_engine.py",
       "mode": 420,
-      "sha256": "fb4cd8bf79159e848e8d30cd28519a3e20ebd5b18c7e4be2ab612f8cfa700198",
-      "size": 34843
+      "sha256": "2d9e1e395ef2500e634eb172e81f7b791ccb3fa63c624dfa563665d058762e8f",
+      "size": 35869
     },
     {
       "path": "engine/targets.py",
@@ -176,7 +182,7 @@
     {
       "path": "manifest.json",
       "mode": 420,
-      "sha256": "3ad1363b4c745cb275e1330e74a85ee4c6584cbbe1a415ea20b6795a260bd0ad",
+      "sha256": "bfb9562dfa2ce4b422d246736662c48dd4ebaef2a4a40c042aeb8721a262f3b7",
       "size": 471
     },
     {
@@ -242,8 +248,8 @@
     {
       "path": "providers/engine_radar_policy.py",
       "mode": 420,
-      "sha256": "c8883b6df4c2d4ec1ab81e74ffbca1948cdf7bf9381d9abdd358354f7a878467",
-      "size": 6249
+      "sha256": "9a816a345c14847f5baa30128208e934d148699588f5c21010af5aedcdbeacb8",
+      "size": 7555
     },
     {
       "path": "providers/eumetsat_li.py",
@@ -308,8 +314,8 @@
     {
       "path": "providers/netatmo.py",
       "mode": 420,
-      "sha256": "28ea2f0568f328ecfd171667679986c47c7e0e6d75642496cca26decefdfa8dd",
-      "size": 10445
+      "sha256": "d10d2736dc0a93072462f8fe5840ef3b9e0c04f63647be2967452757b2302171",
+      "size": 13229
     },
     {
       "path": "providers/noaa_goes_glm.py",
@@ -362,36 +368,31 @@
     {
       "path": "sensor.py",
       "mode": 420,
-      "sha256": "eaebd270fb87aec36a1a4d99eb3b5028df09131185c05c6097e627fdf3361446",
-      "size": 58161
+      "sha256": "1cddbcacedd374ab6239d08248c8a86c419473b02ceee66146175573e0d584a9",
+      "size": 62433
     },
     {
       "path": "strings.json",
       "mode": 420,
-      "sha256": "2332dc7e187752176d48de535953feb857214200ff8241b0ce3a376326cf2d33",
-      "size": 3391
+      "sha256": "b93892009c39c61a84275ffb19d1aa426abfb333ad27e07ba3307606883597e4",
+      "size": 3735
     },
     {
       "path": "translations/nl.json",
       "mode": 420,
-      "sha256": "2332dc7e187752176d48de535953feb857214200ff8241b0ce3a376326cf2d33",
-      "size": 3391
+      "sha256": "b93892009c39c61a84275ffb19d1aa426abfb333ad27e07ba3307606883597e4",
+      "size": 3735
     }
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_v3_v0.4.103_deploy.zip",
-      "archive_sha256": "7858fd723135c99fa8551d91ecd4ea900d0df7ce904eea184bae837e2b1e8410",
-      "bytes": 397759,
+      "filename": "storm_tracker_v3_v0.4.123_deploy.zip",
+      "archive_sha256": "d91acffe54b05971620cbe4e968871546b1d94357f6e3a462163f4ce24810bf5",
+      "bytes": 204482,
       "evidence_checks": [],
-      "omitted_members": [
-        {
-          "path": "storm_tracker_v3_v0.4.123_deploy.zip",
-          "sha256": "d91acffe54b05971620cbe4e968871546b1d94357f6e3a462163f4ce24810bf5",
-          "bytes": 204482,
-          "reason": "embedded_release_archive_preserved_as_separate_source_version"
-        }
-      ]
+      "nested_member": "storm_tracker_v3_v0.4.123_deploy.zip",
+      "container_sha256": "7858fd723135c99fa8551d91ecd4ea900d0df7ce904eea184bae837e2b1e8410",
+      "windows_paths": true
     }
   ],
   "deployment_status": "not_inferred",

@@ -22,7 +22,8 @@
           "netatmo_refresh_token": "Netatmo refresh-token",
           "netatmo_radius_km": "Netatmo-stationsradius",
           "lightning_source_mode": "Bliksembron",
-          "open_meteo_enabled": "Open-Meteo-modelbegeleiding inschakelen (optioneel)"
+          "open_meteo_enabled": "Open-Meteo-modelbegeleiding inschakelen (optioneel)",
+          "analysis_mode": "Analyse- en kalibratiemodus"
         }
       }
     },
@@ -53,7 +54,8 @@
           "netatmo_refresh_token": "Netatmo refresh-token",
           "netatmo_radius_km": "Netatmo-stationsradius",
           "lightning_source_mode": "Bliksembron",
-          "open_meteo_enabled": "Open-Meteo-modelbegeleiding inschakelen (optioneel)"
+          "open_meteo_enabled": "Open-Meteo-modelbegeleiding inschakelen (optioneel)",
+          "analysis_mode": "Analyse- en kalibratiemodus"
         }
       }
     }
@@ -63,6 +65,12 @@
       "options": {
         "auto": "Automatisch (Blitzortung met satellietfallback)",
         "satellite_test": "Satelliet forceren (testmodus)"
+      }
+    },
+    "analysis_mode": {
+      "options": {
+        "full_send": "Full send (iedere cyclus volledige analyse en kalibratie)",
+        "thermal_throttle": "Thermal throttle (kwartierkalibratie en begrenzing vanaf 75 °C)"
       }
     }
   }

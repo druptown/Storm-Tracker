@@ -27,6 +27,7 @@ CONF_NETATMO_CLIENT_SECRET = "netatmo_client_secret"
 CONF_NETATMO_REFRESH_TOKEN = "netatmo_refresh_token"
 CONF_NETATMO_RADIUS = "netatmo_radius_km"
 CONF_OPEN_METEO_ENABLED = "open_meteo_enabled"
+CONF_ANALYSIS_MODE = "analysis_mode"
 
 
 def _schema(defaults: dict) -> vol.Schema:
@@ -109,9 +110,11 @@ def _schema(defaults: dict) -> vol.Schema:
         )),
         vol.Optional(
             CONF_NETATMO_RADIUS,
-            default=defaults.get(CONF_NETATMO_RADIUS, 175.0),
+            default=min(
+                float(defaults.get(CONF_NETATMO_RADIUS, 20.0)), 20.0
+            ),
         ): selector.NumberSelector(selector.NumberSelectorConfig(
-            min=25, max=500, step=25, mode=selector.NumberSelectorMode.BOX,
+            min=10, max=20, step=5, mode=selector.NumberSelectorMode.BOX,
             unit_of_measurement="km",
         )),
         vol.Optional(
@@ -126,6 +129,14 @@ def _schema(defaults: dict) -> vol.Schema:
             CONF_OPEN_METEO_ENABLED,
             default=defaults.get(CONF_OPEN_METEO_ENABLED, False),
         ): selector.BooleanSelector(),
+        vol.Optional(
+            CONF_ANALYSIS_MODE,
+            default=defaults.get(CONF_ANALYSIS_MODE, "full_send"),
+        ): selector.SelectSelector(selector.SelectSelectorConfig(
+            options=["full_send", "thermal_throttle"],
+            mode=selector.SelectSelectorMode.DROPDOWN,
+            translation_key="analysis_mode",
+        )),
     }
     test_selector = selector.EntitySelector(selector.EntitySelectorConfig(
         domain="device_tracker",

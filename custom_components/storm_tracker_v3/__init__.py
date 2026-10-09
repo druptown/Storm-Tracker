@@ -39,7 +39,7 @@ from .providers.blitzortung import BlitzortungProvider
 from .engine.region_manager import StormManager
 from .engine.mcs_store import McsHistoryStore
 from .engine.pressure_trend import PressureTrendTracker
-from .engine.radar_frame import RadarFrameHistory
+from .engine.radar_frame import RadarFrameHistory, audit_storm_object_recovery
 from .engine.pysteps_preflight import evaluate_frames as evaluate_pysteps_frames
 from .engine.lightning_backpressure import LightningUpdateCoalescer
 from .engine.targets import build_target_specs, coordinates_from_state
@@ -53,6 +53,7 @@ from .geometry.location_resolver import load_places_json, resolve_location
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = ["sensor"]
+HA_START_WAIT_TIMEOUT_S = 180.0
 
 
 def _use_satellite_lightning(blitz_connected: bool, source_mode: str) -> bool:
@@ -95,7 +96,7 @@ CONFIG_SCHEMA = vol.Schema({
         vol.Optional("netatmo_client_id"): cv.string,
         vol.Optional("netatmo_client_secret"): cv.string,
         vol.Optional("netatmo_refresh_token"): cv.string,
-        vol.Optional("netatmo_radius_km", default=175): vol.Coerce(float),
+        vol.Optional("netatmo_radius_km", default=20): vol.Coerce(float),
         vol.Optional("eumetsat_consumer_key"): cv.string,
         vol.Optional("eumetsat_consumer_secret"): cv.string,
         vol.Optional("meteofrance_api_token"): cv.string,
@@ -104,6 +105,9 @@ CONFIG_SCHEMA = vol.Schema({
         vol.Optional("hsaf_password"): cv.string,
         vol.Optional("lightning_source_mode", default="auto"): vol.In({"auto", "satellite_test"}),
         vol.Optional("open_meteo_enabled", default=False): cv.boolean,
+        vol.Optional("analysis_mode", default="full_send"): vol.In(
+            {"full_send", "thermal_throttle"}
+        ),
     })
 }, extra=vol.ALLOW_EXTRA)
 
@@ -145,9 +149,12 @@ async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
         "netatmo_client_id": raw.get("netatmo_client_id"),
         "netatmo_client_secret": raw.get("netatmo_client_secret"),
         "netatmo_refresh_token": raw.get("netatmo_refresh_token"),
-        "netatmo_radius_km": raw.get("netatmo_radius_km", 175.0),
+        "netatmo_radius_km": min(
+            float(raw.get("netatmo_radius_km", 20.0)), 20.0
+        ),
         "lightning_source_mode": raw.get("lightning_source_mode", "auto"),
         "open_meteo_enabled": raw.get("open_meteo_enabled", False),
+        "analysis_mode": raw.get("analysis_mode", "full_send"),
     }
     if raw.get("test_tracker_entity"):
         conf["fictieve_tracker_entity"] = raw["test_tracker_entity"]
@@ -163,6 +170,13 @@ async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
             if setter is not None:
                 await setter(
                     updated_config.get("lightning_source_mode", "auto")
+                )
+            analysis_setter = hass.data.get(DOMAIN, {}).get(
+                "set_analysis_mode"
+            )
+            if analysis_setter is not None:
+                analysis_setter(
+                    updated_config.get("analysis_mode", "full_send")
                 )
             configured_open_meteo = bool(
                 updated_config.get("open_meteo_enabled", False)
@@ -185,6 +199,10 @@ async def _async_setup_runtime(
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN].setdefault("unsubscribers", [])
+    ha_started = asyncio.Event()
+    if hass.state == CoreState.running:
+        ha_started.set()
+    hass.data[DOMAIN]["ha_started_barrier"] = ha_started
     if not hass.data[DOMAIN].get("geojson_http_registered"):
         hass.http.register_view(StormTrackerGeoJsonView(hass))
         hass.data[DOMAIN]["geojson_http_registered"] = True
@@ -194,14 +212,21 @@ async def _async_setup_runtime(
     fictieve_entity = "zone.home"
     knmi_api_key    = conf.get("knmi_api_key")
     knmi_wms_key    = conf.get("knmi_wms_api_key", knmi_api_key)
-    netatmo_radius  = conf.get("netatmo_radius_km", 175.0)
+    # Netatmo dient uitsluitend als lokale grondverificatie. Een brede
+    # 175-km-query verdubbelt de API-belasting per regio en voegt naast
+    # de regionale radar geen detectiewaarde toe.
+    netatmo_radius = min(
+        max(float(conf.get("netatmo_radius_km", 20.0)), 10.0), 20.0
+    )
     radar_radius    = conf.get("radar_radius_km", 200.0)
     sharing_distance = conf.get("engine_sharing_distance_km", 150.0)
     lightning_source_mode = conf.get("lightning_source_mode", "auto")
+    analysis_mode = conf.get("analysis_mode", "full_send")
     open_meteo_enabled = bool(conf.get("open_meteo_enabled", False))
     hsaf_username = conf.get("hsaf_username")
     hsaf_password = conf.get("hsaf_password")
     hass.data[DOMAIN]["lightning_source_mode"] = lightning_source_mode
+    hass.data[DOMAIN]["analysis_mode"] = analysis_mode
     hass.data[DOMAIN]["open_meteo_enabled"] = open_meteo_enabled
     target_specs = build_target_specs(
         home_lat,
@@ -492,8 +517,6 @@ async def _async_setup_runtime(
         ]
 
     blitz = BlitzortungProvider(on_observation=_on_blitz, regions=_blitz_regions())
-    if lightning_source_mode != "satellite_test":
-        blitz.start()
     hass.data[DOMAIN]["blitz_provider"] = blitz
 
     eumetsat = None
@@ -682,6 +705,7 @@ async def _async_setup_runtime(
         )
         from .providers.engine_radar_policy import (
             apply_echo_availability,
+            apply_quality_fallback,
             select_engine_radar_source,
         )
         now_ts = time.time()
@@ -720,6 +744,23 @@ async def _async_setup_runtime(
                 opera_corroborated_observations=hass.data[DOMAIN]
                 .get("opera_corroborated_counts_by_engine", {})
                 .get(region.engine_id, 0),
+            )
+            completeness_profile = None
+            if decision.source not in {None, "rainviewer"}:
+                completeness_profile = select_transition_profile(
+                    hass.data[DOMAIN].get("radar_bias_profile_index", {}),
+                    region_key=region.storage_key,
+                    from_source="rainviewer",
+                    to_source=decision.source,
+                )
+            decision = apply_quality_fallback(
+                decision,
+                states,
+                rainviewer_observations=hass.data[DOMAIN]
+                .get("rainviewer_observation_counts_by_engine", {})
+                .get(region.engine_id, 0),
+                completeness_profile=completeness_profile,
+                now=now_ts,
             )
             previous_source = (
                 previous_decisions.get(region.engine_id) or {}
@@ -868,6 +909,64 @@ async def _async_setup_runtime(
             region.center_lat + lat_delta,
         )
 
+    restored_pysteps_frames = await hass.async_add_executor_job(
+        calibration_store.load_pysteps_frames
+    )
+    restored_pysteps_count = hass.data[DOMAIN][
+        "pysteps_frame_history"
+    ].restore(
+        restored_pysteps_frames,
+        {
+            region.engine_id: _region_bounds(region)
+            for region in storm_manager.get_all_engines()
+        },
+    )
+    hass.data[DOMAIN]["pysteps_restored_frames"] = restored_pysteps_count
+    hass.data[DOMAIN]["pysteps_input"] = hass.data[DOMAIN][
+        "pysteps_frame_history"
+    ].diagnostics()
+    def _refresh_restart_recovery_audit() -> None:
+        restart_recovery_audit = {}
+        for region in storm_manager.get_all_engines():
+            audit = audit_storm_object_recovery(
+                hass.data[DOMAIN]["pysteps_frame_history"].frames(region.engine_id),
+                region.storm_engine.get_storms(),
+            )
+            restart_recovery_audit[region.engine_id] = audit
+            if audit["status"] == "ontbrekend_stormobject":
+                _LOGGER.warning(
+                    "Herstartaudit %s: recente radarframecache heeft geen "
+                    "bijbehorend stormobject; eerste nieuwe contour start met "
+                    "bewaarde rastervector maar zonder oude storm-ID",
+                    region.engine_id,
+                )
+            elif audit["status"] == "hersteld":
+                _LOGGER.info(
+                    "Herstartaudit %s: stormobject(en) %s dekken de recente "
+                    "radarframecache",
+                    region.engine_id,
+                    ", ".join(audit["matched_storm_ids"]),
+                )
+        hass.data[DOMAIN]["restart_recovery_audit"] = restart_recovery_audit
+
+    def _restore_pending_region_frames_and_audit() -> None:
+        """Herstel ook caches van regio's die pas na setup worden aangemaakt."""
+        additional_restored = hass.data[DOMAIN]["pysteps_frame_history"].restore(
+            restored_pysteps_frames,
+            {
+                region.engine_id: _region_bounds(region)
+                for region in storm_manager.get_all_engines()
+            },
+        )
+        if additional_restored:
+            hass.data[DOMAIN]["pysteps_restored_frames"] += additional_restored
+            hass.data[DOMAIN]["pysteps_input"] = hass.data[DOMAIN][
+                "pysteps_frame_history"
+            ].diagnostics()
+        _refresh_restart_recovery_audit()
+
+    _refresh_restart_recovery_audit()
+
     def _coverage_fraction(
         coverage: tuple[float, float, float, float],
         region_bounds: tuple[float, float, float, float],
@@ -917,12 +1016,28 @@ async def _async_setup_runtime(
         engine_id: str | None = None,
     ) -> int:
         """Registreer een providerframe uitsluitend binnen zijn RegionEngine(s)."""
-        observer = hass.data[DOMAIN]["radar_calibration_observer"]
         observations = list(observations)
         if timestamp is None and observations:
             timestamp = float(observations[0].timestamp)
         if timestamp is None:
             return 0
+        if (
+            hass.data[DOMAIN].get("analysis_mode") == "thermal_throttle"
+            and int(float(timestamp) // 60) % 15 != 0
+        ):
+            return 0
+        temperature = _system_performance_snapshot().get("temperature_c")
+        if (
+            hass.data[DOMAIN].get("analysis_mode") == "thermal_throttle"
+            and temperature is not None
+            and temperature >= 75.0
+        ):
+            hass.data[DOMAIN]["calibration_thermal_throttled"] = {
+                "temperature_c": temperature,
+                "timestamp": time.time(),
+            }
+            return 0
+        observer = hass.data[DOMAIN]["radar_calibration_observer"]
         matched = 0
         for region in storm_manager.get_all_engines():
             if engine_id is not None and region.engine_id != engine_id:
@@ -1509,7 +1624,7 @@ async def _async_setup_runtime(
         _route_selected_radar(goes_obs, "noaa_goes_rrqpe")
         _route_selected_radar(hass.data[DOMAIN].get("last_kmi_observations", []), "kmi")
         _route_selected_radar(hass.data[DOMAIN].get("knmi_current", []), "knmi")
-        _refresh_radar_overlays(decisions)
+        await _refresh_radar_overlays(decisions)
 
         hass.bus.async_fire(f"{DOMAIN}_radar_source_update", {
             "source": hass.data[DOMAIN].get("active_radar_source"),
@@ -1520,8 +1635,10 @@ async def _async_setup_runtime(
     async def _poll_radar_comparison(now=None):
         """Keep national products observable without feeding the OFE."""
         _sync_region_radar_providers()
-        await _poll_kmi()
-        await _poll_knmi()
+        # KMI en KNMI zijn onafhankelijke kalibratiebronnen. Serieel pollen
+        # stapelde bij netwerkproblemen hun volledige wachttijden op, waardoor
+        # deze fase haar harde limiet van 60 seconden kon bereiken.
+        await asyncio.gather(_poll_kmi(), _poll_knmi())
 
     def _provider_areas():
         return tuple(
@@ -1562,7 +1679,7 @@ async def _async_setup_runtime(
             provider_lifecycle.diagnostics()
         )
 
-    def _refresh_radar_overlays(decisions):
+    async def _refresh_radar_overlays(decisions):
         """Publiceer bronpixels voor de per-engine gekozen rasterprovider."""
         overlays = {}
         shared = {
@@ -1585,16 +1702,94 @@ async def _async_setup_runtime(
                 overlay = provider_lifecycle.overlay(source)
             if overlay:
                 overlays[region.engine_id] = overlay
-                hass.data[DOMAIN]["pysteps_frame_history"].add_overlay(
-                    region.engine_id, overlay, _region_bounds(region)
-                )
+                started_at = time.time()
+                before = _system_performance_snapshot()
+                outcome = "ok"
+                try:
+                    hass.data[DOMAIN]["pysteps_frame_history"].add_overlay(
+                        region.engine_id, overlay, _region_bounds(region)
+                    )
+                except Exception:
+                    outcome = "error"
+                    raise
+                finally:
+                    finished_at = time.time()
+                    _queue_system_performance_sample(
+                        hass.data[DOMAIN].get(
+                            "current_provider_cycle_id", "outside_cycle"
+                        ),
+                        f"raster_normalization:{region.engine_id}",
+                        started_at,
+                        finished_at,
+                        outcome,
+                        before,
+                        _system_performance_snapshot(),
+                    )
         hass.data[DOMAIN]["radar_overlays_by_engine"] = overlays
         frame_history = hass.data[DOMAIN]["pysteps_frame_history"]
         pysteps_input = frame_history.diagnostics()
         preflight = {}
-        for region in storm_manager.get_all_engines():
+        analysis_limit = asyncio.Semaphore(2)
+
+        async def _evaluate_region(region):
             frames = frame_history.frames(region.engine_id)
-            result = evaluate_pysteps_frames(frames)
+            started_at = time.time()
+            before = _system_performance_snapshot()
+            outcome = "ok"
+            try:
+                temperature = before.get("temperature_c")
+                if (
+                    hass.data[DOMAIN].get("analysis_mode")
+                    == "thermal_throttle"
+                    and temperature is not None
+                    and temperature >= 75.0
+                ):
+                    outcome = "thermal_throttled"
+                    result = {
+                        "status": "thermal_throttled",
+                        "experimental": True,
+                        "feeds_detection": False,
+                        "frames_used": len(frames),
+                        "method": "bounded_grid_match_v1",
+                        "confidence": "insufficient",
+                        "translation_km_per_hour": None,
+                        "heading_deg": None,
+                        "verification_iou": None,
+                        "motion_match_iou": None,
+                        "vector_consistency_deg": None,
+                        "wet_cell_ratio": None,
+                        "centroid_translation_km_per_hour": None,
+                        "centroid_heading_deg": None,
+                        "reason": "cpu_temperature_above_75c",
+                    }
+                else:
+                    async with analysis_limit:
+                        result = await hass.async_add_executor_job(
+                            evaluate_pysteps_frames, frames
+                        )
+            except Exception:
+                outcome = "error"
+                raise
+            finally:
+                finished_at = time.time()
+                _queue_system_performance_sample(
+                    hass.data[DOMAIN].get(
+                        "current_provider_cycle_id", "outside_cycle"
+                    ),
+                    f"pysteps_preflight:{region.engine_id}",
+                    started_at,
+                    finished_at,
+                    outcome,
+                    before,
+                    _system_performance_snapshot(),
+                )
+            return region, frames, result
+
+        evaluated = await asyncio.gather(*(
+            _evaluate_region(region)
+            for region in storm_manager.get_all_engines()
+        ))
+        for region, frames, result in evaluated:
             preflight[region.engine_id] = result
             if frames:
                 latest = frames[-1]
@@ -1619,6 +1814,12 @@ async def _async_setup_runtime(
                 })
         pysteps_input["preflight"] = preflight
         hass.data[DOMAIN]["pysteps_input"] = pysteps_input
+        await hass.async_add_executor_job(
+            hass.data[DOMAIN][
+                "radar_calibration_store"
+            ].save_pysteps_frames,
+            frame_history.serialized(),
+        )
         hass.bus.async_fire(f"{DOMAIN}_provider_lifecycle_update")
         hass.bus.async_fire(f"{DOMAIN}_radar_source_update", {"engines": decisions})
 
@@ -1884,6 +2085,12 @@ async def _async_setup_runtime(
             return
         previous_mode = hass.data[DOMAIN].get("lightning_source_mode", "auto")
         hass.data[DOMAIN]["lightning_source_mode"] = source_mode
+        if not ha_started.is_set() or hass.state != CoreState.running:
+            _LOGGER.info(
+                "Bliksembronmodus %s opgeslagen; activering wacht op HA-start",
+                source_mode,
+            )
+            return
         if source_mode == "satellite_test":
             blitz.stop()
             await _poll_eumetsat_li()
@@ -1904,14 +2111,31 @@ async def _async_setup_runtime(
 
     hass.data[DOMAIN]["set_lightning_source_mode"] = _set_lightning_source_mode
 
+    def _set_analysis_mode(mode: str) -> None:
+        """Schakel experimentele analyse en kalibratie live om."""
+        if mode not in {"full_send", "thermal_throttle"}:
+            _LOGGER.warning("Onbekende analysemodus genegeerd: %s", mode)
+            return
+        previous = hass.data[DOMAIN].get("analysis_mode", "full_send")
+        hass.data[DOMAIN]["analysis_mode"] = mode
+        hass.bus.async_fire(f"{DOMAIN}_provider_lifecycle_update")
+        hass.bus.async_fire(f"{DOMAIN}_radar_source_update")
+        _LOGGER.info(
+            "Analysemodus live gewijzigd van %s naar %s", previous, mode
+        )
+
+    hass.data[DOMAIN]["set_analysis_mode"] = _set_analysis_mode
+
     def _system_performance_snapshot() -> dict:
         """Lees goedkope, reeds beschikbare HA-systeemmetingen."""
         candidates = {
             "cpu_percent": (
+                "sensor.system_monitor_processor_use",
                 "sensor.processor_use",
                 "sensor.processor_use_percent",
             ),
             "temperature_c": (
+                "sensor.system_monitor_processortemperatuur",
                 "sensor.processor_temperature",
                 "sensor.cpu_temperature",
             ),
@@ -2126,16 +2350,16 @@ async def _async_setup_runtime(
                 float(lon),
                 radar_source=source_decision.get("source"),
                 pressure_trend=pressure_trends.get(engine_id),
+                motion_guidance=hass.data[DOMAIN].get(
+                    "pysteps_input", {}
+                ).get("preflight", {}).get(engine_id),
             )
             if not target.get("radar_covered", False):
                 own_attrs["status"] = "onvoldoende_data"
             eta = own_attrs.get("eta_minutes")
             warning_candidate = None
             if (
-                own_attrs.get("status") == "naderend"
-                and own_attrs.get("eta_reliable")
-                and own_attrs.get("passage_classification")
-                in {"raak", "rand"}
+                own_attrs.get("warning_eligible")
                 and eta is not None
             ):
                 eta_value = float(eta)
@@ -2260,6 +2484,11 @@ async def _async_setup_runtime(
 
     async def _poll_all(now=None):
         """Voer een volledige providercyclus in vaste, racevrije volgorde uit."""
+        if not ha_started.is_set() or hass.state != CoreState.running:
+            _LOGGER.debug(
+                "Providercyclus uitgesteld: Home Assistant is nog niet gestart"
+            )
+            return
         lock = hass.data[DOMAIN].setdefault("provider_cycle_lock", asyncio.Lock())
         if lock.locked():
             _LOGGER.debug("Providercyclus overgeslagen: vorige cyclus loopt nog")
@@ -2293,11 +2522,20 @@ async def _async_setup_runtime(
     from homeassistant.helpers.event import async_track_time_interval, async_track_state_change_event
     from datetime import timedelta
 
-    hass.data[DOMAIN]["unsubscribers"].extend([
-        async_track_time_interval(hass, _poll_all, timedelta(minutes=5)),
-        async_track_time_interval(hass, _poll_eumetsat_li, timedelta(minutes=2)),
-        async_track_time_interval(hass, _poll_goes_glm, timedelta(minutes=1)),
-    ])
+    def _activate_polling_schedules() -> None:
+        """Registreer intervalpolls pas nadat HA volledig running is."""
+        if hass.data[DOMAIN].get("polling_schedules_active"):
+            return
+        hass.data[DOMAIN]["unsubscribers"].extend([
+            async_track_time_interval(hass, _poll_all, timedelta(minutes=5)),
+            async_track_time_interval(
+                hass, _poll_eumetsat_li, timedelta(minutes=2)
+            ),
+            async_track_time_interval(
+                hass, _poll_goes_glm, timedelta(minutes=1)
+            ),
+        ])
+        hass.data[DOMAIN]["polling_schedules_active"] = True
 
     # ── Fictieve tracker locatie volgen ───────────────────────────────────
     async def _update_fictieve_location(now=None):
@@ -2419,6 +2657,7 @@ async def _async_setup_runtime(
             await mcs_store.async_save_engine(current.storage_key, current.storm_engine)
         region = storm_manager.assign_target(spec.entity_id, lat, lon)
         _prepare_region(region)
+        _restore_pending_region_frames_and_audit()
         target_data.update({
             "latitude": lat,
             "longitude": lon,
@@ -2466,24 +2705,76 @@ async def _async_setup_runtime(
         )
 
     async def _do_initial_setup(event=None):
+        if not ha_started.is_set() or hass.state != CoreState.running:
+            return
+        _activate_polling_schedules()
+        if lightning_source_mode != "satellite_test":
+            blitz.start()
         await _update_fictieve_location()
         for spec in secondary_specs:
             await _update_secondary_target(spec, initial=True)
+        # Secundaire targets kunnen pas na HA-start een extra RegionEngine
+        # aanmaken. Geef zulke regio's alsnog hun bewaarde rasterketen en neem
+        # ze daarna expliciet mee in de stormobject-herstartaudit.
+        _restore_pending_region_frames_and_audit()
         if not hass.data[DOMAIN].get("providers_initialized"):
             await _init_location_providers(home_lat, home_lon)
             hass.data[DOMAIN]["providers_initialized"] = True
         await _poll_all()
+        if lightning_source_mode == "satellite_test":
+            hass.async_create_task(_poll_eumetsat_li())
+            hass.async_create_task(_poll_goes_glm())
 
-    if hass.state == CoreState.running:
-        await _do_initial_setup()
-    else:
+    startup_timeout_handle = None
+
+    @callback
+    def _schedule_start_timeout() -> None:
+        """Plan een lichte statuscontrole zonder HA-setup-task te maken."""
+        nonlocal startup_timeout_handle
+        startup_timeout_handle = hass.loop.call_later(
+            HA_START_WAIT_TIMEOUT_S, _on_start_timeout
+        )
+
+    @callback
+    def _on_start_timeout() -> None:
+        nonlocal startup_timeout_handle
+        startup_timeout_handle = None
+        if ha_started.is_set() or hass.state == CoreState.running:
+            return
+        _LOGGER.warning(
+            "Storm Tracker blijft gepauzeerd: Home Assistant is na "
+            "%.0f seconden nog niet gestart",
+            HA_START_WAIT_TIMEOUT_S,
+        )
+        _schedule_start_timeout()
+
+    @callback
+    def _start_runtime_background() -> None:
+        hass.async_create_background_task(
+            _do_initial_setup(),
+            "storm_tracker_v3 initial setup",
+        )
+
+    if hass.state != CoreState.running:
         @callback
         def _on_ha_started(event):
-            hass.async_create_task(_do_initial_setup())
+            nonlocal startup_timeout_handle
+            ha_started.set()
+            if startup_timeout_handle is not None:
+                startup_timeout_handle.cancel()
+                startup_timeout_handle = None
+            _start_runtime_background()
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_ha_started)
+        _schedule_start_timeout()
+    else:
+        _start_runtime_background()
 
     @callback
     def _on_ha_stop(event):
+        nonlocal startup_timeout_handle
+        if startup_timeout_handle is not None:
+            startup_timeout_handle.cancel()
+            startup_timeout_handle = None
         lightning_updates.close()
         blitz.stop()
         hass.async_create_task(provider_lifecycle.async_stop_all())
@@ -2502,11 +2793,7 @@ async def _async_setup_runtime(
     from homeassistant.helpers import discovery
     await discovery.async_load_platform(hass, "sensor", DOMAIN, {}, config)
 
-    if lightning_source_mode == "satellite_test":
-        # Diagnostische modus moet meteen bewijs leveren en niet eerst wachten
-        # op de eerste intervalcallback.
-        hass.async_create_task(_poll_eumetsat_li())
-        hass.async_create_task(_poll_goes_glm())
-
-    _LOGGER.info("Storm Tracker V3 gestart met radarroutering per RegionEngine")
+    _LOGGER.info(
+        "Storm Tracker V3 geladen; providers wachten tot Home Assistant gestart is"
+    )
     return True

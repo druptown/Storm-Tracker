@@ -67,6 +67,7 @@ class Observation:
     # RAIN-specifiek (Netatmo grondstation)
     rain_mm:     Optional[float] = None   # mm/u gemeten (rain_live)
     rain_5min:   Optional[float] = None   # mm/u gemiddeld over 5 min
+    rain_60min:  Optional[float] = None   # accumulatie afgelopen uur
     station_id:  Optional[str]   = None   # voor deduplicatie
 
     # Wind (Netatmo windmodule)

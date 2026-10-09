@@ -40,6 +40,8 @@ MERGE_RADIUS_KM        = 60.0   # max afstand storm↔storm voor merge
 MERGE_THROTTLE_S       = 15.0   # merge max 1x per N seconden
 EXPIRE_MINUTES         = 5.0    # storm zonder strikes → sluimerend
 REMOVE_MINUTES         = 15.0   # sluimerend storm → verwijderd
+RADAR_EXPIRE_MINUTES   = 15.0   # overbrug 10-minutenradarframes zonder ID-reset
+RADAR_REMOVE_MINUTES   = 30.0   # behoud radarhistorie bij één gemist frame
 MAX_STORMS             = 15     # max actieve storms (bescherming tegen ruis)
 MIN_HISTORY_POINTS     = 4      # min centroid-history voor regressie
 MAX_HISTORY_POINTS     = 20     # ringbuffer grootte
@@ -191,9 +193,16 @@ class StormEngine:
             if not storm.radar_system_frames:
                 continue
             age_minutes = (time.time() - storm.last_update) / 60.0
-            if age_minutes > self._remove_minutes:
+            expire_minutes = max(self._expire_minutes, RADAR_EXPIRE_MINUTES)
+            remove_minutes = max(self._remove_minutes, RADAR_REMOVE_MINUTES)
+            if age_minutes > remove_minutes:
                 continue
-            storm.is_dormant = age_minutes > self._expire_minutes
+            # Gebruik bij restart exact dezelfde lifecyclegrenzen als tijdens
+            # runtime. RainViewer levert typisch tienminutenframes; de oude
+            # algemene grens van vijf minuten herstelde zo'n geldig systeem
+            # als sluimerend, waarna de eerste providerpoll een nieuwe ID en
+            # een éénframesysteem maakte.
+            storm.is_dormant = age_minutes > expire_minutes
             self._storms[storm.storm_id] = storm
             cutoff = time.time() - MAX_HISTORY_AGE_MIN * 60
             history = []
@@ -800,11 +809,20 @@ class StormEngine:
         to_remove = []
         for storm in self._storms.values():
             age = (time.time() - storm.last_update) / 60
-            if age > self._remove_minutes:
+            has_radar_history = bool(storm.radar_system_frames)
+            expire_minutes = (
+                max(self._expire_minutes, RADAR_EXPIRE_MINUTES)
+                if has_radar_history else self._expire_minutes
+            )
+            remove_minutes = (
+                max(self._remove_minutes, RADAR_REMOVE_MINUTES)
+                if has_radar_history else self._remove_minutes
+            )
+            if age > remove_minutes:
                 to_remove.append(storm.storm_id)
                 _LOGGER.info("Storm %s verwijderd (%.0f min inactief)",
                              storm.storm_id, age)
-            elif age > self._expire_minutes:
+            elif age > expire_minutes:
                 storm.is_dormant = True
 
         for storm_id in to_remove:

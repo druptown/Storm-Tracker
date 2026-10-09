@@ -80,24 +80,38 @@ def _distance_km(a, b) -> float:
 
 def _lightning_clusters(points):
     """Groepeer nabije recente inslagen zonder verre systemen te verbinden."""
-    remaining = list(points)
-    clusters = []
-    while remaining:
-        cluster = [remaining.pop()]
-        changed = True
-        while changed:
-            changed = False
-            for point in list(remaining):
-                if any(
-                    _distance_km(point[:2], member[:2])
-                    <= LIGHTNING_CLUSTER_DISTANCE_KM
-                    for member in cluster
-                ):
-                    remaining.remove(point)
-                    cluster.append(point)
-                    changed = True
-        clusters.append(cluster)
-    return clusters
+    values = list(points)
+    if not values:
+        return []
+
+    # Connected components behouden exact de vroegere transitieve
+    # clusterbetekenis, maar berekenen ieder puntenpaar hoogstens één keer.
+    parent = list(range(len(values)))
+
+    def find(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left, right):
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    for left in range(len(values)):
+        for right in range(left + 1, len(values)):
+            if (
+                _distance_km(values[left][:2], values[right][:2])
+                <= LIGHTNING_CLUSTER_DISTANCE_KM
+            ):
+                union(left, right)
+
+    grouped = {}
+    for index, point in enumerate(values):
+        grouped.setdefault(find(index), []).append(point)
+    return list(grouped.values())
 
 
 def _lightning_zone_ring(cluster):

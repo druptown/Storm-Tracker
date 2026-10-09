@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from typing import Iterable
 
 from .radar_frame import RadarFrame
@@ -63,24 +64,41 @@ def _centroid_motion(origin: RadarFrame, observed: RadarFrame):
 
 
 def _shifted_iou(
-    origin: RadarFrame, observed: RadarFrame, row_shift: int, column_shift: int
+    origin: RadarFrame,
+    observed: RadarFrame,
+    row_shift: int,
+    column_shift: int,
+    *,
+    origin_coordinates: tuple[tuple[int, int], ...] | None = None,
+    actual: set[tuple[int, int]] | None = None,
 ) -> tuple[float, int]:
-    expected = {
-        (row + row_shift, column + column_shift)
-        for row, column, _ in origin.cells
-        if (
-            0 <= row + row_shift < origin.height
-            and 0 <= column + column_shift < origin.width
+    """Bereken IoU zonder per kandidaat twee grote tijdelijke sets te bouwen."""
+    if origin_coordinates is None:
+        origin_coordinates = tuple(
+            (row, column) for row, column, _ in origin.cells
         )
-    }
-    actual = {(row, column) for row, column, _ in observed.cells}
-    union = expected | actual
-    overlap = len(expected & actual)
-    return (overlap / len(union) if union else 0.0, overlap)
+    if actual is None:
+        actual = {(row, column) for row, column, _ in observed.cells}
+    expected_count = 0
+    overlap = 0
+    for row, column in origin_coordinates:
+        shifted_row = row + row_shift
+        shifted_column = column + column_shift
+        if (
+            0 <= shifted_row < origin.height
+            and 0 <= shifted_column < origin.width
+        ):
+            expected_count += 1
+            overlap += (shifted_row, shifted_column) in actual
+    union_count = expected_count + len(actual) - overlap
+    return (overlap / union_count if union_count else 0.0, overlap)
 
 
+@lru_cache(maxsize=16)
 def _match_translation(origin: RadarFrame, observed: RadarFrame) -> dict | None:
     """Zoek de beste gehele rasterverschuiving binnen een fysieke snelheidslimiet."""
+    import numpy as np
+
     minutes = (observed.nominal_timestamp - origin.nominal_timestamp) / 60.0
     if minutes <= 0 or not origin.cells or not observed.cells:
         return None
@@ -95,12 +113,38 @@ def _match_translation(origin: RadarFrame, observed: RadarFrame) -> dict | None:
     max_columns = max(
         1, min(origin.width - 1, math.ceil(max_distance / column_cell_km))
     )
+    origin_mask = np.zeros((origin.height, origin.width), dtype=np.bool_)
+    observed_mask = np.zeros((observed.height, observed.width), dtype=np.bool_)
+    origin_rows, origin_columns = zip(*(
+        (row, column) for row, column, _ in origin.cells
+    ))
+    observed_rows, observed_columns = zip(*(
+        (row, column) for row, column, _ in observed.cells
+    ))
+    origin_mask[origin_rows, origin_columns] = True
+    observed_mask[observed_rows, observed_columns] = True
+    actual_count = int(np.count_nonzero(observed_mask))
     best = None
     for row_shift in range(-max_rows, max_rows + 1):
         for column_shift in range(-max_columns, max_columns + 1):
-            iou, overlap = _shifted_iou(
-                origin, observed, row_shift, column_shift
+            origin_row_start = max(0, -row_shift)
+            origin_row_stop = min(origin.height, origin.height - row_shift)
+            origin_column_start = max(0, -column_shift)
+            origin_column_stop = min(
+                origin.width, origin.width - column_shift
             )
+            shifted = origin_mask[
+                origin_row_start:origin_row_stop,
+                origin_column_start:origin_column_stop,
+            ]
+            actual = observed_mask[
+                origin_row_start + row_shift:origin_row_stop + row_shift,
+                origin_column_start + column_shift:origin_column_stop + column_shift,
+            ]
+            expected_count = int(np.count_nonzero(shifted))
+            overlap = int(np.count_nonzero(np.logical_and(shifted, actual)))
+            union_count = expected_count + actual_count - overlap
+            iou = overlap / union_count if union_count else 0.0
             candidate = (
                 iou, overlap, -(row_shift ** 2 + column_shift ** 2),
                 row_shift, column_shift,
@@ -223,6 +267,7 @@ def evaluate_frames(frames: Iterable[RadarFrame]) -> dict:
         **result,
         "status": status,
         "confidence": confidence,
+        "feeds_detection": status == "ready",
         "verification_iou": round(verification, 3),
         "vector_consistency_deg": round(angle_difference, 1),
         "reason": reason,
