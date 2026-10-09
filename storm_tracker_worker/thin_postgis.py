@@ -183,6 +183,7 @@ class ThinPostGISWriter:
         }
         try:
             with connection.cursor() as cursor:
+                observation_rows: list[tuple[Any, ...]] = []
                 for cycle, nowcast in batch:
                     for observation in cycle.observations:
                         payload = observation.as_dict()
@@ -199,7 +200,7 @@ class ThinPostGISWriter:
                             "latitude": observation.latitude,
                             "longitude": observation.longitude,
                         }
-                        cursor.execute(_INSERT_OBSERVATION, (
+                        observation_rows.append((
                             _sha(identity),
                             observation.provider_id,
                             observation.product_id,
@@ -215,6 +216,10 @@ class ThinPostGISWriter:
                         ))
                         counts["observations"] += 1
 
+                if observation_rows:
+                    cursor.executemany(_INSERT_OBSERVATION, observation_rows)
+
+                for cycle, nowcast in batch:
                     targets = {
                         key: value.as_dict() for key, value in cycle.targets.items()
                     }

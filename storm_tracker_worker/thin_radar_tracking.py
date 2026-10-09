@@ -12,14 +12,124 @@ from pyproj import Transformer
 
 from .thin_provider_adapters import ThinRadarField
 from .tracking_core.engine.analysis_grid import AnalysisGrid
-from .tracking_core.engine.hierarchical_detection import NormalizedRasterFrame
+from .tracking_core.engine.cell_track_lifecycle import CellTrackLifecyclePolicy
+from .tracking_core.engine.hierarchical_detection import (
+    HierarchicalDetectorConfig,
+    NormalizedRasterFrame,
+)
 from .tracking_core.engine.cell_track_engine import (
+    CellTrackEnginePolicy,
     CellTrackEngineState,
     CellTrackTransitionResult,
     advance_cell_track_engine,
     create_cell_track_engine_state,
 )
-from .worker_only_cell_tracking import worker_only_tracking_policy
+from .tracking_core.engine.lucas_kanade_flow import (
+    DetectionFlowAggregationConfig,
+    LucasKanadeConfig,
+)
+from .tracking_core.engine.recursive_track_estimator import (
+    RecursiveTrackEstimatorPolicy,
+)
+from .tracking_core.engine.weather_system_grouping import (
+    WeatherSystemGroupingPolicy,
+)
+
+
+_ZERO4 = (
+    (0.0, 0.0, 0.0, 0.0),
+    (0.0, 0.0, 0.0, 0.0),
+    (0.0, 0.0, 0.0, 0.0),
+    (0.0, 0.0, 0.0, 0.0),
+)
+_INITIAL4 = (
+    (1_000_000.0, 0.0, 0.0, 0.0),
+    (0.0, 1_000_000.0, 0.0, 0.0),
+    (0.0, 0.0, 400.0, 0.0),
+    (0.0, 0.0, 0.0, 400.0),
+)
+
+
+def _thin_tracking_policy() -> CellTrackEnginePolicy:
+    """Build the bounded tracking policy without importing legacy runtime code."""
+
+    return CellTrackEnginePolicy(
+        policy_id="thin-operational-tracking-v1",
+        detector=HierarchicalDetectorConfig(
+            shield_threshold=1.0,
+            core_threshold=4.0,
+            minimum_shield_area_m2=1_000_000.0,
+            minimum_core_area_m2=1_000_000.0,
+            shield_position_sigma_m=1_000.0,
+            core_position_sigma_m=750.0,
+            connectivity=8,
+            centroid_method="geometric",
+        ),
+        lifecycle=CellTrackLifecyclePolicy(
+            policy_id="thin-operational-lifecycle-v1",
+            confirmation_observations=2,
+            maximum_gap_frames=2,
+        ),
+        estimator=RecursiveTrackEstimatorPolicy(
+            policy_id="thin-operational-estimator-v1",
+            acceleration_spectral_density_m2_s3=1.0,
+        ),
+        lucas_kanade=LucasKanadeConfig(
+            window_radius_pixels=2,
+            minimum_valid_samples=6,
+            minimum_structure_eigenvalue=1e-9,
+            maximum_condition_number=1e10,
+            regularization=0.0,
+            residual_variance_floor=1e-6,
+            velocity_process_noise_covariance_m2_s2=(
+                (1.0, 0.0),
+                (0.0, 1.0),
+            ),
+        ),
+        flow_aggregation=DetectionFlowAggregationConfig(
+            minimum_valid_pixels=1,
+            minimum_valid_fraction=0.1,
+            velocity_covariance_floor_m2_s2=(
+                (1.0, 0.0),
+                (0.0, 1.0),
+            ),
+            residual_position_covariance_m2=(
+                (1_000_000.0, 0.0),
+                (0.0, 1_000_000.0),
+            ),
+            method="conservative_mean",
+        ),
+        weather_system=WeatherSystemGroupingPolicy(
+            policy_id="thin-operational-systems-v1",
+            pixel_connectivity=8,
+            maximum_footprint_gap_m=20_000.0,
+            maximum_motion_difference_m_s=1_000_000.0,
+            maximum_motion_age_s=10_000.0,
+            maximum_motion_time_difference_s=10_000.0,
+        ),
+        initial_state_covariance=_INITIAL4,
+        prior_process_noise_covariance=_ZERO4,
+        association_motion_sigma_m_s=100.0,
+        motion_nll_weight=1.0,
+        object_kind_change_cost=50.0,
+        absolute_log_area_weight=1.0,
+        mean_value_difference_weight=0.1,
+        maximum_value_difference_weight=0.1,
+        footprint_nonoverlap_weight=1.0,
+        birth_cost=15.0,
+        death_cost=15.0,
+        exact_solution_limit=4,
+        maximum_exact_current_detections=12,
+        maximum_frame_pixels=100_000,
+        maximum_detected_objects=128,
+        maximum_active_tracks=128,
+        maximum_candidate_edges=16_384,
+        maximum_total_tracks=4_096,
+        maximum_lifecycle_events=32_768,
+        maximum_track_history_detections=2_048,
+        multi_hypothesis_identity=None,
+        scalable_one_best_fallback=True,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +156,7 @@ class ThinRadarTracker:
     """In-memory CellTrackEngine state per provider and tracked target."""
 
     def __init__(self) -> None:
-        self._policy = worker_only_tracking_policy()
+        self._policy = _thin_tracking_policy()
         self._states: dict[tuple[str, str], CellTrackEngineState] = {}
 
     def advance(
