@@ -3386,6 +3386,7 @@ class WorkerService:
                     "model_guidance_failures",
                     "model_guidance_skipped_stale",
                     "model_guidance_successes",
+                    "motion_enrichment_failures",
                     "quantitative_failures",
                     "quantitative_skipped_stale",
                     "quantitative_successes",

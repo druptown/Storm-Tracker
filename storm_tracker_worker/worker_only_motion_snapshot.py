@@ -185,9 +185,10 @@ def build_radar_motion_nowcast_revision(
         if candidate.low_confidence_fragment:
             continue
         if candidate.target_id not in available_targets:
-            raise WorkerOnlyMotionSnapshotError(
-                "motion_arrival_target_not_available"
-            )
+            # Shadow arrivals can outlive a Life360 availability transition.
+            # They are target-local evidence, so one stale target must not
+            # erase independently valid motion candidates for other targets.
+            continue
         if candidate.workload_id not in current_providers:
             continue
         observation = observation_by_key.get(

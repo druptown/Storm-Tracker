@@ -580,7 +580,7 @@ _WORKLOADS: tuple[_WorkloadDefinition, ...] = (
     ),
     _WorkloadDefinition(
         "model.openmeteo.region", WorkloadClass.MODEL, "openmeteo", "openmeteo_forecast_native_json",
-        "region", "global", 900, 720, 80, _budget(8, 1, 60),
+        "global", "global", 900, 720, 80, _budget(8, 1, 60),
         source_role="model_location_validation",
         durable_production_retention_eligible=False,
     ),
