@@ -12,6 +12,7 @@ import xml.etree.ElementTree as ET
 from typing import Any, Mapping, Protocol
 
 from .thin_observation import (
+    MAX_GROUND_SOURCE_AGE_SECONDS,
     NormalizedObservation,
     ObservationKind,
     ObservationQuality,
@@ -473,7 +474,8 @@ class MetarAdapter:
         payload = await fetcher.get_json(
             self._endpoint,
             params={
-                "bbox": f"{west:.3f},{south:.3f},{east:.3f},{north:.3f}",
+                # Aviation Weather documents bbox as lat0,lon0,lat1,lon1.
+                "bbox": f"{south:.3f},{west:.3f},{north:.3f},{east:.3f}",
                 "format": "json",
                 "hours": "1",
             },
@@ -507,6 +509,7 @@ class MetarAdapter:
                     "quality": ObservationQuality.GOOD,
                     "geometry": _point(longitude, latitude),
                     "metadata": {"station_id": station_id},
+                    "maximum_age_seconds": MAX_GROUND_SOURCE_AGE_SECONDS,
                 }
                 temperature = _optional_float(station.get("temp"))
                 pressure = _optional_float(station.get("altim"))
@@ -587,6 +590,11 @@ class NetatmoAdapter:
 class BlitzortungAdapter:
     def __init__(self, *, maximum_events: int = 20_000) -> None:
         self._events: deque[tuple[float, float, float, float]] = deque(maxlen=maximum_events)
+        self._transport_connected = False
+
+    def set_transport_state(self, connected: bool) -> None:
+        """Expose the public MQTT transport state to provider health."""
+        self._transport_connected = bool(connected)
 
     def feed_message(self, raw: bytes, *, received_at: float) -> None:
         try:
@@ -607,6 +615,8 @@ class BlitzortungAdapter:
             self._events.append((observed_at, float(received_at), latitude, longitude))
 
     async def fetch(self, request, fetcher, *, now):
+        if not self._transport_connected:
+            raise ProviderBlocked("transport_unavailable")
         while self._events and now - self._events[0][0] > 15 * 60:
             self._events.popleft()
         observations: list[NormalizedObservation] = []
