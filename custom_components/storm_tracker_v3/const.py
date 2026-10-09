@@ -1,7 +1,7 @@
 """Storm Tracker V3 — const.py v0.4.3"""
 
 DOMAIN = "storm_tracker_v3"
-INTEGRATION_VERSION = "1.14.123"
+INTEGRATION_VERSION = "1.14.124"
 OPERATIONAL_SNAPSHOT_UPDATE_EVENT = f"{DOMAIN}_operational_snapshot_update"
 WARNING_SENT_EVENT = f"{DOMAIN}_warning_sent"
 WORKER_TECHNICAL_DIAGNOSTICS_UPDATE_EVENT = (
