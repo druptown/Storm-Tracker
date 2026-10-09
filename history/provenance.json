@@ -1,8 +1,8 @@
 {
   "kind": "recovered_archive_source",
   "component": "worker",
-  "version": "1.17.61",
-  "source_id": "b59194094f88e57b033abd94e51316ddb59b57d8b06960e0a80dc61b14ae428e",
+  "version": "1.17.62",
+  "source_id": "c821b8d6a63ed2fe8c1256442f34af3f49af92d003ca9dab25ad727aa0ebb2df",
   "recovered_on": "2026-10-09",
   "files": [
     {
@@ -20,8 +20,8 @@
     {
       "path": "DOCS.md",
       "mode": 420,
-      "sha256": "2a73a84902bd7e391d442e74661348e738a2e58b92243f6462066351cea12749",
-      "size": 5610
+      "sha256": "b3deb0fced3ee6887dc54173e2731da2a68bcf4f735b31c29b2eddc5ca372921",
+      "size": 5758
     },
     {
       "path": "Dockerfile",
@@ -32,7 +32,7 @@
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "ff0eeee3f5d5252eaa9e06db3622d2a6703ab7339c145163f58ced2f2c5d38fd",
+      "sha256": "fcf1835a012154a52e82f8140ef3f549aeb14d9755037d97f1cc6983cda1944c",
       "size": 64
     },
     {
@@ -272,8 +272,8 @@
     {
       "path": "config.yaml",
       "mode": 420,
-      "sha256": "1134fa9fc45dc2bd1d3b558ffb81cf0ee1b1026f5c57d9c7c60597766b9ec0df",
-      "size": 2682
+      "sha256": "111adc9ffcbffc9a29a3a1f99f95bf1add55b04417546ec2ec579b49e2487655",
+      "size": 2681
     },
     {
       "path": "cpu_limited_launcher.py",
@@ -830,7 +830,7 @@
     {
       "path": "raw_capture_activation_artifacts.py",
       "mode": 420,
-      "sha256": "fc0aba53d0afa922ec292da9cec293071d5527f6a4e205092540a21d450dca80",
+      "sha256": "82cfcbc36003f7cc410c34d063a1b78cdaa1e40145de13a3fa60126307bc005a",
       "size": 76448
     },
     {
@@ -842,7 +842,7 @@
     {
       "path": "raw_capture_release_requirements.py",
       "mode": 420,
-      "sha256": "adb25d3ea5eec6b0861f72d2cc60ff9a3692c18c77addcb6fc0a13dc06e93089",
+      "sha256": "7f78905ec09bfb7450442671a8dbbab6d87f66c2ba1de62c5f68c85b62857982",
       "size": 168514
     },
     {
@@ -884,8 +884,8 @@
     {
       "path": "run.sh",
       "mode": 493,
-      "sha256": "805f6f25a641ef9e741522fa22fb073d951a8af18f5902338a8a088cd5c62e65",
-      "size": 15549
+      "sha256": "08140469501325c9a40d0eafa39483e9f955b667c9b370d54a45d3805c06a6f6",
+      "size": 16222
     },
     {
       "path": "satellite_radar.py",
@@ -962,8 +962,8 @@
     {
       "path": "service.py",
       "mode": 420,
-      "sha256": "677f62d870eeb7dc5671d18ceaae6eb9afc67fdee3f34c77911399d741babc37",
-      "size": 260450
+      "sha256": "cf49377e352ae8a8445e738d324cdf0cf1b358f6197b23144215350ad8715cb4",
+      "size": 260662
     },
     {
       "path": "survey_cli.py",
@@ -1406,16 +1406,16 @@
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_worker_v1.17.61_deploy.tar.gz",
-      "archive_sha256": "35b588e1a026267bd190ef3c400f3808b8e2d65fb9704192e11af893dc869d79",
-      "bytes": 2241698,
+      "filename": "storm_tracker_worker_v1.17.62_deploy.tar.gz",
+      "archive_sha256": "f7269f3332307f35d2664d4553b593f898fef022897f26c1334925b872a9eeed",
+      "bytes": 2241848,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.57_worker_v1.17.61_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.58_worker_v1.17.62_evidence.json",
           "archive_and_source_match": true
         },
         {
-          "manifest": "storm_tracker_release_v1.14.57_worker_v1.17.61_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.58_worker_v1.17.62_evidence.json",
           "archive_and_source_match": true
         }
       ]

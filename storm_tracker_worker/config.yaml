@@ -1,5 +1,5 @@
 name: "Storm Tracker Worker"
-version: "1.17.61"
+version: "1.17.62"
 slug: "storm_tracker_worker"
 description: "Geisoleerde radar- en nowcastworker voor Storm Tracker V3"
 startup: services
@@ -55,7 +55,7 @@ schema:
   worker_nice: "int(0,19)"
   cpu_limit_percent: "int(25,200)"
   heartbeat_seconds: "int(2,60)"
-  provider_cycle_seconds: "int(30,300)"
+  provider_cycle_seconds: "int(2,300)"
   log_level: "list(DEBUG|INFO|WARNING|ERROR)"
   runtime_mode: "list(legacy|worker_first_canary|raw_capture_shadow|worker_only)"
   postgis_projection_enabled: "bool"

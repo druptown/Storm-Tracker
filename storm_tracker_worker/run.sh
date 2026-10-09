@@ -255,6 +255,11 @@ case "${STV3_COMPUTE_PROFILE}" in
         "shared_ha verlaagt de Storm-workerprioriteit naar nice 15"
       STV3_WORKER_NICE="15"
     fi
+    if [[ "${STV3_PROVIDER_CYCLE_SECONDS}" -lt 30 ]]; then
+      bashio::log.warning \
+        "shared_ha bewaart een providercyclus van minstens 30 seconden"
+      STV3_PROVIDER_CYCLE_SECONDS="30"
+    fi
     ;;
   dedicated_nas)
     if [[ "${STV3_CPU_LIMIT_PERCENT}" -gt 50 ]]; then
@@ -267,12 +272,22 @@ case "${STV3_COMPUTE_PROFILE}" in
         "dedicated_nas bewaart HA-voorrang met nice 10"
       STV3_WORKER_NICE="10"
     fi
+    if [[ "${STV3_PROVIDER_CYCLE_SECONDS}" -lt 30 ]]; then
+      bashio::log.warning \
+        "dedicated_nas bewaart een providercyclus van minstens 30 seconden"
+      STV3_PROVIDER_CYCLE_SECONDS="30"
+    fi
     ;;
   dedicated_nas_fast)
     if [[ "${STV3_CPU_LIMIT_PERCENT}" -gt 200 ]]; then
       bashio::log.warning \
         "dedicated_nas_fast begrenst de Storm-worker tot twee CPU-cores"
       STV3_CPU_LIMIT_PERCENT="200"
+    fi
+    if [[ "${STV3_PROVIDER_CYCLE_SECONDS}" -lt 2 ]]; then
+      bashio::log.warning \
+        "dedicated_nas_fast bewaart een providercyclus van minstens 2 seconden"
+      STV3_PROVIDER_CYCLE_SECONDS="2"
     fi
     ;;
   *)
@@ -355,7 +370,7 @@ export STV3_RUNTIME_MODE
 # This release owns exactly two numerical threads in every deployment mode.
 STV3_CPU_THREADS="2"
 
-bashio::log.info "Storm Tracker Worker start met profiel ${STV3_COMPUTE_PROFILE}, queue ${STV3_QUEUE_SIZE}, maximaal ${STV3_CPU_THREADS} CPU-threads, nice ${STV3_WORKER_NICE} en ${STV3_CPU_LIMIT_PERCENT}% totale CPU"
+bashio::log.info "Storm Tracker Worker start met profiel ${STV3_COMPUTE_PROFILE}, queue ${STV3_QUEUE_SIZE}, providercyclus ${STV3_PROVIDER_CYCLE_SECONDS}s, maximaal ${STV3_CPU_THREADS} CPU-threads, nice ${STV3_WORKER_NICE} en ${STV3_CPU_LIMIT_PERCENT}% totale CPU"
 export OMP_NUM_THREADS="${STV3_CPU_THREADS}"
 export OPENBLAS_NUM_THREADS="${STV3_CPU_THREADS}"
 export MKL_NUM_THREADS="${STV3_CPU_THREADS}"

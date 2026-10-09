@@ -84,7 +84,9 @@ profielen:
 - `STV3_CPU_THREADS = 2`
 - altijd minstens één volledige fysieke core buiten de worker-CPU-set
 - `heartbeat_seconds: 10` voor lichte MQTT-liveness
-- `provider_cycle_seconds: 30..300` voor de zware provider-/snapshotcyclus
+- `provider_cycle_seconds: 2..300` voor de zware provider-/snapshotcyclus;
+  `shared_ha` en `dedicated_nas` bewaren een minimum van 30 seconden,
+  `dedicated_nas_fast` laat voor de geïsoleerde NAS-grenstest 2 seconden toe
 
 `STV3_CPU_THREADS` is nog steeds een bovengrens; pure Python/JSON-paden blijven
 in de praktijk vaak op één core draaien.

@@ -2104,8 +2104,11 @@ class WorkerService:
         self.build_id = self.build_sha256[:16]
         self.topic_root = topic_root.rstrip("/")
         self.heartbeat_seconds = max(2.0, heartbeat_seconds)
+        minimum_provider_cycle_seconds = (
+            2.0 if compute_profile == "dedicated_nas_fast" else 30.0
+        )
         self.provider_cycle_seconds = max(
-            30.0, provider_cycle_seconds
+            minimum_provider_cycle_seconds, provider_cycle_seconds
         )
         self.compute_profile = compute_profile
         self.cpu_limit_percent = cpu_limit_percent
@@ -4917,6 +4920,7 @@ class WorkerService:
             cpu_limit_percent=self.cpu_limit_percent,
             worker_nice=self.worker_nice,
             cpu_threads=self.cpu_threads,
+            provider_cycle_seconds=self.provider_cycle_seconds,
             uptime_seconds=round(time.time() - self.started_at, 1),
             queue_depth=self.jobs.qsize(),
             queue_capacity=self.jobs.maxsize,
