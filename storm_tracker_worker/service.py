@@ -2012,7 +2012,11 @@ class WorkerService:
     ) -> None:
         import paho.mqtt.client as mqtt
 
-        if compute_profile not in {"shared_ha", "dedicated_nas"}:
+        if compute_profile not in {
+            "shared_ha",
+            "dedicated_nas",
+            "dedicated_nas_fast",
+        }:
             raise ValueError("worker-computeprofiel is ongeldig")
         for name, value, minimum, maximum in (
             ("cpu_limit_percent", cpu_limit_percent, 1, 100),

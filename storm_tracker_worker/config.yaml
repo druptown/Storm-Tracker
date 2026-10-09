@@ -1,5 +1,5 @@
 name: "Storm Tracker Worker"
-version: "1.17.60"
+version: "1.17.61"
 slug: "storm_tracker_worker"
 description: "Geisoleerde radar- en nowcastworker voor Storm Tracker V3"
 startup: services
@@ -51,9 +51,9 @@ options:
   eumetsat_consumer_secret: ""
 schema:
   queue_size: "int(1,16)"
-  compute_profile: "list(shared_ha|dedicated_nas)"
+  compute_profile: "list(shared_ha|dedicated_nas|dedicated_nas_fast)"
   worker_nice: "int(0,19)"
-  cpu_limit_percent: "int(25,50)"
+  cpu_limit_percent: "int(25,200)"
   heartbeat_seconds: "int(2,60)"
   provider_cycle_seconds: "int(30,300)"
   log_level: "list(DEBUG|INFO|WARNING|ERROR)"

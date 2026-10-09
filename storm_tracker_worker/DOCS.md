@@ -73,16 +73,18 @@ rekentaak een afzonderlijke heartbeat, werkstatus en foutteller.
 
 ## CPU-begrenzing
 
-Om de impact op HA/Z2M-latency te beperken heeft de worker twee expliciete
+Om de impact op HA/Z2M-latency te beperken heeft de worker drie expliciete
 profielen:
 
 - `shared_ha` (standaard): maximaal 25% CPU en minstens nice 15 voor een NUC
   waarop HA en Zigbee2MQTT voorrang moeten houden
 - `dedicated_nas`: maximaal 50% CPU en minstens nice 10 op de aparte NAS-HA
+- `dedicated_nas_fast`: maximaal twee volledige CPU-cores (cpulimit 200) en
+  instelbare nice 0..19 op de geisoleerde NAS-testhost
 - `STV3_CPU_THREADS = 2`
 - altijd minstens één volledige fysieke core buiten de worker-CPU-set
 - `heartbeat_seconds: 10` voor lichte MQTT-liveness
-- `provider_cycle_seconds: 60` voor de zware provider-/snapshotcyclus
+- `provider_cycle_seconds: 30..300` voor de zware provider-/snapshotcyclus
 
 `STV3_CPU_THREADS` is nog steeds een bovengrens; pure Python/JSON-paden blijven
 in de praktijk vaak op één core draaien.

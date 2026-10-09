@@ -31,8 +31,8 @@ def _arguments(argv: Sequence[str] | None) -> tuple[int, list[str]]:
     command = list(args.command)
     if command[:1] == ["--"]:
         command = command[1:]
-    if not 25 <= args.limit <= 100:
-        raise SystemExit("CPU-limiet moet tussen 25 en 100 procent liggen")
+    if not 25 <= args.limit <= 200:
+        raise SystemExit("CPU-limiet moet tussen 25 en 200 procent liggen")
     if not command:
         raise SystemExit("Workercommando ontbreekt")
     return args.limit, command

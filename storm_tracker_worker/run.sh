@@ -228,8 +228,11 @@ fi
 unset STV3_WORKER_ONLY_ROOT
 
 # Host safety is an explicit profile. shared_ha protects the NUC at 25% and
-# nice 15. dedicated_nas may use 50% and nice 10, while still keeping exactly
-# two numerical threads and one complete physical core outside its CPU-set.
+# nice 15. dedicated_nas keeps its conservative 50%/nice-10 ceiling. The
+# explicit dedicated_nas_fast profile is reserved for the isolated NAS test
+# host: cpulimit uses 100 units per logical CPU, so its 200-unit ceiling lets
+# the two numerical threads use two cores while taskset still reserves one
+# complete physical core outside the worker CPU-set.
 if [[ ! "${STV3_CPU_LIMIT_PERCENT}" =~ ^[0-9]+$ ||
   "${STV3_CPU_LIMIT_PERCENT}" -lt 25 ]]; then
   bashio::log.fatal "Ongeldige Storm-worker CPU-limiet"
@@ -263,6 +266,13 @@ case "${STV3_COMPUTE_PROFILE}" in
       bashio::log.warning \
         "dedicated_nas bewaart HA-voorrang met nice 10"
       STV3_WORKER_NICE="10"
+    fi
+    ;;
+  dedicated_nas_fast)
+    if [[ "${STV3_CPU_LIMIT_PERCENT}" -gt 200 ]]; then
+      bashio::log.warning \
+        "dedicated_nas_fast begrenst de Storm-worker tot twee CPU-cores"
+      STV3_CPU_LIMIT_PERCENT="200"
     fi
     ;;
   *)
