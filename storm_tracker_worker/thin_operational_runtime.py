@@ -35,6 +35,7 @@ from .thin_postgis import (
     _passage_id,
 )
 from .thin_provider_catalog import PROVIDERS, build_due_requests
+from .thin_provider_adapters import rainviewer_nominal_coverage_for_target
 from .thin_region_planner import ThinRegionPlan, ThinRegionPlanner
 from .tracking_core.operational_snapshot import MAX_UI_STORM_SUMMARIES, validate_snapshot
 
@@ -1204,6 +1205,11 @@ class ThinOperationalRuntime:
                     "primary": target.kind == "home",
                     "radar_covered": True,
                     "region_engine": region_id,
+                    "rainviewer_nominal_coverage": rainviewer_nominal_coverage_for_target(
+                        (field for result in self._latest_provider_results.values()
+                         for field in result.visual_radar_fields),
+                        target, now=fusion.evaluated_at,
+                    ),
                 },
             })
 

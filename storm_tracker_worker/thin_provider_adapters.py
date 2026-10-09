@@ -336,6 +336,36 @@ class ThinRadarField:
         )
 
 
+RAINVIEWER_COVERAGE_TTL_SECONDS = 86400.0
+
+
+@dataclass(frozen=True, slots=True)
+class RainViewerNominalCoverage:
+    """Published mask sample, NOT a measurement or live uptime assertion."""
+
+    target_id: str
+    latitude: float
+    longitude: float
+    state: str
+    checked_at: float | None
+
+
+def rainviewer_nominal_coverage_for_target(fields, target, *, now):
+    result = {"state": "unknown", "checked_at": None,
+              "source": "rainviewer_published_mask", "live_operation_confirmed": False}
+    samples = [sample for field in fields if field.provider_id == "rainviewer"
+               for sample in field.nominal_coverage
+               if sample.target_id == target.target_id
+               and sample.latitude == target.latitude and sample.longitude == target.longitude
+               and sample.checked_at is not None
+               and 0 <= now - sample.checked_at <= RAINVIEWER_COVERAGE_TTL_SECONDS]
+    if samples:
+        sample = max(samples, key=lambda item: item.checked_at)
+        if sample.state in {"inside", "outside", "unknown"}:
+            result.update(state=sample.state, checked_at=sample.checked_at)
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class ThinVisualRadarField:
     """Native display classes, deliberately not quantitative precipitation."""
@@ -350,6 +380,7 @@ class ThinVisualRadarField:
     levels: Any
     # The affine axes above use source-CRS units (degrees by default).
     crs: str = "EPSG:4326"
+    nominal_coverage: tuple[RainViewerNominalCoverage, ...] = ()
 
     def __post_init__(self) -> None:
         import numpy as np
@@ -2573,6 +2604,25 @@ def _rainviewer_tile_bounds(
     return latitude_top, latitude_bottom, longitude_left, longitude_right
 
 
+def _decode_rainviewer_coverage(payload: bytes) -> Any:
+    """Official convention: transparent = available, black = unavailable.
+
+    Ambiguous colours/alpha remain unknown. This mask is infrequently updated
+    by the publisher and does not confirm current radar operation.
+    """
+    import numpy as np
+    from PIL import Image
+
+    with Image.open(io.BytesIO(payload)) as image:
+        if image.format != "PNG" or image.size != (RAINVIEWER_TILE_SIZE, RAINVIEWER_TILE_SIZE):
+            raise ValueError("rainviewer_coverage_tile_invalid")
+        pixels = np.asarray(image.convert("RGBA"))
+    mask = np.zeros(pixels.shape[:2], dtype=np.uint8)
+    mask[pixels[:, :, 3] == 0] = 1
+    mask[(pixels[:, :, 3] == 255) & np.all(pixels[:, :, :3] == 0, axis=2)] = 2
+    return mask
+
+
 def _decode_rainviewer_levels(payload: bytes) -> Any:
     from PIL import Image
     import numpy as np
@@ -2787,6 +2837,46 @@ def _rainviewer_visual_fields(decoded, centers, request, observed_at):
 class RainViewerRadarAdapter:
     def __init__(self, *, manifest_url: str = RAINVIEWER_MANIFEST_ENDPOINT) -> None:
         self._manifest_url = manifest_url
+        # At most 64 small masks, reused across normal source cycles. Failed
+        # requests are negatively cached; no retries or forced provider polls.
+        self._coverage_cache: dict[tuple[int, int], tuple[Any, float, float]] = {}
+
+    async def _coverage_samples(self, request, fetcher, *, now):
+        samples = []
+        count = 2**RAINVIEWER_ZOOM
+        for target in request.targets:
+            x, y = _rainviewer_global_pixel(target.latitude, target.longitude)
+            key = (int(x // RAINVIEWER_TILE_SIZE) % count,
+                   min(count - 1, max(0, int(y // RAINVIEWER_TILE_SIZE))))
+            cached = self._coverage_cache.get(key)
+            if cached is None or not cached[1] <= now < cached[2]:
+                mask = None
+                try:
+                    payload = await asyncio.wait_for(fetcher.get_bytes(
+                        f"{RAINVIEWER_TILE_HOST}/v2/coverage/0/{RAINVIEWER_TILE_SIZE}"
+                        f"/{RAINVIEWER_ZOOM}/{key[0]}/{key[1]}/0/0_0.png",
+                        maximum_bytes=1024 * 1024,
+                    ), timeout=5.0)
+                    async with _RADAR_DECODE_SEMAPHORE:
+                        mask = await asyncio.to_thread(_decode_rainviewer_coverage, payload)
+                except Exception:
+                    # Auxiliary metadata must never take functioning radar down.
+                    pass
+                if key not in self._coverage_cache and len(self._coverage_cache) >= 64:
+                    self._coverage_cache.pop(next(iter(self._coverage_cache)))
+                cached = (mask, now, now + (RAINVIEWER_COVERAGE_TTL_SECONDS if mask is not None else 600.0))
+                self._coverage_cache[key] = cached
+            mask, checked_at, _ = cached
+            state = "unknown"
+            if mask is not None and abs(target.latitude) <= 85.05112878:
+                row = int(y) % RAINVIEWER_TILE_SIZE
+                column = int(x) % RAINVIEWER_TILE_SIZE
+                state = {1: "inside", 2: "outside"}.get(int(mask[row, column]), "unknown")
+            samples.append(RainViewerNominalCoverage(
+                target.target_id, target.latitude, target.longitude, state,
+                checked_at if mask is not None else None,
+            ))
+        return tuple(samples)
 
     async def fetch(self, request, fetcher, *, now):
         manifest = await fetcher.get_json(
@@ -2890,6 +2980,9 @@ class RainViewerRadarAdapter:
             visual_fields = await asyncio.to_thread(
                 _rainviewer_visual_fields, decoded, centers, request, observed_at,
             )
+        from dataclasses import replace
+        coverage = await self._coverage_samples(request, fetcher, now=now)
+        visual_fields = tuple(replace(field, nominal_coverage=coverage) for field in visual_fields)
         return ThinAdapterResult(tuple(observations), visual_radar_fields=visual_fields)
 
 
