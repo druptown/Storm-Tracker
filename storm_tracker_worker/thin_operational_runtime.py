@@ -10,7 +10,8 @@ from typing import Any, Callable, Mapping
 
 from .desired_state import METHOD, DesiredState, DesiredStateConflict, parse_desired_state
 from .thin_fusion import FusionCycle, fuse_observations
-from .thin_nowcast import ThinNowcast, ThinNowcastRuntime
+from .thin_nowcast import StormCell, ThinNowcast, ThinNowcastRuntime
+from .thin_radar_tracking import ThinRadarTracker
 from .thin_postgis import PostGISWriteResult
 from .thin_provider_catalog import PROVIDERS, build_due_requests
 from .tracking_core.operational_snapshot import MAX_UI_STORM_SUMMARIES, validate_snapshot
@@ -89,6 +90,7 @@ class ThinOperationalRuntime:
         self._last_attempts: dict[str, float] = {}
         self._latest_provider_results: dict[str, Any] = {}
         self._nowcast = ThinNowcastRuntime(targets={})
+        self._radar_tracker = ThinRadarTracker()
         # A worker App restart must not reset revisions below the snapshot still
         # cached by Home Assistant. Seconds since a recent fixed epoch fit the
         # snapshot contract's 1e9 counter ceiling. The service runs no faster
@@ -237,7 +239,34 @@ class ThinOperationalRuntime:
             evaluated_at=float(self._clock()),
             target_ids=tuple(item.target_id for item in state.targets if item.available),
         )
-        nowcast = self._nowcast.advance(fusion)
+        tracked_cells: list[StormCell] = []
+        for result in fresh_results.values():
+            for field in result.radar_fields:
+                for target in state.targets:
+                    if not target.available:
+                        continue
+                    try:
+                        self._radar_tracker.advance(field, target)
+                    except (ValueError, RuntimeError):
+                        continue
+                    for item in self._radar_tracker.tracks(field, target.target_id):
+                        speed = math.hypot(item.velocity_east_kmh, item.velocity_north_kmh)
+                        heading = None if speed < 0.5 else math.degrees(math.atan2(item.velocity_east_kmh, item.velocity_north_kmh)) % 360.0
+                        tracked_cells.append(StormCell(
+                            cell_id=item.track_id, provider_id=item.provider_id,
+                            observed_at=item.observed_at, latitude=item.latitude,
+                            longitude=item.longitude,
+                            geometry={"type": "Point", "coordinates": [item.longitude, item.latitude]},
+                            precipitation_rate_mm_h=item.rain_rate_mm_h,
+                            reflectivity_dbz=None, radar_level=None,
+                            velocity_east_kmh=item.velocity_east_kmh,
+                            velocity_north_kmh=item.velocity_north_kmh,
+                            speed_kmh=speed, heading_deg=heading,
+                        ))
+        nowcast = self._nowcast.advance(
+            fusion,
+            tracked_cells=tuple({item.cell_id: item for item in tracked_cells}.values()) or None,
+        )
         self._latest_geojson = self._build_geojson(fusion, nowcast)
         if self._postgis is None:
             postgis = PostGISWriteResult(

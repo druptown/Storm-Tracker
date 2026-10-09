@@ -8,7 +8,7 @@ import time
 from typing import Any, Callable, Mapping
 
 from .thin_observation import NormalizedObservation
-from .thin_provider_adapters import ProviderBlocked
+from .thin_provider_adapters import ProviderBlocked, ThinAdapterResult, ThinRadarField
 from .thin_provider_catalog import ThinProviderRequest
 
 
@@ -21,6 +21,7 @@ class ProviderResult:
     observations: tuple[NormalizedObservation, ...]
     attempted_at: float
     completed_at: float
+    radar_fields: tuple[ThinRadarField, ...] = ()
 
 
 class ThinProviderRuntime:
@@ -78,7 +79,7 @@ class ThinProviderRuntime:
         async with self._semaphore, lock:
             for attempt in range(self._retries + 1):
                 try:
-                    observations = await asyncio.wait_for(
+                    adapter_result = await asyncio.wait_for(
                         adapter.fetch(
                             request,
                             self._fetcher,
@@ -86,7 +87,12 @@ class ThinProviderRuntime:
                         ),
                         timeout=self._timeout_seconds,
                     )
-                    result = tuple(observations)
+                    if isinstance(adapter_result, ThinAdapterResult):
+                        result = adapter_result.observations
+                        radar_fields = adapter_result.radar_fields
+                    else:
+                        result = tuple(adapter_result)
+                        radar_fields = ()
                     if not all(isinstance(item, NormalizedObservation) for item in result):
                         raise TypeError("adapter_returned_invalid_observation")
                     self._failure_counts.pop(request.provider_id, None)
@@ -99,6 +105,7 @@ class ThinProviderRuntime:
                         observations=result,
                         attempted_at=attempted_at,
                         completed_at=float(self._clock()),
+                        radar_fields=radar_fields,
                     )
                 except ProviderBlocked as error:
                     return ProviderResult(

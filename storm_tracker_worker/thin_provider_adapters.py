@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import io
 import json
@@ -48,6 +50,68 @@ _KNMI_DOWNLOAD_HOST_SUFFIXES = (
     ".cloudfront.net",
     ".blob.core.windows.net",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ThinRadarField:
+    """Decoded native radar data held in memory for the current work cycle."""
+
+    provider_id: str
+    product_id: str
+    observed_at: float
+    crs: str
+    origin_x_m: float
+    origin_y_m: float
+    x_resolution_m: float
+    y_resolution_m: float
+    rain_rate_mm_h: Any
+    valid_mask: Any
+
+    def __post_init__(self) -> None:
+        import numpy as np
+
+        if not self.provider_id or not self.product_id or not self.crs:
+            raise ValueError("radar_field_identity_invalid")
+        if not math.isfinite(self.observed_at):
+            raise ValueError("radar_field_time_invalid")
+        if not all(math.isfinite(value) and value > 0.0 for value in (
+            self.x_resolution_m, self.y_resolution_m,
+        )):
+            raise ValueError("radar_field_resolution_invalid")
+        if not all(math.isfinite(value) for value in (
+            self.origin_x_m, self.origin_y_m,
+        )):
+            raise ValueError("radar_field_origin_invalid")
+        if not isinstance(self.rain_rate_mm_h, np.ndarray) or not isinstance(self.valid_mask, np.ndarray):
+            raise TypeError("radar_field_requires_numpy_arrays")
+        if self.rain_rate_mm_h.ndim != 2 or self.valid_mask.shape != self.rain_rate_mm_h.shape:
+            raise ValueError("radar_field_shape_invalid")
+        if self.rain_rate_mm_h.size == 0:
+            raise ValueError("radar_field_empty")
+        if not np.all(np.isfinite(self.rain_rate_mm_h[self.valid_mask])):
+            raise ValueError("radar_field_valid_values_nonfinite")
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class ThinAdapterResult(Sequence[NormalizedObservation]):
+    """Adapter result that remains a sequence for older direct callers."""
+
+    observations: tuple[NormalizedObservation, ...]
+    radar_fields: tuple[ThinRadarField, ...] = ()
+
+    def __iter__(self) -> Iterator[NormalizedObservation]:
+        return iter(self.observations)
+
+    def __len__(self) -> int:
+        return len(self.observations)
+
+    def __getitem__(self, index: int | slice) -> Any:
+        return self.observations[index]
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, ThinAdapterResult):
+            return self.observations == other.observations and self.radar_fields == other.radar_fields
+        return self.observations == other
 
 
 class ProviderBlocked(RuntimeError):
@@ -1190,16 +1254,16 @@ def _decode_dwd_radolan(
         offset = float(data_what["offset"])
         nodata = float(data_what["nodata"])
         undetect = float(data_what["undetect"])
-        rain_rate = (data * gain + offset) * 12.0
-        valid = (
+        source_valid = (
             np.isfinite(data)
             & (data != nodata)
-            & (data != undetect)
-            & np.isfinite(rain_rate)
-            & (rain_rate >= 0.1)
         )
-        if not np.any(valid):
-            return ()
+        rain_rate = np.where(
+            source_valid,
+            np.maximum(0.0, (data * gain + offset) * 12.0),
+            0.0,
+        )
+        echo_valid = source_valid & (rain_rate >= 0.1)
         xscale = float(where["xscale"])
         yscale = float(where["yscale"])
         projected = CRS.from_user_input(_attribute_text(where["projdef"]))
@@ -1217,9 +1281,9 @@ def _decode_dwd_radolan(
         def pixel_to_lonlat(row: float, column: float) -> tuple[float, float]:
             return inverse.transform(ul_x + column * xscale, ul_y - row * yscale)
 
-        return _national_radar_observations(
+        observations = _national_radar_observations(
             rain_rate,
-            valid,
+            echo_valid,
             request,
             observed_at=observed_at,
             received_at=received_at,
@@ -1227,6 +1291,21 @@ def _decode_dwd_radolan(
             pixel_to_lonlat=pixel_to_lonlat,
             pixel_width_m=xscale,
             pixel_height_m=yscale,
+        )
+        return ThinAdapterResult(
+            observations=observations,
+            radar_fields=(ThinRadarField(
+                provider_id=request.provider_id,
+                product_id=request.product_id,
+                observed_at=observed_at,
+                crs=projected.to_string(),
+                origin_x_m=float(ul_x),
+                origin_y_m=float(ul_y),
+                x_resolution_m=xscale,
+                y_resolution_m=yscale,
+                rain_rate_mm_h=rain_rate,
+                valid_mask=source_valid,
+            ),),
         )
 
 
@@ -1274,15 +1353,16 @@ def _decode_knmi_rtcor(
             raise ValueError("knmi_calibration_invalid")
         missing = int(_attribute_number(calibration["calibration_missing_data"]))
         outside = int(_attribute_number(calibration["calibration_out_of_image"]))
-        rain_rate = raw.astype(float) * 0.01 * 12.0
-        valid = (
+        source_valid = (
             (raw != missing)
             & (raw != outside)
-            & np.isfinite(rain_rate)
-            & (rain_rate >= 0.1)
         )
-        if not np.any(valid):
-            return ()
+        rain_rate = np.where(
+            source_valid,
+            np.maximum(0.0, raw.astype(float) * 0.01 * 12.0),
+            0.0,
+        )
+        echo_valid = source_valid & (rain_rate >= 0.1)
         pixel_x_km = _attribute_number(geographic["geo_pixel_size_x"])
         pixel_y_km = _attribute_number(geographic["geo_pixel_size_y"])
         column_offset_km = _attribute_number(geographic["geo_column_offset"])
@@ -1308,9 +1388,9 @@ def _decode_knmi_rtcor(
                 row * pixel_y_km - row_offset_km,
             )
 
-        return _national_radar_observations(
+        observations = _national_radar_observations(
             rain_rate,
-            valid,
+            echo_valid,
             request,
             observed_at=observed_at,
             received_at=received_at,
@@ -1318,6 +1398,21 @@ def _decode_knmi_rtcor(
             pixel_to_lonlat=pixel_to_lonlat,
             pixel_width_m=abs(pixel_x_km) * 1_000.0,
             pixel_height_m=abs(pixel_y_km) * 1_000.0,
+        )
+        return ThinAdapterResult(
+            observations=observations,
+            radar_fields=(ThinRadarField(
+                provider_id=request.provider_id,
+                product_id=request.product_id,
+                observed_at=observed_at,
+                crs=projected_crs.to_string(),
+                origin_x_m=column_offset_km * 1_000.0,
+                origin_y_m=-row_offset_km * 1_000.0,
+                x_resolution_m=abs(pixel_x_km) * 1_000.0,
+                y_resolution_m=abs(pixel_y_km) * 1_000.0,
+                rain_rate_mm_h=rain_rate,
+                valid_mask=source_valid,
+            ),),
         )
 
 
@@ -1415,4 +1510,6 @@ __all__ = [
     "OpenMeteoAdapter",
     "OperaRadarAdapter",
     "ProviderBlocked",
+    "ThinAdapterResult",
+    "ThinRadarField",
 ]

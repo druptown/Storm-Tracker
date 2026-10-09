@@ -185,14 +185,19 @@ class ThinNowcastRuntime:
         nearest = min(candidates, key=lambda item: _distance_km(item, current))
         return nearest if _distance_km(nearest, current) <= MAX_ASSOCIATION_DISTANCE_KM else None
 
-    def advance(self, cycle: FusionCycle) -> ThinNowcast:
+    def advance(
+        self,
+        cycle: FusionCycle,
+        *,
+        tracked_cells: tuple[StormCell, ...] | None = None,
+    ) -> ThinNowcast:
         if self._latest is not None and cycle.evaluated_at <= self._latest.evaluated_at:
             return self._latest
 
-        cells: list[StormCell] = []
+        cells: list[StormCell] = [] if tracked_cells is None else list(tracked_cells)
         frames: list[_CellFrame] = []
         claimed: set[str] = set()
-        for observation in cycle.observations:
+        for observation in (() if tracked_cells is not None else cycle.observations):
             if not _is_spatial_weather(observation):
                 continue
             latitude, longitude = _geometry_centroid(observation)
