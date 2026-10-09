@@ -1,6 +1,7 @@
 """Tests voor gedeelde, locatiegestuurde provideractivatie."""
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 from pathlib import Path
 import sys
@@ -62,6 +63,26 @@ class FailingPlugin(FakePlugin):
 
     async def async_fetch(self):
         raise RuntimeError("offline")
+
+
+class BlockingPlugin(FakePlugin):
+    plugin_id = "blocking"
+
+    def __init__(self):
+        super().__init__()
+        self.fetch_started = asyncio.Event()
+        self.release_fetch = asyncio.Event()
+        self.fetch_cancelled = asyncio.Event()
+
+    async def async_fetch(self):
+        self.fetches += 1
+        self.fetch_started.set()
+        try:
+            await self.release_fetch.wait()
+            return [object()]
+        except asyncio.CancelledError:
+            self.fetch_cancelled.set()
+            raise
 
 
 @pytest.mark.asyncio
@@ -170,4 +191,33 @@ async def test_three_failures_open_circuit_until_controlled_probe(base_module):
     now[0] = 900
     await controller.async_reconcile([area])
     assert controller.diagnostics()["failing"]["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_stop_closes_admission_and_cancels_inflight_fetch(base_module):
+    lifecycle = _load_lifecycle(base_module)
+    controller = lifecycle.ProviderLifecycleController(
+        fetch_timeout_seconds=5
+    )
+    plugin = BlockingPlugin()
+    controller.register(plugin, lambda plugin, areas: object())
+    area = base_module.CoverageArea(50, 12, 200)
+    await controller.async_reconcile([area])
+
+    fetch_task = asyncio.create_task(controller.async_fetch_active())
+    await asyncio.wait_for(plugin.fetch_started.wait(), timeout=1)
+    stop_task = asyncio.create_task(controller.async_stop_all())
+    await asyncio.sleep(0)
+    await asyncio.wait_for(stop_task, timeout=1)
+    await asyncio.wait_for(plugin.fetch_cancelled.wait(), timeout=1)
+    assert await fetch_task == {}
+    assert plugin.stops == 1
+    assert controller.diagnostics()["blocking"]["status"] == "sleeping"
+
+    # Een reeds geplande fetch of reconcile mag de provider na de
+    # shutdownbarrière niet opnieuw openen.
+    assert await controller.async_fetch_active() == {}
+    await controller.async_reconcile([area])
+    assert plugin.starts == 1
+    assert plugin.fetches == 1
 

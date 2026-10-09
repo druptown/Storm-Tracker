@@ -11,8 +11,11 @@ from __future__ import annotations
 import math
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional, TypeAlias
+
+from ..geometry.polygon import closest_point_on_polygon
 
 
 MCS_CONVECTIVE_DBZ = 40.0
@@ -22,6 +25,59 @@ MCS_MIN_SPAN_KM = 100.0
 MCS_MIN_DURATION_MINUTES = 180.0
 MCS_MAX_FRAME_GAP_MINUTES = 20.0
 MCS_HISTORY_HOURS = 6.0
+
+GeoPoint: TypeAlias = tuple[float, float]
+LinearRing: TypeAlias = tuple[GeoPoint, ...]
+FootprintPolygon: TypeAlias = tuple[LinearRing, ...]
+FootprintMultiPolygon: TypeAlias = tuple[FootprintPolygon, ...]
+
+
+def _immutable_polygons(value) -> FootprintMultiPolygon:
+    return tuple(
+        tuple(
+            tuple((float(point[0]), float(point[1])) for point in ring)
+            for ring in polygon
+        )
+        for polygon in (value or ())
+    )
+
+
+def _footprint_vertices(
+    polygons: FootprintMultiPolygon,
+    legacy_points: tuple[GeoPoint, ...],
+) -> tuple[GeoPoint, ...]:
+    if polygons:
+        return tuple(
+            point
+            for polygon in polygons
+            for ring in polygon
+            for point in ring
+        )
+    return tuple(legacy_points)
+
+
+def _footprint_geometry(
+    polygons: FootprintMultiPolygon,
+    legacy_points: tuple[GeoPoint, ...],
+    fallback_point: GeoPoint,
+):
+    return polygons or legacy_points or (fallback_point,)
+
+
+def _polygons_to_lists(polygons: FootprintMultiPolygon) -> list:
+    return [
+        [[list(point) for point in ring] for ring in polygon]
+        for polygon in polygons
+    ]
+
+
+def _provenance_copy(value: object) -> dict[str, Any] | None:
+    """Kopieer alleen expliciet aanwezige provenance; verzin geen raw keten."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise TypeError("radarprovenance moet een object of None zijn")
+    return deepcopy(value)
 
 
 @dataclass(slots=True)
@@ -35,7 +91,37 @@ class RadarCellSnapshot:
     area_km2: float
     max_dbz: Optional[float] = None
     footprint_points: tuple[tuple[float, float], ...] = ()
+    footprint_polygons: FootprintMultiPolygon = ()
     parent_system_id: Optional[str] = None
+    source: str = "unknown"
+    received_at: Optional[float] = None
+    parser_version: str = "unknown"
+    artifact_id: Optional[str] = None
+    raw_artifact_receipt_id: Optional[str] = None
+    upstream_record_id: Optional[str] = None
+    contribution_id: Optional[str] = None
+    provenance_grade: str = "unknown"
+    provenance: Optional[dict[str, Any]] = None
+
+    def __post_init__(self) -> None:
+        self.footprint_points = tuple(
+            (float(point[0]), float(point[1]))
+            for point in (self.footprint_points or ())
+        )
+        self.footprint_polygons = _immutable_polygons(
+            self.footprint_polygons
+        )
+        if self.footprint_polygons and not self.footprint_points:
+            self.footprint_points = self.footprint_polygons[0][0]
+        self.source = str(self.source or "unknown")
+        self.received_at = (
+            float(self.received_at)
+            if self.received_at is not None
+            else None
+        )
+        self.parser_version = str(self.parser_version or "unknown")
+        self.provenance_grade = str(self.provenance_grade or "unknown")
+        self.provenance = _provenance_copy(self.provenance)
 
 
 @dataclass(slots=True)
@@ -44,13 +130,43 @@ class RadarSystemFrame:
     parent_system_id: str
     timestamp: float
     area_km2: float
+    source: str = "unknown"
+    received_at: Optional[float] = None
+    parser_version: str = "unknown"
+    artifact_id: Optional[str] = None
+    raw_artifact_receipt_id: Optional[str] = None
+    upstream_record_id: Optional[str] = None
+    contribution_id: Optional[str] = None
+    provenance_grade: str = "unknown"
+    provenance: Optional[dict[str, Any]] = None
     footprint_points: tuple[tuple[float, float], ...] = ()
+    footprint_polygons: FootprintMultiPolygon = ()
     child_ids: set[str] = field(default_factory=set)
     convective_points: list[tuple[float, float]] = field(default_factory=list)
     intense_cell_count: int = 0
     max_dbz: float = 0.0
     _precipitation_span_cache: Optional[float] = field(default=None, repr=False)
     _convective_span_cache: Optional[float] = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        self.footprint_points = tuple(
+            (float(point[0]), float(point[1]))
+            for point in (self.footprint_points or ())
+        )
+        self.footprint_polygons = _immutable_polygons(
+            self.footprint_polygons
+        )
+        if self.footprint_polygons and not self.footprint_points:
+            self.footprint_points = self.footprint_polygons[0][0]
+        self.source = str(self.source or "unknown")
+        self.received_at = (
+            float(self.received_at)
+            if self.received_at is not None
+            else None
+        )
+        self.parser_version = str(self.parser_version or "unknown")
+        self.provenance_grade = str(self.provenance_grade or "unknown")
+        self.provenance = _provenance_copy(self.provenance)
 
     def add_cell(self, cell: RadarCellSnapshot) -> None:
         if cell.cell_id in self.child_ids:
@@ -72,7 +188,10 @@ class RadarSystemFrame:
     def precipitation_span_km(self) -> float:
         if self._precipitation_span_cache is None:
             self._precipitation_span_cache = _point_span_km(
-                self.footprint_points
+                _footprint_vertices(
+                    self.footprint_polygons,
+                    self.footprint_points,
+                )
             )
         return self._precipitation_span_cache
 
@@ -122,11 +241,23 @@ class Storm:
     motion_model: str = "none"
     motion_basis: str = "unknown"
     motion_prediction_error_km: Optional[float] = None
+    motion_forecast_speed_min_kmh: Optional[float] = None
+    motion_forecast_speed_max_kmh: Optional[float] = None
+    motion_estimate_status: str = "unavailable"
+    motion_average_speed_kmh: Optional[float] = None
+    motion_average_heading_deg: Optional[float] = None
     motion_model_gain: float = 0.0
     velocity_east_kmh: Optional[float] = None
     velocity_north_kmh: Optional[float] = None
     acceleration_east_kmh2: float = 0.0
     acceleration_north_kmh2: float = 0.0
+    turn_rate_deg_per_hour: float = 0.0
+    trajectory_curved: bool = False
+    curvature_radius_km: Optional[float] = None
+    trajectory_outliers_rejected: int = 0
+    parent_storm_ids: set[str] = field(default_factory=set)
+    merged_storm_ids: set[str] = field(default_factory=set)
+    lineage_generation: int = 0
 
     # Geometrie (gecachet)
     # Voorstel pagina 9: "Eerst bounding box. Pas daarna polygon." — de
@@ -153,6 +284,9 @@ class Storm:
     parent_system_areas: dict[str, float] = field(default_factory=dict)
     parent_system_footprints: dict[
         str, tuple[tuple[float, float], ...]
+    ] = field(default_factory=dict, repr=False)
+    parent_system_footprint_polygons: dict[
+        str, FootprintMultiPolygon
     ] = field(default_factory=dict, repr=False)
     _source_system_last_seen: dict[str, float] = field(
         default_factory=dict, repr=False
@@ -199,12 +333,37 @@ class Storm:
             "centroid_lon": self.centroid_lon,
             "first_seen": self.first_seen,
             "last_update": self.last_update,
+            "strike_history": [list(item) for item in self._strike_history],
+            "strike_count": self.strike_count,
+            "netatmo_confirmations": self.netatmo_confirmations,
+            "netatmo_no_rain_count": self.netatmo_no_rain_count,
+            "turn_rate_deg_per_hour": self.turn_rate_deg_per_hour,
+            "trajectory_curved": self.trajectory_curved,
+            "curvature_radius_km": self.curvature_radius_km,
+            "trajectory_outliers_rejected": self.trajectory_outliers_rejected,
+            "parent_storm_ids": sorted(self.parent_storm_ids),
+            "merged_storm_ids": sorted(self.merged_storm_ids),
+            "lineage_generation": self.lineage_generation,
             "frames": [
                 {
                     "parent_system_id": frame.parent_system_id,
                     "timestamp": frame.timestamp,
+                    "source": frame.source,
+                    "received_at": frame.received_at,
+                    "parser_version": frame.parser_version,
+                    "artifact_id": frame.artifact_id,
+                    "raw_artifact_receipt_id": (
+                        frame.raw_artifact_receipt_id
+                    ),
+                    "upstream_record_id": frame.upstream_record_id,
+                    "contribution_id": frame.contribution_id,
+                    "provenance_grade": frame.provenance_grade,
+                    "provenance": _provenance_copy(frame.provenance),
                     "area_km2": frame.area_km2,
                     "footprint_points": [list(point) for point in frame.footprint_points],
+                    "footprint_polygons": _polygons_to_lists(
+                        frame.footprint_polygons
+                    ),
                     "child_ids": sorted(frame.child_ids),
                     "convective_points": [list(point) for point in frame.convective_points],
                     "intense_cell_count": frame.intense_cell_count,
@@ -216,12 +375,26 @@ class Storm:
                 {
                     "cell_id": cell.cell_id,
                     "timestamp": cell.timestamp,
+                    "source": cell.source,
+                    "received_at": cell.received_at,
+                    "parser_version": cell.parser_version,
+                    "artifact_id": cell.artifact_id,
+                    "raw_artifact_receipt_id": (
+                        cell.raw_artifact_receipt_id
+                    ),
+                    "upstream_record_id": cell.upstream_record_id,
+                    "contribution_id": cell.contribution_id,
+                    "provenance_grade": cell.provenance_grade,
+                    "provenance": _provenance_copy(cell.provenance),
                     "lat": cell.lat,
                     "lon": cell.lon,
                     "intensity": cell.intensity,
                     "area_km2": cell.area_km2,
                     "max_dbz": cell.max_dbz,
                     "footprint_points": [list(point) for point in cell.footprint_points],
+                    "footprint_polygons": _polygons_to_lists(
+                        cell.footprint_polygons
+                    ),
                     "parent_system_id": cell.parent_system_id,
                 }
                 for cell in self.radar_cells.values()
@@ -240,6 +413,36 @@ class Storm:
             first_seen=float(data.get("first_seen", current)),
             last_update=float(data.get("last_update", current)),
         )
+        storm._strike_history = [
+            (float(item[0]), float(item[1]), float(item[2]))
+            for item in data.get("strike_history", [])
+            if isinstance(item, (list, tuple)) and len(item) == 3
+        ]
+        storm.strike_count = int(
+            data.get("strike_count", len(storm._strike_history))
+        )
+        storm.netatmo_confirmations = int(
+            data.get("netatmo_confirmations", 0)
+        )
+        storm.netatmo_no_rain_count = int(
+            data.get("netatmo_no_rain_count", 0)
+        )
+        storm.turn_rate_deg_per_hour = float(
+            data.get("turn_rate_deg_per_hour", 0.0)
+        )
+        storm.trajectory_curved = bool(
+            data.get("trajectory_curved", False)
+        )
+        radius = data.get("curvature_radius_km")
+        storm.curvature_radius_km = (
+            float(radius) if radius is not None else None
+        )
+        storm.trajectory_outliers_rejected = int(
+            data.get("trajectory_outliers_rejected", 0)
+        )
+        storm.parent_storm_ids = set(data.get("parent_storm_ids", []))
+        storm.merged_storm_ids = set(data.get("merged_storm_ids", []))
+        storm.lineage_generation = int(data.get("lineage_generation", 0))
         for raw in data.get("frames", []):
             timestamp = float(raw["timestamp"])
             if timestamp < cutoff:
@@ -247,14 +450,47 @@ class Storm:
             frame = RadarSystemFrame(
                 parent_system_id=str(raw["parent_system_id"]),
                 timestamp=timestamp,
+                source=str(raw.get("source") or "unknown"),
+                received_at=(
+                    float(raw["received_at"])
+                    if raw.get("received_at") is not None
+                    else None
+                ),
+                parser_version=str(
+                    raw.get("parser_version") or "decoded_legacy"
+                ),
+                artifact_id=raw.get("artifact_id"),
+                raw_artifact_receipt_id=raw.get(
+                    "raw_artifact_receipt_id"
+                ),
+                upstream_record_id=raw.get("upstream_record_id"),
+                contribution_id=raw.get("contribution_id"),
+                provenance_grade=str(
+                    raw.get("provenance_grade") or "decoded_legacy"
+                ),
+                provenance=_provenance_copy(raw.get("provenance")),
                 area_km2=float(raw.get("area_km2", 0.0)),
                 footprint_points=tuple(tuple(point) for point in raw.get("footprint_points", [])),
+                footprint_polygons=_immutable_polygons(
+                    raw.get("footprint_polygons", ())
+                ),
                 child_ids=set(raw.get("child_ids", [])),
                 convective_points=[tuple(point) for point in raw.get("convective_points", [])],
                 intense_cell_count=int(raw.get("intense_cell_count", 0)),
                 max_dbz=float(raw.get("max_dbz", 0.0)),
             )
-            storm.radar_system_frames[frame.parent_system_id] = frame
+            frame_key = (
+                f"{frame.parent_system_id}@{round(frame.timestamp, 3)}"
+            )
+            storm.radar_system_frames[frame_key] = frame
+            if frame.footprint_points:
+                storm.parent_system_footprints[
+                    frame.parent_system_id
+                ] = frame.footprint_points
+            if frame.footprint_polygons:
+                storm.parent_system_footprint_polygons[
+                    frame.parent_system_id
+                ] = frame.footprint_polygons
         for raw in data.get("radar_cells", []):
             timestamp = float(raw["timestamp"])
             if timestamp < current - 20 * 60:
@@ -262,15 +498,38 @@ class Storm:
             cell = RadarCellSnapshot(
                 cell_id=str(raw["cell_id"]),
                 timestamp=timestamp,
+                source=str(raw.get("source") or "unknown"),
+                received_at=(
+                    float(raw["received_at"])
+                    if raw.get("received_at") is not None
+                    else None
+                ),
+                parser_version=str(
+                    raw.get("parser_version") or "decoded_legacy"
+                ),
+                artifact_id=raw.get("artifact_id"),
+                raw_artifact_receipt_id=raw.get(
+                    "raw_artifact_receipt_id"
+                ),
+                upstream_record_id=raw.get("upstream_record_id"),
+                contribution_id=raw.get("contribution_id"),
+                provenance_grade=str(
+                    raw.get("provenance_grade") or "decoded_legacy"
+                ),
+                provenance=_provenance_copy(raw.get("provenance")),
                 lat=float(raw["lat"]),
                 lon=float(raw["lon"]),
                 intensity=int(raw.get("intensity", 0)),
                 area_km2=float(raw.get("area_km2", 0.0)),
                 max_dbz=raw.get("max_dbz"),
                 footprint_points=tuple(tuple(point) for point in raw.get("footprint_points", [])),
+                footprint_polygons=_immutable_polygons(
+                    raw.get("footprint_polygons", ())
+                ),
                 parent_system_id=raw.get("parent_system_id"),
             )
-            storm.radar_cells[cell.cell_id] = cell
+            cell_key = f"{cell.cell_id}@{round(cell.timestamp, 3)}"
+            storm.radar_cells[cell_key] = cell
             if cell.parent_system_id:
                 storm.source_system_ids.add(cell.parent_system_id)
                 storm._source_system_last_seen[cell.parent_system_id] = cell.timestamp
@@ -329,6 +588,7 @@ class Storm:
             self.source_system_ids.discard(parent_id)
             self.parent_system_areas.pop(parent_id, None)
             self.parent_system_footprints.pop(parent_id, None)
+            self.parent_system_footprint_polygons.pop(parent_id, None)
 
         frame_cutoff = time.time() - MCS_HISTORY_HOURS * 3600
         self.radar_system_frames = {
@@ -345,15 +605,40 @@ class Storm:
         cell = RadarCellSnapshot(
             cell_id=cell_id,
             timestamp=obs.timestamp,
+            source=str(getattr(obs, "source", None) or "unknown"),
+            received_at=getattr(obs, "received_at", None),
+            parser_version=str(
+                getattr(obs, "parser_version", None) or "unknown"
+            ),
+            artifact_id=getattr(obs, "artifact_id", None),
+            raw_artifact_receipt_id=getattr(
+                obs, "raw_artifact_receipt_id", None
+            ),
+            upstream_record_id=getattr(obs, "upstream_record_id", None),
+            contribution_id=getattr(obs, "contribution_id", None),
+            provenance_grade=str(
+                getattr(obs, "provenance_grade", None) or "unknown"
+            ),
+            provenance=_provenance_copy(
+                getattr(obs, "provenance", None)
+            ),
             lat=obs.lat,
             lon=obs.lon,
             intensity=obs.intensity or 0,
             area_km2=obs.area_km2 or 0.0,
             max_dbz=obs.max_dbz,
             footprint_points=tuple(obs.footprint_points or ()),
+            footprint_polygons=_immutable_polygons(
+                getattr(obs, "footprint_polygons", ())
+            ),
             parent_system_id=parent_system_id,
         )
-        self.radar_cells[cell_id] = cell
+        # Provider-ID's blijven vaak stabiel terwijl hetzelfde object in
+        # opeenvolgende producten verschuift. Bewaar daarom per radarmoment
+        # een snapshot; anders overschrijft ieder frame zijn voorganger en
+        # verdwijnt de bewegingshistoriek bij worker-/herstartoverdracht.
+        cell_key = f"{cell_id}@{round(float(obs.timestamp), 3)}"
+        self.radar_cells[cell_key] = cell
 
         if not parent_system_id:
             return
@@ -365,16 +650,52 @@ class Storm:
             self.parent_system_footprints[parent_system_id] = tuple(
                 obs.parent_footprint_points
             )
+        if getattr(obs, "parent_footprint_polygons", ()):
+            self.parent_system_footprint_polygons[parent_system_id] = (
+                _immutable_polygons(obs.parent_footprint_polygons)
+            )
 
-        frame = self.radar_system_frames.get(parent_system_id)
+        frame_key = (
+            f"{parent_system_id}@{round(float(obs.timestamp), 3)}"
+        )
+        frame = self.radar_system_frames.get(frame_key)
         if frame is None:
             frame = RadarSystemFrame(
                 parent_system_id=parent_system_id,
                 timestamp=obs.timestamp,
+                source=str(getattr(obs, "source", None) or "unknown"),
+                received_at=getattr(obs, "received_at", None),
+                parser_version=str(
+                    getattr(obs, "parser_version", None) or "unknown"
+                ),
+                artifact_id=getattr(obs, "artifact_id", None),
+                raw_artifact_receipt_id=getattr(
+                    obs, "raw_artifact_receipt_id", None
+                ),
+                upstream_record_id=getattr(
+                    obs, "upstream_record_id", None
+                ),
+                contribution_id=getattr(obs, "contribution_id", None),
+                provenance_grade=str(
+                    getattr(obs, "provenance_grade", None) or "unknown"
+                ),
+                provenance=_provenance_copy(
+                    getattr(obs, "provenance", None)
+                ),
                 area_km2=obs.parent_area_km2 or obs.area_km2 or 0.0,
                 footprint_points=tuple(obs.parent_footprint_points or ()),
+                footprint_polygons=_immutable_polygons(
+                    getattr(obs, "parent_footprint_polygons", ())
+                ),
             )
-            self.radar_system_frames[parent_system_id] = frame
+            self.radar_system_frames[frame_key] = frame
+        elif (
+            getattr(obs, "parent_footprint_polygons", ())
+            and not frame.footprint_polygons
+        ):
+            frame.footprint_polygons = _immutable_polygons(
+                obs.parent_footprint_polygons
+            )
         frame.add_cell(cell)
 
     def update_radar_classification(self) -> None:
@@ -533,20 +854,35 @@ class Storm:
         return timestamps[-1] if timestamps else None
 
     def closest_radar_point(
-        self, target_lat: float, target_lon: float
+        self,
+        target_lat: float,
+        target_lon: float,
+        *,
+        min_timestamp: Optional[float] = None,
     ) -> Optional[tuple[float, float, float]]:
         """Geef (afstand_km, lat, lon) van de dichtste lokale radarcel."""
         if not self.radar_cells:
             return None
-        candidates = []
+        closest = None
         for cell in self.radar_cells.values():
-            points = cell.footprint_points or ((cell.lat, cell.lon),)
-            distance, point = min(
-                (_haversine_km(target_lat, target_lon, lat, lon), (lat, lon))
-                for lat, lon in points
+            if min_timestamp is not None and float(cell.timestamp) < min_timestamp:
+                continue
+            geometry = _footprint_geometry(
+                cell.footprint_polygons,
+                cell.footprint_points,
+                (cell.lat, cell.lon),
             )
-            candidates.append((distance, point[0], point[1]))
-        return min(candidates, key=lambda item: item[0])
+            match = closest_point_on_polygon(
+                target_lat,
+                target_lon,
+                geometry,
+            )
+            if match is None:
+                continue
+            candidate = match[:3]
+            if closest is None or candidate[0] < closest[0]:
+                closest = candidate
+        return closest
 
     def motion_to_target(
         self,
@@ -859,15 +1195,45 @@ class Storm:
         ]
         best: Optional[float] = None
         for cell in cells:
-            points = cell.footprint_points or ((cell.lat, cell.lon),)
-            polygon = [
-                _latlon_to_local_km(lat, lon, target_lat, target_lon)
-                for lat, lon in points
-            ]
-            shifted = _convex_hull([
-                (x + east_km, y + north_km) for x, y in polygon
-            ])
-            distance = _distance_to_polygon_origin(shifted)
+            def translate(point: GeoPoint) -> GeoPoint:
+                latitude, longitude = point
+                translated_latitude = latitude + north_km / 110.574
+                longitude_scale = (
+                    111.32
+                    * max(
+                        1e-6,
+                        abs(math.cos(math.radians(target_lat))),
+                    )
+                )
+                return (
+                    translated_latitude,
+                    longitude + east_km / longitude_scale,
+                )
+
+            if cell.footprint_polygons:
+                shifted = tuple(
+                    tuple(
+                        tuple(translate(point) for point in ring)
+                        for ring in polygon
+                    )
+                    for polygon in cell.footprint_polygons
+                )
+            else:
+                shifted = tuple(
+                    translate(point)
+                    for point in (
+                        cell.footprint_points
+                        or ((cell.lat, cell.lon),)
+                    )
+                )
+            match = closest_point_on_polygon(
+                target_lat,
+                target_lon,
+                shifted,
+            )
+            if match is None:
+                continue
+            distance = match[0]
             best = distance if best is None else min(best, distance)
         return best
 

@@ -1,0 +1,20 @@
+services:
+  netatmo-station-importer:
+    build:
+      context: ..
+      dockerfile: station_catalog_importer/Dockerfile
+    image: storm-tracker-station-importer:1.0.3
+    container_name: storm-tracker-station-importer
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      STV3_POSTGIS_ENABLED: "true"
+      STV3_NETATMO_IMPORT_MINIMUM_CALL_INTERVAL_SECONDS: "10"
+      STV3_NETATMO_IMPORT_BATCH_CALLS: "6"
+      STV3_NETATMO_TOKEN_STATE: "/state/netatmo-token.json"
+    volumes:
+      - netatmo-importer-state:/state
+
+volumes:
+  netatmo-importer-state:

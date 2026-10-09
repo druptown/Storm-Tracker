@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -73,6 +74,88 @@ def test_parse_observations_rain_60min_divided_by_12_for_5min_estimate(netatmo_m
     data = {"body": [_station("s1", 51.0, 4.0, rain_60min=12.0)]}
     obs = provider._parse_observations(data)
     assert obs[0].rain_5min == pytest.approx(1.0)
+    assert obs[0].rain_60min == pytest.approx(12.0)
+
+
+@pytest.mark.asyncio
+async def test_large_query_always_merges_small_local_query(
+    netatmo_module,
+):
+    provider = netatmo_module.NetatmoProvider.__new__(
+        netatmo_module.NetatmoProvider
+    )
+    provider._radius = 175.0
+    provider._token = type(
+        "Token",
+        (),
+        {"get_access_token": AsyncMock(return_value="token")},
+    )()
+    broad = type("Obs", (), {
+        "station_id": "broad",
+        "lat": 51.5,
+        "lon": 4.5,
+    })()
+    local = type("Obs", (), {
+        "station_id": "local",
+        "lat": 51.05,
+        "lon": 4.42,
+    })()
+    provider._fetch_box = AsyncMock(
+        side_effect=[[broad], [local]]
+    )
+
+    result = await provider.fetch_observations()
+
+    assert {item.station_id for item in result} == {"broad", "local"}
+    assert provider._fetch_box.await_args_list[0].args == ("token", 175.0)
+    assert provider._fetch_box.await_args_list[1].args == (
+        "token",
+        netatmo_module.LOCAL_QUERY_RADIUS_KM,
+    )
+
+
+@pytest.mark.asyncio
+async def test_temporary_failure_reuses_recent_last_good_observations(
+    netatmo_module,
+):
+    provider = netatmo_module.NetatmoProvider.__new__(
+        netatmo_module.NetatmoProvider
+    )
+    provider._radius = 20.0
+    provider._token = type(
+        "Token",
+        (),
+        {"get_access_token": AsyncMock(return_value="token")},
+    )()
+    cached = type("Obs", (), {
+        "station_id": "cached",
+        "lat": 51.05,
+        "lon": 4.42,
+    })()
+    provider._last_good_observations = [cached]
+    provider._last_good_at = time.time()
+
+    async def failed_fetch(*_args):
+        provider._request_failed = True
+        return []
+
+    provider._fetch_box = AsyncMock(side_effect=failed_fetch)
+
+    result = await provider.fetch_observations()
+
+    assert result == [cached]
+
+
+def test_expired_last_good_observations_are_not_reused(netatmo_module):
+    provider = netatmo_module.NetatmoProvider.__new__(
+        netatmo_module.NetatmoProvider
+    )
+    provider._last_good_observations = [object()]
+    provider._last_good_at = (
+        time.time() - netatmo_module.LAST_GOOD_GRACE_SECONDS - 1
+    )
+
+    assert provider._last_good_or_empty() == []
 
 
 def test_parse_observations_extracts_pressure_temp_humidity(netatmo_module):

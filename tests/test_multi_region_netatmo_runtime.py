@@ -33,10 +33,29 @@ def test_netatmo_poll_fetches_and_tracks_every_engine_separately():
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "_poll_netatmo"
     )
     rendered = ast.unparse(poll)
-    assert "asyncio.gather" in rendered
+    assert "for engine_id in engine_ids" in rendered
+    assert "_cached_worker_netatmo" in rendered
+    assert "'netatmo_fetch'" in rendered
+    assert "netatmo_worker_tasks" in rendered
     assert "observations_by_engine[engine_id] = obs" in rendered
     assert "trends_by_engine[engine_id] = tracker.update(obs)" in rendered
+    assert "_cached_worker_synoptic" in rendered
+    assert "'synoptic_fetch'" in rendered
+    assert "ground_observations_by_engine" in rendered
     assert "storm_manager.get_engine_for_target('zone.home')" in rendered
+
+
+def test_worker_owned_netatmo_ingest_is_not_gated_by_legacy_ha_credentials():
+    """Een lege legacy providermap mag workerjobs niet stil blokkeren."""
+    tree = ast.parse(INIT_SOURCE)
+    poll = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_poll_netatmo"
+    )
+    rendered = ast.unparse(poll)
+    assert "worker_observations = _cached_worker_netatmo(" in rendered
+    assert "if engine_id in providers" not in rendered
+    assert "worker_observations is None and engine_id in providers" not in rendered
 
 
 def test_target_status_uses_its_region_pressure_instead_of_global_pressure():

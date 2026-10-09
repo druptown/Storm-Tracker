@@ -37,10 +37,15 @@ Versiegeschiedenis:
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+import gzip
+import hashlib
 import io
+import json
 import logging
 import math
+from pathlib import Path
 import re
 import time
 from collections import deque
@@ -50,8 +55,22 @@ from typing import Iterator, Optional
 
 import aiohttp
 
-from ..engine.observation import Observation, ObservationType
-from .raster_components import extract_intensity_runs
+from ..engine.observation import (
+    FootprintMultiPolygon,
+    Observation,
+    ObservationType,
+    immutable_footprint_polygons,
+)
+from ..engine.bounded_payload import (
+    decompress_limited,
+    iter_limited_async,
+    read_limited_stream,
+)
+from ..geometry.polygon import closest_point_on_polygon
+from .raster_components import (
+    extract_intensity_runs,
+    grid_boundary_polygons,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -61,6 +80,8 @@ S3_ENDPOINT    = "https://s3.waw3-1.cloudferro.com"
 S3_BUCKET      = "openradar-24h"
 TIMEOUT_S      = 30
 MAX_PRODUCT_AGE_S = 15 * 60   # 15 minuten — verwerp oudere producten
+MAX_OPERA_DOWNLOAD_BYTES = 384 * 1024 * 1024
+_HTTP_CHUNK_BYTES = 64 * 1024
 
 # Filterparameters (uit PoC defaults, bewezen correct)
 # Live OPERA CIRRUS data can report qi_total=0.0 for genuine precipitation.
@@ -89,6 +110,28 @@ _cache_lock:    asyncio.Lock   = asyncio.Lock()
 _cached_key:    Optional[str]  = None
 _cached_data:   Optional[bytes] = None
 _cache_ts:      float          = 0.0   # unix timestamp van de gecachede data
+WORKER_ARTIFACT_ROOT = Path("/share/storm_tracker_worker")
+MAX_WORKER_ARTIFACT_BYTES = 32 * 1024 * 1024
+MAX_OPERA_POLYGONS_PER_FOOTPRINT = 1
+MAX_OPERA_RINGS_PER_FOOTPRINT = 256
+MAX_OPERA_POINTS_PER_RING = 100_000
+MAX_OPERA_TOPOLOGY_POINTS_PER_ARTIFACT = 1_000_000
+
+
+async def _read_bounded_response(response, *, maximum_bytes: int) -> bytes:
+    """Read one uncompressed HTTP body under an explicit OPERA byte contract."""
+
+    encoding = response.headers.get("Content-Encoding")
+    if encoding and encoding.lower() != "identity":
+        raise ValueError(
+            "OPERA-response gebruikt onverwachte transportcompressie"
+        )
+    return await iter_limited_async(
+        response.content.iter_chunked(_HTTP_CHUNK_BYTES),
+        maximum_bytes=maximum_bytes,
+        declared_bytes=response.headers.get("Content-Length"),
+        require_declared_match=True,
+    )
 
 
 @asynccontextmanager
@@ -124,10 +167,12 @@ class OperaCell:
     mean_quality: float
     pixelcount:   int
     footprint_points: tuple[tuple[float, float], ...] = ()
+    footprint_polygons: FootprintMultiPolygon = ()
     parent_component: int = 0
     child_component: int = 0
     parent_area_km2: float = 0.0
     parent_footprint_points: tuple[tuple[float, float], ...] = ()
+    parent_footprint_polygons: FootprintMultiPolygon = ()
 
 
 @dataclass
@@ -135,6 +180,198 @@ class ComponentGroup:
     """Eén oorspronkelijke radarecho met één of meer lokale kernen."""
     parent_pixels: object
     child_pixels: list
+
+
+def _serialized_cell(cell: OperaCell) -> dict:
+    return {
+        "centroid_lat": cell.centroid_lat,
+        "centroid_lon": cell.centroid_lon,
+        "area_km2": cell.area_km2,
+        "max_dbz": cell.max_dbz,
+        "mean_dbz": cell.mean_dbz,
+        "mean_quality": cell.mean_quality,
+        "pixelcount": cell.pixelcount,
+        "footprint_points": cell.footprint_points,
+        "footprint_polygons": cell.footprint_polygons,
+        "parent_component": cell.parent_component,
+        "child_component": cell.child_component,
+        "parent_area_km2": cell.parent_area_km2,
+        "parent_footprint_points": cell.parent_footprint_points,
+        "parent_footprint_polygons": cell.parent_footprint_polygons,
+    }
+
+
+def _cell_digest(cells: list[OperaCell]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            [_serialized_cell(cell) for cell in cells],
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _validated_opera_polygons(
+    value,
+    *,
+    field_name: str,
+) -> FootprintMultiPolygon:
+    """Materialiseer begrensde, gesloten OPERA-topologie zonder herstel."""
+    polygons = immutable_footprint_polygons(
+        value or (),
+        field_name=field_name,
+    )
+    if len(polygons) > MAX_OPERA_POLYGONS_PER_FOOTPRINT:
+        raise ValueError(f"{field_name} bevat te veel polygonen")
+    ring_count = sum(len(polygon) for polygon in polygons)
+    if ring_count > MAX_OPERA_RINGS_PER_FOOTPRINT:
+        raise ValueError(f"{field_name} bevat te veel ringen")
+    for polygon in polygons:
+        for ring in polygon:
+            if len(ring) > MAX_OPERA_POINTS_PER_RING:
+                raise ValueError(f"{field_name} bevat een te grote ring")
+            if not ring or ring[0] != ring[-1]:
+                raise ValueError(f"{field_name} bevat een open ring")
+    return polygons
+
+
+def _raw_topology_stats(cells: list[dict]) -> tuple[int, int]:
+    rings = 0
+    points = 0
+    for cell in cells:
+        if not isinstance(cell, dict):
+            raise ValueError("OPERA-workerartifact bevat een ongeldige cel")
+        for field_name in (
+            "footprint_polygons",
+            "parent_footprint_polygons",
+        ):
+            polygons = _validated_opera_polygons(
+                cell.get(field_name, ()),
+                field_name=field_name,
+            )
+            rings += sum(len(polygon) for polygon in polygons)
+            points += sum(
+                len(ring)
+                for polygon in polygons
+                for ring in polygon
+            )
+            if points > MAX_OPERA_TOPOLOGY_POINTS_PER_ARTIFACT:
+                raise ValueError(
+                    "OPERA-workerartifact bevat te veel footprintpunten"
+                )
+    return rings, points
+
+
+def _read_opera_worker_artifact(metadata: dict) -> dict:
+    raw_path = metadata.get("artifact_path")
+    if not isinstance(raw_path, str):
+        raise ValueError("OPERA-workerresultaat bevat geen artifactpad")
+    root = WORKER_ARTIFACT_ROOT.resolve()
+    path = Path(raw_path).resolve()
+    if path.parent != root or path.suffixes[-2:] != [".json", ".gz"]:
+        raise ValueError("OPERA-workerartifact staat buiten de toegestane map")
+    try:
+        expected_bytes = int(metadata.get("artifact_bytes", -1))
+    except (TypeError, ValueError) as err:
+        raise ValueError(
+            "OPERA-workerartifact heeft een ongeldige grootte"
+        ) from err
+    if (
+        expected_bytes <= 0
+        or expected_bytes > MAX_WORKER_ARTIFACT_BYTES
+        or path.stat().st_size != expected_bytes
+    ):
+        raise ValueError("OPERA-workerartifact heeft een ongeldige grootte")
+    with path.open("rb") as stream:
+        compressed = read_limited_stream(
+            stream,
+            maximum_bytes=MAX_WORKER_ARTIFACT_BYTES,
+            declared_bytes=expected_bytes,
+            require_declared_match=True,
+        )
+    if hashlib.sha256(compressed).hexdigest() != metadata.get("artifact_sha256"):
+        raise ValueError("OPERA-workerartifact-controlesom klopt niet")
+    decoded = decompress_limited(
+        compressed,
+        codec="gzip",
+        maximum_compressed_bytes=MAX_WORKER_ARTIFACT_BYTES,
+        maximum_uncompressed_bytes=MAX_WORKER_ARTIFACT_BYTES,
+    )
+    payload = json.loads(decoded)
+    if not isinstance(payload, dict) or payload.get("provider") != "opera":
+        raise ValueError("OPERA-workerartifact bevat het verkeerde resultaat")
+    cells = payload.get("cells")
+    if not isinstance(cells, list) or len(cells) != int(
+        metadata.get("cell_count", -1)
+    ):
+        raise ValueError("OPERA-workerartifact bevat ongeldige cellen")
+    topology_rings, topology_points = _raw_topology_stats(cells)
+    for metadata_name, actual in (
+        ("topology_ring_count", topology_rings),
+        ("topology_point_count", topology_points),
+    ):
+        declared = metadata.get(metadata_name)
+        if declared is not None and (
+            isinstance(declared, bool)
+            or not isinstance(declared, int)
+            or declared != actual
+        ):
+            raise ValueError(
+                f"OPERA-workerartifact {metadata_name} klopt niet"
+            )
+    digest = hashlib.sha256(
+        json.dumps(
+            cells, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
+    ).hexdigest()
+    if digest != metadata.get("cell_digest"):
+        raise ValueError("OPERA-workerartifact celcontrole klopt niet")
+    frame_timestamp = float(payload.get("frame_timestamp", 0))
+    if frame_timestamp <= 0 or time.time() - frame_timestamp > MAX_PRODUCT_AGE_S:
+        raise ValueError("OPERA-workerframe is te oud")
+    overlay = payload.get("overlay")
+    if not isinstance(overlay, dict) or not isinstance(
+        overlay.get("runs"), list
+    ):
+        raise ValueError("OPERA-workerartifact bevat geen geldige kaartlaag")
+    return payload
+
+
+def _opera_cells_from_worker(payload: dict) -> list[OperaCell]:
+    """Convert a validated worker artifact to the internal cell model."""
+    cells = []
+    for value in payload["cells"]:
+        if not isinstance(value, dict):
+            raise ValueError("OPERA-workerartifact bevat een ongeldige cel")
+        cells.append(OperaCell(
+            centroid_lat=float(value["centroid_lat"]),
+            centroid_lon=float(value["centroid_lon"]),
+            area_km2=float(value["area_km2"]),
+            max_dbz=float(value["max_dbz"]),
+            mean_dbz=float(value["mean_dbz"]),
+            mean_quality=float(value["mean_quality"]),
+            pixelcount=int(value["pixelcount"]),
+            footprint_points=tuple(
+                tuple(point) for point in value.get("footprint_points", ())
+            ),
+            footprint_polygons=_validated_opera_polygons(
+                value.get("footprint_polygons", ()),
+                field_name="footprint_polygons",
+            ),
+            parent_component=int(value.get("parent_component", 0)),
+            child_component=int(value.get("child_component", 0)),
+            parent_area_km2=float(value.get("parent_area_km2", 0.0)),
+            parent_footprint_points=tuple(
+                tuple(point)
+                for point in value.get("parent_footprint_points", ())
+            ),
+            parent_footprint_polygons=_validated_opera_polygons(
+                value.get("parent_footprint_polygons", ()),
+                field_name="parent_footprint_polygons",
+            ),
+        ))
+    return cells
 
 
 # ── Geometrie helpers ─────────────────────────────────────────────────────────
@@ -398,6 +635,36 @@ def _boundary_ring(pixels, window, grid, inverse) -> tuple[tuple[float, float], 
     )
 
 
+def _boundary_polygons(
+    pixels,
+    window,
+    grid,
+    inverse,
+) -> FootprintMultiPolygon:
+    """Projecteer alle geldige OPERA-ringen; ambiguïteit geeft geen topologie."""
+    row0, _, col0, _ = window
+
+    def corner_to_latlon(row, col):
+        lon, lat = inverse.transform(
+            (col0 + col) * grid.xscale,
+            -(row0 + row) * grid.yscale,
+        )
+        return round(float(lat), 5), round(float(lon), 5)
+
+    polygons = grid_boundary_polygons(
+        pixels,
+        corner_to_latlon,
+        fail_closed=True,
+    )
+    try:
+        return _validated_opera_polygons(
+            polygons,
+            field_name="footprint_polygons",
+        )
+    except ValueError:
+        return ()
+
+
 def _analyze_components(
     components, radar, quality, window, grid, component_metadata=None
 ) -> list[OperaCell]:
@@ -424,6 +691,12 @@ def _analyze_components(
         # Kies één echte celpixel per ongeveer 8x8 km rasterblok. Dit volgt
         # ook onregelmatige cellen veel beter dan een centroid of bounding box.
         footprint_points = _boundary_ring(pixels, window, grid, inverse)
+        footprint_polygons = _boundary_polygons(
+            pixels,
+            window,
+            grid,
+            inverse,
+        )
 
         metadata = (
             component_metadata[component_index]
@@ -438,6 +711,7 @@ def _analyze_components(
             mean_quality = round(float(qualities.mean()), 3),
             pixelcount   = len(pixels),
             footprint_points = footprint_points,
+            footprint_polygons = footprint_polygons,
             **metadata,
         ))
     return sorted(cells, key=lambda c: c.area_km2, reverse=True)
@@ -536,6 +810,9 @@ def _parse_hdf5_slice(
                     "child_component": child_index,
                     "parent_area_km2": parent.area_km2,
                     "parent_footprint_points": parent.footprint_points,
+                    "parent_footprint_polygons": (
+                        parent.footprint_polygons
+                    ),
                 }
                 for child_index, _ in enumerate(group.child_pixels)
             ]
@@ -747,6 +1024,10 @@ class OperaProvider:
         self._last_observations: list[Observation] = []
         self.overlay = None
         self._raw_overlay = None
+        self._parse_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="storm_tracker_opera",
+        )
 
     @property
     def healthy(self) -> bool:
@@ -760,23 +1041,40 @@ class OperaProvider:
             return
         accepted = []
         for observation in observations:
+            polygons = (
+                observation.footprint_polygons
+                or observation.parent_footprint_polygons
+            )
             ring = (
                 observation.footprint_points
                 or observation.parent_footprint_points
             )
-            accepted.append((observation, ring))
+            accepted.append((observation, polygons, ring))
         runs = []
         for run in self._raw_overlay.get("runs", ()):
             lat = sum(point[0] for point in run["ring"]) / 4
             lon = sum(point[1] for point in run["ring"]) / 4
             if any(
-                _point_in_ring(lat, lon, ring)
+                (
+                    (
+                        match := closest_point_on_polygon(
+                            lat,
+                            lon,
+                            polygons,
+                        )
+                    ) is not None
+                    and match[3]
+                )
+                if polygons
+                else _point_in_ring(lat, lon, ring)
                 or (
-                    not ring and _haversine_km(
+                    not polygons
+                    and not ring
+                    and _haversine_km(
                         lat, lon, observation.lat, observation.lon
                     ) <= max(2.0, math.sqrt(max(0.0, observation.area_km2) / math.pi))
                 )
-                for observation, ring in accepted
+                for observation, polygons, ring in accepted
             ):
                 runs.append(run)
         self.overlay = {**self._raw_overlay, "runs": runs}
@@ -817,7 +1115,7 @@ class OperaProvider:
                      self._lat, self._lon, self._radius)
 
     def stop(self) -> None:
-        pass
+        self._parse_executor.shutdown(wait=False, cancel_futures=True)
 
     def _bbox(self) -> tuple:
         """
@@ -875,31 +1173,109 @@ class OperaProvider:
                     return list(self._last_observations)
 
                 # Download — gebruik cache als het dezelfde key is
+            bbox = self._bbox()
+            raw_overlay = None
+            if hass:
+                diagnostic = {
+                    "state": "error",
+                    "mode": "worker_first",
+                    "key": key,
+                    "source": "worker",
+                    "fallback_active": False,
+                }
+                try:
+                    from ..worker_bridge import async_request_worker_job
+
+                    result = await async_request_worker_job(
+                        hass,
+                        "opera_hdf5_fetch",
+                        {
+                            "url": _s3_path_from_key(key),
+                            "bbox": list(bbox),
+                            "max_file_bytes": 40 * 1024 * 1024,
+                        },
+                        timeout=45,
+                    )
+                    worker_payload = await asyncio.get_running_loop().run_in_executor(
+                        self._parse_executor,
+                        _read_opera_worker_artifact,
+                        result,
+                    )
+                    from ..worker_radar_client import remember_worker_radar_artifact
+                    self.last_worker_artifact = remember_worker_radar_artifact(
+                        hass, "opera", result
+                    )
+                    cells = _opera_cells_from_worker(worker_payload)
+                    ts = str(worker_payload.get("timestamp_text") or "")
+                    raw_overlay = dict(worker_payload["overlay"])
+                    diagnostic.update({
+                        "state": "active",
+                        "worker_cell_count": len(cells),
+                        "worker_cell_digest": str(result["cell_digest"]),
+                        "worker_frame_timestamp": result.get(
+                            "frame_timestamp"
+                        ),
+                    })
+                except (
+                    asyncio.TimeoutError,
+                    KeyError,
+                    OSError,
+                    RuntimeError,
+                    TypeError,
+                    ValueError,
+                ) as err:
+                    diagnostic.update({
+                        "state": "worker_onbeschikbaar",
+                        "source": "bewaarde_workerdata",
+                        "fallback_active": False,
+                        "error": type(err).__name__,
+                    })
+                    _LOGGER.warning(
+                        "OPERA-worker niet bruikbaar; laatst geldige workerdata blijft actief: %s",
+                        err,
+                    )
+                    worker_status = dict(
+                        hass.data.get("storm_tracker_v3", {}).get(
+                            "worker_status", {}
+                        )
+                    )
+                    worker_status["opera_hdf5"] = diagnostic
+                    hass.data.setdefault("storm_tracker_v3", {})[
+                        "worker_status"
+                    ] = worker_status
+                    hass.bus.async_fire(
+                        "storm_tracker_v3_worker_status_update"
+                    )
+                    return list(self._last_observations)
+                worker_status = dict(
+                    hass.data.get("storm_tracker_v3", {}).get(
+                        "worker_status", {}
+                    )
+                )
+                worker_status["opera_hdf5"] = diagnostic
+                hass.data.setdefault("storm_tracker_v3", {})[
+                    "worker_status"
+                ] = worker_status
+                hass.bus.async_fire("storm_tracker_v3_worker_status_update")
+
+            else:
                 async with _cache_lock:
                     if key != _cached_key:
-                        data = await self._download(session, key)
+                        async with _session_scope(
+                            self._session
+                        ) as fallback_session:
+                            data = await self._download(fallback_session, key)
                         if not data:
                             return []
-                        _cached_key  = key
+                        _cached_key = key
                         _cached_data = data
-                        _cache_ts    = time.time()
-                        _LOGGER.info("OPERA cache bijgewerkt: %s (%.1f MB)",
-                                     key, len(data) / 1_048_576)
+                        _cache_ts = time.time()
                     else:
                         data = _cached_data
-                        _LOGGER.debug("OPERA cache hit: %s", key)
-
-            # Verwerk lokale slice (buiten event loop)
-            bbox = self._bbox()
-            overlays = []
-            if hass:
-                cells, ts = await hass.async_add_executor_job(
-                    _parse_hdf5_slice, data, bbox, overlays
-                )
-            else:
+                overlays = []
                 cells, ts = _parse_hdf5_slice(data, bbox, overlays)
+                raw_overlay = overlays[0] if overlays else None
 
-            raw_overlay = overlays[0] if overlays else None
             if raw_overlay:
                 raw_overlay["runs"] = [
                     run for run in raw_overlay["runs"]
@@ -941,9 +1317,19 @@ class OperaProvider:
                     "quality": cell.mean_quality,
                     "pixels": cell.pixelcount,
                     "footprint_points": len(cell.footprint_points),
+                    "footprint_polygons": len(
+                        cell.footprint_polygons
+                    ),
+                    "footprint_rings": sum(
+                        len(polygon)
+                        for polygon in cell.footprint_polygons
+                    ),
                     "parent_component": cell.parent_component,
                     "parent_area_km2": cell.parent_area_km2,
                     "parent_footprint_points": len(cell.parent_footprint_points),
+                    "parent_footprint_polygons": len(
+                        cell.parent_footprint_polygons
+                    ),
                 }
                 for cell in cells[:MAX_DIAGNOSTIC_CELLS]
             ]
@@ -973,7 +1359,10 @@ class OperaProvider:
                 if resp.status != 200:
                     _LOGGER.warning("OPERA download mislukt: %d voor %s", resp.status, url)
                     return None
-                data = await resp.read()
+                data = await _read_bounded_response(
+                    resp,
+                    maximum_bytes=MAX_OPERA_DOWNLOAD_BYTES,
+                )
                 _LOGGER.debug("OPERA download: %.1f MB in %.1fs",
                               len(data) / 1_048_576, time.time() - t0)
                 return data
@@ -1005,6 +1394,7 @@ class OperaProvider:
                 area_km2  = cell.area_km2,
                 quality   = cell.mean_quality,
                 footprint_points = cell.footprint_points,
+                footprint_polygons = cell.footprint_polygons,
                 radar_cell_id = (
                     f"opera:{timestamp_str}:p{cell.parent_component}:"
                     f"c{cell.child_component}"
@@ -1014,6 +1404,9 @@ class OperaProvider:
                 ),
                 parent_area_km2 = cell.parent_area_km2,
                 parent_footprint_points = cell.parent_footprint_points,
+                parent_footprint_polygons = (
+                    cell.parent_footprint_polygons
+                ),
                 source    = "opera",
             ))
         return obs

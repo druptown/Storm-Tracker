@@ -16,7 +16,14 @@ class RasterComponent:
     centroid_col: float
     max_intensity: int
     mean_intensity: float
-    boundary: tuple[tuple[float, float], ...]
+    polygons: tuple[
+        tuple[tuple[tuple[float, float], ...], ...], ...
+    ]
+
+    @property
+    def boundary(self) -> tuple[tuple[float, float], ...]:
+        """Legacy buitenring; ``polygons`` blijft de autoritatieve topologie."""
+        return self.polygons[0][0] if self.polygons else ()
 
 
 def extract_intensity_runs(
@@ -86,8 +93,54 @@ def _pixel_components(values) -> list[list[tuple[int, int]]]:
     return components
 
 
-def _grid_boundary(pixels) -> list[tuple[int, int]]:
-    """Traceer de grootste gesloten buitenring langs echte pixelranden."""
+def _signed_grid_area(ring) -> float:
+    return sum(
+        col1 * row2 - col2 * row1
+        for (row1, col1), (row2, col2) in zip(ring, ring[1:])
+    ) / 2.0
+
+
+def _simplify_grid_ring(ring) -> tuple[tuple[int, int], ...]:
+    """Verwijder uitsluitend collineaire tussenpunten en behoud sluiting."""
+    simplified = []
+    for index, current in enumerate(ring[:-1]):
+        previous = ring[index - 1 if index else -2]
+        following = ring[(index + 1) % (len(ring) - 1)]
+        if (
+            previous[0] == current[0] == following[0]
+            or previous[1] == current[1] == following[1]
+        ):
+            continue
+        simplified.append(current)
+    if len(simplified) < 3:
+        simplified = list(ring[:-1])
+    simplified.append(simplified[0])
+    return tuple(simplified)
+
+
+def _point_in_grid_ring(
+    point: tuple[float, float],
+    ring: tuple[tuple[int, int], ...],
+) -> bool:
+    row, col = point
+    inside = False
+    previous_row, previous_col = ring[-1]
+    for current_row, current_col in ring:
+        if (current_row > row) != (previous_row > row):
+            crossing_col = (
+                (previous_col - current_col)
+                * (row - current_row)
+                / (previous_row - current_row)
+                + current_col
+            )
+            if col < crossing_col:
+                inside = not inside
+        previous_row, previous_col = current_row, current_col
+    return inside
+
+
+def _trace_grid_loops(pixels) -> list[tuple[tuple[int, int], ...]]:
+    """Traceer iedere buiten- en binnenring met gevulde pixels rechts."""
     edges = set()
     for row, col in pixels:
         for edge in (
@@ -103,47 +156,159 @@ def _grid_boundary(pixels) -> list[tuple[int, int]]:
                 edges.add(edge)
 
     unused = set(edges)
-    loops = []
+    loops: list[tuple[tuple[int, int], ...]] = []
+    direction_index = {
+        (0, 1): 0,
+        (1, 0): 1,
+        (0, -1): 2,
+        (-1, 0): 3,
+    }
+    turn_rank = {1: 0, 0: 1, 3: 2, 2: 3}
     while unused:
         first = min(unused)
         unused.remove(first)
         ring = [first[0], first[1]]
         while ring[-1] != ring[0]:
-            candidates = sorted(edge for edge in unused if edge[0] == ring[-1])
+            candidates = [
+                edge for edge in unused if edge[0] == ring[-1]
+            ]
             if not candidates:
                 ring = []
                 break
-            edge = candidates[0]
+            previous = (
+                ring[-1][0] - ring[-2][0],
+                ring[-1][1] - ring[-2][1],
+            )
+            previous_index = direction_index[previous]
+
+            def candidate_rank(edge):
+                following = (
+                    edge[1][0] - edge[0][0],
+                    edge[1][1] - edge[0][1],
+                )
+                delta = (
+                    direction_index[following] - previous_index
+                ) % 4
+                return turn_rank[delta], edge
+
+            edge = min(candidates, key=candidate_rank)
             unused.remove(edge)
             ring.append(edge[1])
             if len(ring) > len(edges) + 1:
                 ring = []
                 break
         if len(ring) >= 4:
-            loops.append(ring)
-    if not loops:
+            loops.append(_simplify_grid_ring(ring))
+    return loops
+
+
+def _pixel_fallback_polygons(pixels):
+    """Exacte, niet-geflattenede fallback wanneer contourtracing faalt."""
+    return tuple(
+        ((
+            (row, col),
+            (row, col + 1),
+            (row + 1, col + 1),
+            (row + 1, col),
+            (row, col),
+        ),)
+        for row, col in sorted(pixels)
+    )
+
+
+def _has_ambiguous_diagonal_contact(pixels) -> bool:
+    """Detecteer 8-connected contacten die alleen één rasterhoek delen."""
+    occupied = {
+        (int(row), int(col)) for row, col in pixels
+    }
+    for row, col in occupied:
+        for row_delta, col_delta in ((1, 1), (1, -1)):
+            diagonal = (row + row_delta, col + col_delta)
+            if diagonal not in occupied:
+                continue
+            bridges = (
+                (row + row_delta, col),
+                (row, col + col_delta),
+            )
+            if not any(bridge in occupied for bridge in bridges):
+                return True
+    return False
+
+
+def _grid_polygons(pixels, *, fail_closed: bool = False):
+    """Geef alle buitenringen met hun gaten als immutable MultiPolygon."""
+    pixels = tuple((int(row), int(col)) for row, col in pixels)
+    if fail_closed and _has_ambiguous_diagonal_contact(pixels):
+        return ()
+    loops = _trace_grid_loops(pixels)
+    signed = [(_signed_grid_area(ring), ring) for ring in loops]
+    if (
+        not signed
+        or abs(sum(area for area, _ in signed) - len(pixels)) > 1e-9
+    ):
+        return () if fail_closed else _pixel_fallback_polygons(pixels)
+
+    outers = [
+        (area, ring) for area, ring in signed if area > 0.0
+    ]
+    holes = [
+        (area, ring) for area, ring in signed if area < 0.0
+    ]
+    if not outers or (fail_closed and len(outers) != 1):
+        return () if fail_closed else _pixel_fallback_polygons(pixels)
+
+    outers.sort(key=lambda item: (min(item[1]), -item[0]))
+    polygons: list[list[tuple[tuple[int, int], ...]]] = [
+        [ring] for _, ring in outers
+    ]
+    for _, hole in sorted(holes, key=lambda item: min(item[1])):
+        representative = hole[0]
+        containers = [
+            (outer_area, index)
+            for index, (outer_area, outer) in enumerate(outers)
+            if _point_in_grid_ring(representative, outer)
+        ]
+        if not containers:
+            return () if fail_closed else _pixel_fallback_polygons(pixels)
+        _, container_index = min(containers)
+        polygons[container_index].append(hole)
+    return tuple(tuple(rings) for rings in polygons)
+
+
+def grid_boundary_polygons(
+    pixels,
+    corner_to_latlon: Callable[[float, float], tuple[float, float]],
+    *,
+    fail_closed: bool = False,
+) -> tuple[
+    tuple[tuple[tuple[float, float], ...], ...], ...
+]:
+    """Projecteer alle buitenringen en gaten zonder topologieverlies."""
+    return tuple(
+        tuple(
+            tuple(
+                corner_to_latlon(float(row), float(col))
+                for row, col in ring
+            )
+            for ring in polygon
+        )
+        for polygon in _grid_polygons(
+            pixels,
+            fail_closed=fail_closed,
+        )
+    )
+
+
+def _grid_boundary(pixels) -> list[tuple[int, int]]:
+    """Legacy grootste buitenring; nieuwe code gebruikt ``_grid_polygons``."""
+    polygons = _grid_polygons(pixels)
+    if not polygons:
         return []
-
-    def area(ring):
-        return abs(sum(
-            col1 * row2 - col2 * row1
-            for (row1, col1), (row2, col2) in zip(ring, ring[1:])
-        )) / 2.0
-
-    ring = max(loops, key=area)
-    # Rechte tussenpunten dragen geen vorminformatie en belasten GeoJSON alleen.
-    simplified = []
-    for index, current in enumerate(ring[:-1]):
-        previous = ring[index - 1 if index else -2]
-        following = ring[(index + 1) % (len(ring) - 1)]
-        if ((previous[0] == current[0] == following[0]) or
-                (previous[1] == current[1] == following[1])):
-            continue
-        simplified.append(current)
-    if len(simplified) < 3:
-        simplified = ring[:-1]
-    simplified.append(simplified[0])
-    return simplified
+    largest = max(
+        (polygon[0] for polygon in polygons),
+        key=lambda ring: abs(_signed_grid_area(ring)),
+    )
+    return list(largest)
 
 
 def extract_components(
@@ -162,9 +327,9 @@ def extract_components(
         if len(pixels) < minimum_pixels:
             continue
         values = [int(intensity_grid[row, col]) for row, col in pixels]
-        boundary = tuple(
-            corner_to_latlon(float(row), float(col))
-            for row, col in _grid_boundary(pixels)
+        polygons = grid_boundary_polygons(
+            pixels,
+            corner_to_latlon,
         )
         components.append(RasterComponent(
             index=index,
@@ -173,6 +338,6 @@ def extract_components(
             centroid_col=sum(col + 0.5 for _, col in pixels) / len(pixels),
             max_intensity=max(values),
             mean_intensity=sum(values) / len(values),
-            boundary=boundary,
+            polygons=polygons,
         ))
     return components

@@ -64,6 +64,106 @@ def test_boundary_ring_rejects_ambiguous_diagonal_pixels(opera_module):
 
 # ── 1. Bbox-crop ──────────────────────────────────────────────────────────
 
+def test_boundary_polygons_preserve_outer_ring_and_hole(opera_module):
+    import numpy as np
+    from pyproj import Transformer
+
+    grid = opera_module.Grid(
+        projdef="EPSG:3857", xsize=100, ysize=100,
+        xscale=1000.0, yscale=1000.0,
+    )
+    inverse = Transformer.from_crs(
+        "EPSG:3857", "EPSG:4326", always_xy=True
+    )
+    pixels = np.asarray(
+        [
+            (row, col)
+            for row in range(5)
+            for col in range(5)
+            if row in {0, 4} or col in {0, 4}
+        ],
+        dtype=np.int32,
+    )
+
+    polygons = opera_module._boundary_polygons(
+        pixels, (10, 20, 10, 20), grid, inverse
+    )
+
+    assert len(polygons) == 1
+    assert len(polygons[0]) == 2
+    assert all(ring[0] == ring[-1] for ring in polygons[0])
+    assert opera_module._boundary_ring(
+        pixels, (10, 20, 10, 20), grid, inverse
+    ) == ()
+
+
+def test_boundary_polygons_fail_closed_for_diagonal_contact(opera_module):
+    import numpy as np
+    from pyproj import Transformer
+
+    grid = opera_module.Grid(
+        projdef="EPSG:3857", xsize=100, ysize=100,
+        xscale=1000.0, yscale=1000.0,
+    )
+    inverse = Transformer.from_crs(
+        "EPSG:3857", "EPSG:4326", always_xy=True
+    )
+    pixels = np.asarray(((0, 0), (1, 1)), dtype=np.int32)
+
+    assert opera_module._boundary_polygons(
+        pixels, (10, 20, 10, 20), grid, inverse
+    ) == ()
+
+
+def test_opera_topology_payload_is_counted_and_bounded(
+    opera_module,
+    monkeypatch,
+):
+    polygons = (((
+        (50.9, 3.9), (50.9, 4.1), (51.1, 4.1),
+        (51.1, 3.9), (50.9, 3.9),
+    ),),)
+    cells = [{
+        "footprint_polygons": polygons,
+        "parent_footprint_polygons": polygons,
+    }]
+
+    assert opera_module._raw_topology_stats(cells) == (2, 10)
+
+    monkeypatch.setattr(
+        opera_module,
+        "MAX_OPERA_TOPOLOGY_POINTS_PER_ARTIFACT",
+        9,
+    )
+    with pytest.raises(ValueError, match="te veel footprintpunten"):
+        opera_module._raw_topology_stats(cells)
+
+
+def test_opera_rejects_open_or_oversized_topology(
+    opera_module,
+    monkeypatch,
+):
+    open_ring = (((
+        (50.9, 3.9), (50.9, 4.1), (51.1, 4.1),
+    ),),)
+    with pytest.raises(ValueError, match="open ring"):
+        opera_module._validated_opera_polygons(
+            open_ring,
+            field_name="footprint_polygons",
+        )
+
+    closed_ring = (((
+        (50.9, 3.9), (50.9, 4.1), (51.1, 4.1),
+        (50.9, 3.9),
+    ),),)
+    monkeypatch.setattr(opera_module, "MAX_OPERA_POINTS_PER_RING", 3)
+    with pytest.raises(ValueError, match="te grote ring"):
+        opera_module._validated_opera_polygons(
+            closed_ring,
+            field_name="footprint_polygons",
+        )
+
+
 def test_crop_window_matches_full_grid(opera_module, opera_fixture_file):
     """
     Een bbox die het volledige testgrid dekt, moet croppen naar
@@ -141,9 +241,36 @@ def test_valid_storm_cell_detected_with_gain_offset_applied(opera_module, opera_
     storm_cells = [c for c in cells if abs(c.max_dbz - 35.0) < 0.5]
     assert storm_cells, f"verwachtte een cel met max_dbz~35.0, kreeg: {[c.max_dbz for c in cells]}"
     assert storm_cells[0].footprint_points
+    assert storm_cells[0].footprint_polygons
     assert storm_cells[0].footprint_points[0] == storm_cells[0].footprint_points[-1]
     assert len(storm_cells[0].footprint_points) <= 4 * storm_cells[0].pixelcount + 1
     assert timestamp == f"{meta['date']}T{meta['time']}Z"
+
+
+def test_synthetic_odim_fixture_preserves_dry_hole_end_to_end(
+    opera_module,
+    opera_fixture_file,
+):
+    meta = opera_fixture_file
+    with open(meta["path"], "rb") as handle:
+        cells, _ = opera_module._parse_hdf5_slice(
+            handle.read(),
+            _full_bbox(meta),
+        )
+
+    donut = [
+        cell for cell in cells
+        if cell.max_dbz == pytest.approx(32.0)
+    ]
+
+    assert len(donut) == 1
+    assert donut[0].footprint_points == ()
+    assert len(donut[0].footprint_polygons) == 1
+    assert len(donut[0].footprint_polygons[0]) == 2
+    assert all(
+        ring[0] == ring[-1]
+        for ring in donut[0].footprint_polygons[0]
+    )
 
 
 def test_opera_exposes_exact_accepted_raster_runs(opera_module, opera_fixture_file):
@@ -164,6 +291,55 @@ def test_opera_exposes_exact_accepted_raster_runs(opera_module, opera_fixture_fi
     provider.apply_accepted_overlay(observations)
     assert provider.overlay["runs"]
     assert len(provider.overlay["runs"]) <= len(overlays[0]["runs"])
+
+
+def test_accepted_overlay_excludes_runs_inside_structured_hole(opera_module):
+    polygons = ((
+        (
+            (50.5, 3.0), (50.5, 5.0), (51.5, 5.0),
+            (51.5, 3.0), (50.5, 3.0),
+        ),
+        (
+            (50.8, 3.7), (50.8, 4.3), (51.2, 4.3),
+            (51.2, 3.7), (50.8, 3.7),
+        ),
+    ),)
+    observation = opera_module.Observation(
+        obs_type=opera_module.ObservationType.RADAR,
+        lat=51.0,
+        lon=4.0,
+        timestamp=1.0,
+        area_km2=1000.0,
+        footprint_polygons=polygons,
+        source="opera",
+    )
+    provider = opera_module.OperaProvider(51.0, 4.0)
+    provider._raw_overlay = {
+        "source": "opera",
+        "timestamp": 1.0,
+        "runs": [
+            {
+                "id": "occupied",
+                "ring": (
+                    (50.59, 3.99), (50.59, 4.01),
+                    (50.61, 4.01), (50.61, 3.99),
+                ),
+            },
+            {
+                "id": "hole",
+                "ring": (
+                    (50.99, 3.99), (50.99, 4.01),
+                    (51.01, 4.01), (51.01, 3.99),
+                ),
+            },
+        ],
+    }
+
+    provider.apply_accepted_overlay([observation])
+
+    assert [
+        run["id"] for run in provider.overlay["runs"]
+    ] == ["occupied"]
 
 
 def test_low_quality_is_retained_as_diagnostic_metadata(opera_module, opera_fixture_file):

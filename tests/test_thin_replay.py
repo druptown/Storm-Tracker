@@ -33,7 +33,7 @@ def _cell(observed_at: float = 100.0):
         ]]},
         precipitation_rate_mm_h=4.0, reflectivity_dbz=None, radar_level=None,
         velocity_east_kmh=60.0, velocity_north_kmh=0.0,
-        speed_kmh=60.0, heading_deg=90.0,
+        speed_kmh=60.0, heading_deg=90.0, motion_ready=True,
     )
 
 

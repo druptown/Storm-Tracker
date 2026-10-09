@@ -5,10 +5,14 @@ import math
 import numpy as np
 import pytest
 
-from storm_tracker_worker.desired_state import Target
-from storm_tracker_worker.thin_provider_adapters import ThinRadarField
+import storm_tracker_worker.thin_regional_radar_fusion as radar_fusion_module
+from storm_tracker_worker.desired_state import DesiredState, RuntimeSettings, Target
+from storm_tracker_worker.thin_provider_adapters import RadarFieldIdentity, ThinRadarField
 from storm_tracker_worker.thin_provider_runtime import ProviderResult
-from storm_tracker_worker.thin_region_planner import ThinAcquisitionRegion
+from storm_tracker_worker.thin_region_planner import (
+    ThinAcquisitionRegion,
+    ThinRegionPlanner,
+)
 from storm_tracker_worker.thin_regional_radar_fusion import (
     fuse_regional_radar_fields,
     build_regional_analysis_grid,
@@ -63,6 +67,40 @@ def _field(
         origin[0], origin[1], resolution, resolution,
         values, valid,
     )
+
+
+def test_fusion_preserves_typed_radar_provenance() -> None:
+    source = ThinRadarField(
+        "radar-a", "rain-rate", 1_000.0, "EPSG:3857",
+        -2_000.0, 2_000.0, 1_000.0, 1_000.0,
+        np.ones((4, 4), dtype=float), np.ones((4, 4), dtype=bool),
+        identity=RadarFieldIdentity(
+            quantity="precipitation_rate",
+            unit="mm/h",
+            quality_kind="source_valid_mask",
+            processing_version="source-v3",
+            source_composition=("radar-a",),
+            canonical_valid_at=1_000.0,
+            received_at=1_001.0,
+            available_at=1_002.0,
+            grid_id="source-grid",
+            content_fingerprint="c" * 64,
+        ),
+    )
+
+    result = fuse_regional_radar_fields(
+        _region(), {"radar-a": _provider(source)}, evaluated_at=1_003.0,
+    )
+
+    assert result.field is not None
+    assert result.field.identity.quantity == "precipitation_rate"
+    assert result.field.identity.unit == "mm/h"
+    assert result.field.identity.source_composition == ("radar-a",)
+    assert result.field.identity.canonical_valid_at == 1_000.0
+    assert result.field.identity.received_at == 1_001.0
+    assert result.field.identity.available_at == 1_002.0
+    assert result.field.identity.grid_id == result.summary.grid_id
+    assert len(result.field.identity.content_fingerprint) == 64
 
 
 def _constant(value: float) -> np.ndarray:
@@ -125,6 +163,54 @@ def test_region_grid_is_metric_stable_and_capacity_bounded():
     assert first.extent_edges_m[2] >= 80_000.0
 
 
+def test_region_grid_identity_does_not_change_with_available_provider_resolution():
+    """A provider refresh must not invalidate motion history for one region."""
+
+    region = _region(latitude=50.85, longitude=4.35, radius_km=80.0)
+
+    fine_only = build_regional_analysis_grid(
+        region,
+        (_field(provider="fine", resolution=1_000.0),),
+    )
+    coarse_only = build_regional_analysis_grid(
+        region,
+        (_field(provider="coarse", resolution=2_000.0),),
+    )
+
+    assert coarse_only == fine_only
+
+
+def test_planned_region_keeps_250_km_radar_view_beyond_warning_horizon():
+    target = Target(
+        "test", "Test", "test", True, 39.3, 16.25,
+        1_000.0, 5.0, 300.0, "IT",
+    )
+    state = DesiredState(
+        producer_id="ha-nas",
+        authority_epoch=1,
+        generation=1,
+        issued_at=1_000.0,
+        previous_state_sha256=None,
+        targets=(target,),
+        settings=RuntimeSettings(
+            ground_radius_km=20.0,
+            lightning_source_mode="direct",
+            model_guidance_enabled=True,
+            region_sharing_distance_km=150.0,
+        ),
+        canonical_bytes=b"{}",
+        state_sha256="0" * 64,
+    )
+    region = ThinRegionPlanner().plan(state, now=1_000.0).regions[0]
+
+    grid = build_regional_analysis_grid(region, (_field(),))
+
+    assert region.observation_radius_km == 70.0
+    assert grid.extent_edges_m[0] <= -250_000.0
+    assert grid.extent_edges_m[2] >= 250_000.0
+    assert grid.width * grid.height <= 250_000
+
+
 @pytest.mark.parametrize(
     "longitude,latitude",
     [(179.95, 10.0), (-179.95, 10.0), (20.0, 75.0)],
@@ -179,6 +265,29 @@ def test_projection_conserves_constant_rate_across_resolution_change():
     assert np.allclose(layer.coverage_fraction[layer.valid_mask], 1.0)
 
 
+def test_projection_conserves_small_cell_when_downsampling_four_to_one():
+    values = np.zeros((4, 4), dtype=float)
+    values[0, 0] = 16.0
+    layer = project_radar_field(
+        _field(
+            values=values,
+            valid=np.ones((4, 4), bool),
+            origin=(0.0, 4_000.0),
+            resolution=1_000.0,
+        ),
+        _grid(
+            width=1,
+            height=1,
+            west=0.0,
+            north=4_000.0,
+            resolution=4_000.0,
+        ),
+    )
+
+    assert layer.valid_mask[0, 0]
+    assert layer.rain_rate_mm_h[0, 0] == pytest.approx(1.0)
+
+
 def test_reprojected_object_stays_within_one_analysis_pixel():
     values = np.zeros((4, 4), dtype=float)
     values[1, 1] = 10.0
@@ -198,6 +307,29 @@ def test_reprojected_object_stays_within_one_analysis_pixel():
     )
     x_m, y_m = grid.pixel_center(int(row), int(column))
     assert math.hypot(x_m + 500.0, y_m - 500.0) <= grid.x_resolution_m
+
+
+def test_projection_uses_vectorized_target_grid_sampling(monkeypatch):
+    monkeypatch.setattr(
+        radar_fusion_module,
+        "_clip_rectangle",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("python_per_pixel_clipping_used")
+        ),
+    )
+
+    layer = project_radar_field(
+        _field(values=_constant(6.0)),
+        _grid(
+            width=4,
+            height=4,
+            west=-2_000.0,
+            north=2_000.0,
+            resolution=1_000.0,
+        ),
+    )
+
+    assert np.allclose(layer.rain_rate_mm_h[layer.valid_mask], 6.0)
 
 
 def test_two_sources_fuse_valid_overlap_with_provenance():
@@ -264,6 +396,31 @@ def test_disagreement_is_reported_without_silent_source_removal():
     assert result.summary.disagreement_fraction > 0.0
     assert "provider_disagreement" in result.summary.reason_codes
     assert len(result.summary.contributors) == 3
+
+
+def test_fusion_ranking_is_vectorized_not_python_per_pixel(monkeypatch):
+    monkeypatch.setattr(
+        radar_fusion_module,
+        "_weighted_median",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("python_per_pixel_weighted_median_used")
+        ),
+    )
+    providers = {
+        name: _provider(_field(
+            provider=name,
+            values=_constant(value),
+            observed_at=999.0,
+        ))
+        for name, value in (("a", 1.0), ("b", 2.0), ("c", 3.0))
+    }
+
+    result = fuse_regional_radar_fields(
+        _region(), providers, evaluated_at=1_000.0,
+    )
+
+    assert result.field is not None
+    assert result.summary.contributors == ("a", "b", "c")
 
 
 @pytest.mark.parametrize(

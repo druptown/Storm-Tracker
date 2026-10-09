@@ -31,7 +31,9 @@ from storm_tracker_worker.thin_provider_adapters import (
     OperaRadarAdapter,
     ProviderBlocked,
     ProviderStale,
+    RadarFieldIdentity,
     RainViewerRadarAdapter,
+    ThinRadarField,
     WundergroundAdapter,
     _component_polygon_geometry,
 )
@@ -40,6 +42,49 @@ from storm_tracker_worker.thin_region_planner import ThinAcquisitionRegion
 
 
 PRODUCT_TIME = datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc).timestamp()
+
+
+def test_radar_field_identity_distinguishes_qpe_from_dbzh() -> None:
+    values = np.array([[1.0, 2.0]], dtype=float)
+    valid = np.array([[True, True]], dtype=bool)
+    qpe = ThinRadarField(
+        "knmi_radar", "rtcor", 100.0, "EPSG:3857",
+        0.0, 1_000.0, 1_000.0, 1_000.0, values, valid,
+        identity=RadarFieldIdentity(
+            quantity="precipitation_rate",
+            unit="mm/h",
+            quality_kind="source_valid_mask",
+            processing_version="knmi-rtcor-v1",
+            source_composition=("knmi_radar",),
+            canonical_valid_at=100.0,
+            received_at=101.0,
+            available_at=102.0,
+            grid_id="knmi-grid",
+            content_fingerprint="a" * 64,
+        ),
+    )
+    dbzh = ThinRadarField(
+        "opera_radar", "opera_dbzh", 100.0, "EPSG:3857",
+        0.0, 1_000.0, 1_000.0, 1_000.0, values, valid,
+        identity=RadarFieldIdentity(
+            quantity="reflectivity",
+            unit="dBZ",
+            quality_kind="odim_quality_mask",
+            processing_version="opera-dbzh-v1",
+            source_composition=("opera_radar",),
+            canonical_valid_at=100.0,
+            received_at=101.0,
+            available_at=102.0,
+            grid_id="opera-grid",
+            content_fingerprint="b" * 64,
+        ),
+    )
+
+    assert qpe.is_quantitative_precipitation is True
+    assert dbzh.is_quantitative_precipitation is False
+    assert qpe.motion_compatibility_key != dbzh.motion_compatibility_key
+    assert qpe.identity.unit == "mm/h"
+    assert dbzh.identity.unit == "dBZ"
 
 
 def test_component_polygon_splits_a_pinched_hole_into_a_valid_ring():
@@ -514,6 +559,40 @@ async def test_kmi_aws_keeps_latest_nearby_station_values_and_normalizes_units()
 
 
 @pytest.mark.asyncio
+async def test_kmi_aws_uses_ground_radius_not_wide_radar_radius():
+    payload = {
+        "type": "FeatureCollection",
+        "features": [{
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [4.95, 51.05]},
+            "properties": {
+                "code": 6499,
+                "timestamp": "2026-07-12T12:00:00Z",
+                "precip_quantity": 1.0,
+                "qc_flags": json.dumps({
+                    "validated": {"PRECIP_QUANTITY": True}
+                }),
+            },
+        }],
+    }
+    fetcher = FixtureFetcher(json_by_url={"kmi-aws": payload})
+    request = replace(
+        _request(
+            "kmi_aws",
+            "aws_10min",
+            _target("home", 51.05, 4.42, radius_km=250.0),
+        ),
+        ground_radius_km=20.0,
+    )
+
+    observations = await provider_adapters.KmiAwsAdapter(
+        endpoint="kmi-aws"
+    ).fetch(request, fetcher, now=PRODUCT_TIME + 60.0)
+
+    assert observations == ()
+
+
+@pytest.mark.asyncio
 async def test_kmi_aws_unvalidated_live_value_is_provisional_not_suspect():
     payload = {
         "type": "FeatureCollection",
@@ -736,7 +815,7 @@ async def test_italiameteo_historical_catalog_rejects_invalid_entries():
 
 
 @pytest.mark.asyncio
-async def test_meteolux_validates_current_forecast_without_fusion_observations():
+async def test_meteolux_rejects_app_forecast_as_ground_observations():
     adapter_type = getattr(provider_adapters, "MeteoLuxValidationAdapter", None)
     assert adapter_type is not None, "MeteoLux validation adapter is required"
     payload = {
@@ -756,35 +835,21 @@ async def test_meteolux_validates_current_forecast_without_fusion_observations()
             },
         },
     }
-    fetcher = FixtureFetcher(json_by_url={"meteolux": payload})
-
-    observations = await adapter_type(endpoint="meteolux").fetch(
-        _request(
-            "meteolux",
-            "location_weather_validation",
-            _target("luxembourg", 49.6116, 6.1319),
-        ),
-        fetcher,
-        now=PRODUCT_TIME + 60.0,
-    )
-
-    assert observations == ()
-    assert fetcher.calls == [(
-        "json",
-        "meteolux",
-        {"langcode": "en", "lat": "49.61160", "long": "6.13190"},
-        None,
-        4 * 1024 * 1024,
-    )]
+    fetcher = FixtureFetcher(json_by_url={"meteolux/stations/LUX0000001": payload})
+    with pytest.raises(ValueError, match="meteolux_station_invalid"):
+        await adapter_type(endpoint="meteolux").fetch(
+            _request("meteolux", "location_weather_validation", _target("luxembourg", 49.6116, 6.1319)),
+            fetcher, now=PRODUCT_TIME + 60.0,
+        )
 
 
 @pytest.mark.asyncio
-async def test_meteolux_rejects_missing_current_forecast():
+async def test_meteolux_rejects_missing_station_coordinates():
     adapter_type = getattr(provider_adapters, "MeteoLuxValidationAdapter", None)
     assert adapter_type is not None, "MeteoLux validation adapter is required"
-    fetcher = FixtureFetcher(json_by_url={"meteolux": {"city": {}}})
+    fetcher = FixtureFetcher(json_by_url={"meteolux/stations/LUX0000001": {"data": {"id": "LUX0000001"}}})
 
-    with pytest.raises(ValueError, match="meteolux_current_invalid"):
+    with pytest.raises(ValueError, match="meteolux_station_invalid"):
         await adapter_type(endpoint="meteolux").fetch(
             _request(
                 "meteolux",
@@ -832,6 +897,47 @@ async def test_opera_recorded_hdf_fixture_samples_target_reflectivity(tmp_path: 
     assert target_observations[0].value == 35.0
     assert target_observations[0].unit == "dBZ"
     assert target_observations[0].metadata["quality_index"] == 0.9
+
+
+@pytest.mark.asyncio
+async def test_opera_decode_runs_off_the_event_loop(monkeypatch):
+    key = "2026/07/12/OPERA/COMP/OPERA@20260712T1200@0@DBZH.h5"
+    listing = f"<ListBucketResult><Contents><Key>{key}</Key></Contents></ListBucketResult>"
+    fetcher = FixtureFetcher(bytes_by_url={
+        "opera-list": listing.encode(),
+        f"opera-objects/{key}": b"recorded-hdf-payload",
+    })
+    dispatched: list[tuple[object, tuple[object, ...], dict[str, object]]] = []
+
+    def fake_decode(data, request, *, received_at):
+        assert data == b"recorded-hdf-payload"
+        assert request.provider_id == "opera_radar"
+        assert received_at == PRODUCT_TIME + 60.0
+        return ()
+
+    async def fake_to_thread(function, *args, **kwargs):
+        dispatched.append((function, args, kwargs))
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(provider_adapters, "_decode_opera_targets", fake_decode)
+    monkeypatch.setattr(provider_adapters.asyncio, "to_thread", fake_to_thread)
+
+    observations = await OperaRadarAdapter(
+        listing_url="opera-list",
+        object_base_url="opera-objects",
+    ).fetch(
+        _request(
+            "opera_radar",
+            "odyssey_composite",
+            _target("home", 51.05, 4.42),
+        ),
+        fetcher,
+        now=PRODUCT_TIME + 60.0,
+    )
+
+    assert observations == ()
+    assert len(dispatched) == 1
+    assert dispatched[0][0] is fake_decode
 
 
 @pytest.mark.asyncio
@@ -928,6 +1034,15 @@ async def test_aemet_public_bundle_yields_target_and_spatial_radar_levels():
     assert all(item.geometry["type"] == "Polygon" for item in spatial)
     assert fetcher.calls == [("bytes", "aemet", None, None, 10 * 1024 * 1024)]
 
+    # A visual-class product must reach the map even when another region
+    # already has quantitative tracked cells. Never relabel classes as mm/h.
+    visual_fields = getattr(observations, "visual_radar_fields", ())
+    assert len(visual_fields) == 1
+    assert visual_fields[0].levels[8, 8] == 6
+    assert visual_fields[0].longitude_left == -4.0
+    assert visual_fields[0].latitude_top == 44.0
+    assert observations.radar_fields == ()
+
 
 @pytest.mark.asyncio
 async def test_aemet_dry_bundle_is_valid_but_empty():
@@ -1004,6 +1119,40 @@ async def test_meteofrance_hdf5_yields_target_and_spatial_rain_rate():
         {"Authorization": "Bearer test-token"},
         40 * 1024 * 1024,
     )]
+
+
+@pytest.mark.parametrize("wet,expected_echoes", [(False, 0), (True, 9)])
+def test_meteofrance_undetect_preserves_measured_coverage(wet, expected_echoes):
+    result = provider_adapters._decode_meteofrance_radar(
+        _meteofrance_hdf5(datetime.fromtimestamp(PRODUCT_TIME, tz=timezone.utc), wet=wet),
+        _request("meteofrance_radar", "radar_accumulation",
+                 _target("paris", 48.8566, 2.3522, radius_km=100.0)),
+        received_at=PRODUCT_TIME + 60,
+    )
+    field = result.radar_fields[0]
+    assert np.count_nonzero(field.valid_mask) == 256
+    assert np.count_nonzero(field.rain_rate_mm_h) == expected_echoes
+    if not wet:
+        assert not result.observations
+
+
+def test_meteofrance_coverage_excludes_nodata_not_weak_measured_echo():
+    payload = io.BytesIO(_meteofrance_hdf5(
+        datetime.fromtimestamp(PRODUCT_TIME, tz=timezone.utc), wet=False,
+    ))
+    with h5py.File(payload, "r+") as product:
+        product["dataset1/data1/data"][0, :3] = [65535, 0, 1]
+        product["dataset1/data1/what"].attrs["gain"] = 0.001
+    result = provider_adapters._decode_meteofrance_radar(
+        payload.getvalue(),
+        _request("meteofrance_radar", "radar_accumulation",
+                 _target("paris", 48.8566, 2.3522, radius_km=100.0)),
+        received_at=PRODUCT_TIME + 60,
+    )
+    field = result.radar_fields[0]
+    assert field.valid_mask[0, :3].tolist() == [False, True, True]
+    assert field.rain_rate_mm_h[0, 2] == pytest.approx(0.012)
+    assert not result.observations
 
 
 @pytest.mark.asyncio
@@ -1151,8 +1300,20 @@ async def test_metoffice_public_s3_rate_yields_target_shape_and_tracking_field()
 
 
 @pytest.mark.asyncio
-async def test_rainviewer_public_tiles_yield_categorical_target_and_shape():
+@pytest.mark.parametrize("mask_rgba,expected", [
+    ((0, 0, 0, 0), "inside"), ((0, 0, 0, 255), "outside"),
+    ((255, 0, 0, 255), "unknown"), (None, "unknown"),
+])
+async def test_rainviewer_public_tiles_yield_categorical_target_and_shape(monkeypatch, mask_rgba, expected):
     from PIL import Image
+
+    dispatched = []
+
+    async def fake_to_thread(function, *args, **kwargs):
+        dispatched.append(function)
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(provider_adapters.asyncio, "to_thread", fake_to_thread)
 
     manifest_url = "https://rainviewer.example/manifest"
     host = "https://tilecache.rainviewer.com"
@@ -1168,6 +1329,11 @@ async def test_rainviewer_public_tiles_yield_categorical_target_and_shape():
         for y in range(15, 18):
             url = f"{host}{path}/256/5/{x}/{y}/2/0_0.png"
             tiles[url] = buffer.getvalue() if (x, y) == (16, 16) else _empty_png()
+    coverage_url = f"{host}/v2/coverage/0/256/5/16/16/0/0_0.png"
+    if mask_rgba is not None:
+        mask_buffer = io.BytesIO()
+        Image.new("RGBA", (256, 256), mask_rgba).save(mask_buffer, format="PNG")
+        tiles[coverage_url] = mask_buffer.getvalue()
     fetcher = FixtureFetcher(
         json_by_url={manifest_url: {
             "version": "2.0",
@@ -1178,15 +1344,13 @@ async def test_rainviewer_public_tiles_yield_categorical_target_and_shape():
         bytes_by_url=tiles,
     )
 
-    result = await RainViewerRadarAdapter(manifest_url=manifest_url).fetch(
-        _request(
+    adapter = RainViewerRadarAdapter(manifest_url=manifest_url)
+    request = _request(
             "rainviewer",
             "visual",
             _target("equator", 0.0, 0.0, radius_km=100.0),
-        ),
-        fetcher,
-        now=PRODUCT_TIME + 60.0,
-    )
+        )
+    result = await adapter.fetch(request, fetcher, now=PRODUCT_TIME + 60.0)
 
     target = [item for item in result if item.target_id == "equator"]
     spatial = [item for item in result if item.target_id is None]
@@ -1195,7 +1359,49 @@ async def test_rainviewer_public_tiles_yield_categorical_target_and_shape():
     assert target[0].metadata["quantitative_semantics_eligible"] is False
     assert spatial
     assert all(item.geometry["type"] == "Polygon" for item in spatial)
-    assert len(fetcher.calls) == 10
+    assert len(fetcher.calls) == 11
+    assert provider_adapters._decode_rainviewer_levels in dispatched
+    assert provider_adapters._rainviewer_spatial_observations in dispatched
+    assert len(getattr(result, "visual_radar_fields", ())) == 1
+    assert not result.radar_fields
+    assert result.visual_radar_fields[0].crs == "EPSG:3857"
+    assert np.count_nonzero(result.visual_radar_fields[0].levels) == 25
+    sample = result.visual_radar_fields[0].nominal_coverage[0]
+    assert (sample.target_id, sample.latitude, sample.longitude) == ("equator", 0.0, 0.0)
+    assert sample.state == expected
+    await adapter.fetch(request, fetcher, now=PRODUCT_TIME + 120.0)
+    assert sum(call[1] == coverage_url for call in fetcher.calls) == 1
+
+
+def test_rainviewer_mask_rejects_wrong_size_and_ambiguous_alpha():
+    from PIL import Image
+    decode = getattr(provider_adapters, "_decode_rainviewer_coverage", None)
+    assert callable(decode)
+    buffer = io.BytesIO()
+    Image.new("RGBA", (1, 1), (0, 0, 0, 0)).save(buffer, format="PNG")
+    with pytest.raises(ValueError):
+        decode(buffer.getvalue())
+    buffer = io.BytesIO()
+    Image.new("RGBA", (256, 256), (0, 0, 0, 127)).save(buffer, format="PNG")
+    assert not np.any(decode(buffer.getvalue()))
+
+
+@pytest.mark.asyncio
+async def test_rainviewer_mask_failure_backoff_and_daily_cache_expiry():
+    adapter = RainViewerRadarAdapter()
+    request = _request("rainviewer", "visual", _target("equator", 0.0, 0.0))
+    fetcher = FixtureFetcher()
+    url = "https://tilecache.rainviewer.com/v2/coverage/0/256/5/16/16/0/0_0.png"
+    first = await adapter._coverage_samples(request, fetcher, now=PRODUCT_TIME)
+    assert first[0].state == "unknown" and first[0].checked_at is None
+    fetcher.bytes_by_url[url] = _empty_png()
+    assert (await adapter._coverage_samples(request, fetcher, now=PRODUCT_TIME + 599))[0].state == "unknown"
+    assert len(fetcher.calls) == 1
+    assert (await adapter._coverage_samples(request, fetcher, now=PRODUCT_TIME + 600))[0].state == "inside"
+    assert (await adapter._coverage_samples(request, fetcher, now=PRODUCT_TIME + 86400))[0].checked_at == PRODUCT_TIME + 600
+    assert len(fetcher.calls) == 2
+    await adapter._coverage_samples(request, fetcher, now=PRODUCT_TIME + 87000)
+    assert len(fetcher.calls) == 3
 
 
 @pytest.mark.asyncio
@@ -1264,13 +1470,18 @@ async def test_meteofrance_client_credentials_override_stale_static_token():
 async def test_kmi_appv4_emits_categorical_target_and_spatial_shape():
     from PIL import Image
 
-    image = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
-    for column, row in ((8, 5), (9, 5), (8, 6), (9, 6)):
-        image.putpixel((column, row), (255, 0, 0, 255))
+    image = Image.new("RGBA", (640, 490), (0, 0, 0, 0))
+    home_column = int(0.5806 * image.width)
+    home_row = int(0.3944 * image.height)
+    for column in range(home_column - 2, home_column + 3):
+        for row in range(home_row - 2, home_row + 3):
+            image.putpixel((column, row), (82, 255, 241, 160))
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     payload = {
         "animation": {
+            "localisationLayerRatioX": 0.5806,
+            "localisationLayerRatioY": 0.3944,
             "sequence": [
                 {
                     "time": "2026-07-12T12:00:00+00:00",
@@ -1298,13 +1509,15 @@ async def test_kmi_appv4_emits_categorical_target_and_spatial_shape():
     target = next(item for item in observations if item.target_id == "home")
     spatial = next(item for item in observations if item.target_id is None)
     assert target.kind is ObservationKind.RADAR_LEVEL
-    assert target.value == 7.0
+    assert target.value == 2.0
     assert target.unit == "level"
     assert target.metadata["quantitative_semantics_eligible"] is False
     assert spatial.kind is ObservationKind.RADAR_LEVEL
     assert spatial.geometry["type"] == "Polygon"
     assert spatial.metadata["spatial_cell"] is True
     assert spatial.metadata["operational_use"] == "visualisation_only"
+    assert spatial.longitude == pytest.approx(4.35, abs=0.05)
+    assert spatial.latitude == pytest.approx(50.85, abs=0.05)
 
 
 @pytest.mark.asyncio
@@ -1317,9 +1530,11 @@ async def test_kmi_appv4_builds_daily_mobile_app_request_without_external_api_ke
     endpoint = "https://app.meteo.be/services/appv4/"
     fetcher = FixtureFetcher(
         json_by_url={
-            endpoint: {
-                "animation": {
-                    "sequence": [{
+                endpoint: {
+                    "animation": {
+                        "localisationLayerRatioX": 0.5806,
+                        "localisationLayerRatioY": 0.3944,
+                        "sequence": [{
                         "time": "2026-07-12T12:00:00+00:00",
                         "uri": "https://cdn.meteo.be/frame.png",
                     }]
@@ -1376,18 +1591,81 @@ async def test_metar_json_fixture_yields_ground_measurements():
 
 
 @pytest.mark.asyncio
+async def test_metar_discovers_missing_target_even_with_other_catalog_stations():
+    request = replace(
+        _request("metar", "ground_observation",
+                 _target("home", 50.85, 4.35), _target("fictive", 35.68, 139.65)),
+        selected_station_ids=("EBBR",), station_selection_applied=True,
+        station_discovery_target_ids=("fictive",),
+    )
+
+    class Fetcher(FixtureFetcher):
+        async def get_json(self, url, *, params=None, **kwargs):
+            self.calls.append(("json", url, params))
+            station = ("EBBR", 50.90, 4.48) if "ids" in params else ("RJTT", 35.55, 139.78)
+            return [{"icaoId": station[0], "lat": station[1], "lon": station[2],
+                     "obsTime": PRODUCT_TIME, "temp": 20.0}]
+
+    fetcher = Fetcher()
+    observations = await MetarAdapter(endpoint="metar").fetch(request, fetcher, now=PRODUCT_TIME)
+    assert {(o.target_id, o.metadata["station_id"]) for o in observations} == {
+        ("home", "EBBR"), ("fictive", "RJTT"),
+    }
+    assert len(fetcher.calls) == 2
+    assert fetcher.calls[1][2]["bbox"] == "33.680,136.650,37.680,142.650"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_report", ["empty", "stale", "outside_radius", "no_measurements", "204"])
+async def test_metar_discovers_actual_reports_when_selected_catalog_stations_do_not_cover_target(missing_report):
+    request = replace(
+        _request("metar", "ground_observation",
+                 _target("home", 50.85, 4.35), _target("fictive", 35.6762, 139.6503)),
+        selected_station_ids=("EBBR", "RJAI", "RJTD"), station_selection_applied=True,
+    )
+
+    class Fetcher(FixtureFetcher):
+        async def get_json(self, url, *, params=None, **kwargs):
+            self.calls.append(("json", url, params))
+            if "bbox" in params:
+                return [{"icaoId": "RJTT", "lat": 35.553, "lon": 139.781,
+                         "obsTime": PRODUCT_TIME, "temp": 21.0, "altim": 1010.0}]
+            if missing_report == "204":
+                raise provider_adapters.HttpStatusError(204)
+            rows = [{"icaoId": "EBBR", "lat": 50.90, "lon": 4.48,
+                     "obsTime": PRODUCT_TIME, "temp": 20.0}]
+            if missing_report != "empty":
+                rows.append({"icaoId": "RJAI", "lat": 35.68 if missing_report != "outside_radius" else 36.1,
+                             "lon": 139.65, "obsTime": PRODUCT_TIME - 7200 if missing_report == "stale" else PRODUCT_TIME,
+                             "temp": None if missing_report == "no_measurements" else 20.0})
+            return rows
+
+    fetcher = Fetcher()
+    observations = await MetarAdapter(endpoint="metar").fetch(request, fetcher, now=PRODUCT_TIME)
+    assert any(o.target_id == "fictive" and o.metadata["station_id"] == "RJTT" for o in observations)
+    tokyo_queries = [call for call in fetcher.calls if call[2].get("bbox") == "33.676,136.650,37.676,142.650"]
+    assert len(tokyo_queries) == 1
+    if missing_report != "204":
+        assert len(fetcher.calls) == 2  # Home already has an actual local report.
+
+
+@pytest.mark.asyncio
 async def test_metar_catalog_selection_queries_only_station_ids():
     request = replace(
         _request("metar", "ground_observation", _target("home", 50.85, 4.35)),
         selected_station_ids=("EBBR", "EBAW"),
         station_selection_applied=True,
     )
-    fetcher = FixtureFetcher(json_by_url={"metar": []})
+    fetcher = FixtureFetcher(json_by_url={"metar": [{
+        "icaoId": "EBBR", "lat": 50.90, "lon": 4.48,
+        "obsTime": PRODUCT_TIME, "temp": 20.0,
+    }]})
 
     await MetarAdapter(endpoint="metar").fetch(request, fetcher, now=PRODUCT_TIME)
 
     assert fetcher.calls[0][2]["ids"] == "EBAW,EBBR"
     assert "bbox" not in fetcher.calls[0][2]
+    assert len(fetcher.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -1688,6 +1966,68 @@ async def test_netatmo_catalog_selection_filters_unselected_stations():
 
     assert {item.metadata["station_id"] for item in observations} == {
         "70:ee:50:29:59:56"
+    }
+
+
+@pytest.mark.asyncio
+async def test_netatmo_catalog_miss_discovers_stations_in_bounded_target_region():
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures" / "netatmo_getpublicdata_ground_golden.json")
+        .read_text(encoding="utf-8")
+    )
+    request = replace(
+        _request("netatmo", "ground_observation", _target("home", 51.047, 4.418)),
+        selected_station_ids=(),
+        station_selection_applied=True,
+        station_selection_reason="station_catalog_no_match",
+    )
+    fetcher = FixtureFetcher(json_by_url={"netatmo": payload})
+
+    observations = await NetatmoAdapter(
+        endpoint="netatmo",
+        access_token="fixture-token",
+    ).fetch(request, fetcher, now=PRODUCT_TIME)
+
+    assert len(fetcher.calls) == 1
+    assert fetcher.calls[0][2]["lat_ne"] == "51.22718"
+    assert fetcher.calls[0][2]["lat_sw"] == "50.86682"
+    assert {item.metadata["station_id"] for item in observations} == {
+        "70:ee:50:00:00:02",
+        "70:ee:50:29:59:56",
+    }
+
+
+@pytest.mark.asyncio
+async def test_netatmo_discovers_only_target_missing_from_shared_catalog_plan():
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures" / "netatmo_getpublicdata_ground_golden.json")
+        .read_text(encoding="utf-8")
+    )
+    payload["body"].append({
+        "_id": "70:ee:50:london",
+        "place": {"location": [-0.1278, 51.5074]},
+        "measures": {"rain": {"rain_live": 0.2, "rain_60min": 0.5}},
+    })
+    home = _target("home", 51.047, 4.418)
+    london = _target("fictive", 51.5074, -0.1278)
+    request = replace(
+        _request("netatmo", "ground_observation", home, london),
+        selected_station_ids=("70:ee:50:29:59:56",),
+        station_selection_applied=True,
+        station_discovery_target_ids=("fictive",),
+    )
+
+    observations = await NetatmoAdapter(
+        endpoint="netatmo",
+        access_token="fixture-token",
+    ).fetch(request, FixtureFetcher(json_by_url={"netatmo": payload}), now=PRODUCT_TIME)
+
+    assert {
+        (item.target_id, item.metadata["station_id"])
+        for item in observations
+    } == {
+        ("home", "70:ee:50:29:59:56"),
+        ("fictive", "70:ee:50:london"),
     }
 
 

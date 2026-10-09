@@ -2,8 +2,28 @@
   "config": {
     "step": {
       "user": {
-        "title": "Storm Tracker instellen",
-        "description": "De thuislocatie wordt automatisch uit Home Assistant gelezen. Selecteer de Life360-trackers die je afzonderlijk wilt volgen.",
+        "title": "Storm Tracker-runtime kiezen",
+        "description": "Worker-only blijft de standaard. Kies normale Home Assistant-verwerking alleen expliciet wanneer providers, OFE en StormEngine rechtstreeks in Home Assistant moeten draaien.",
+        "data": {
+          "runtime_mode": "Runtime"
+        }
+      },
+      "worker_only": {
+        "title": "Worker-only instellen",
+        "description": "De thuislocatie wordt automatisch uit Home Assistant gelezen. Selecteer de Life360-trackers die je afzonderlijk wilt volgen. Providergeheimen en opt-ins voor RAW-retentie beheer je uitsluitend in de Storm Tracker Worker App via Supervisor; Home Assistant leest of gebruikt deze waarden niet in worker-only modus.",
+        "data": {
+          "persons": "Life360-personen",
+          "test_tracker_entity": "Fictieve tracker (optioneel, alleen voor tests)",
+          "radar_radius_km": "Radarbereik",
+          "engine_sharing_distance_km": "Afstand waarop targets dezelfde engine delen",
+          "netatmo_radius_km": "Netatmo-stationsradius",
+          "lightning_source_mode": "Bliksembron",
+          "open_meteo_enabled": "Open-Meteo-modelbegeleiding inschakelen (optioneel)"
+        }
+      },
+      "legacy": {
+        "title": "Normale Home Assistant-verwerking instellen",
+        "description": "Deze expliciete modus draait de bestaande provider-, OFE- en StormEngine-verwerking in Home Assistant. Ontbrekende providergegevens blijven als diagnose zichtbaar; ze blokkeren de overige bronnen niet. Meldingen zijn standaard uit en zijn uitsluitend eigen modelverwachtingen, geen officiële waarschuwingen.",
         "data": {
           "persons": "Life360-personen",
           "test_tracker_entity": "Fictieve tracker (optioneel, alleen voor tests)",
@@ -22,19 +42,86 @@
           "netatmo_refresh_token": "Netatmo refresh-token",
           "netatmo_radius_km": "Netatmo-stationsradius",
           "lightning_source_mode": "Bliksembron",
+          "open_meteo_enabled": "Open-Meteo-modelbegeleiding inschakelen (optioneel)",
+          "analysis_mode": "Analyse- en kalibratiemodus",
+          "warning_notifications_enabled": "Eigen modelwaarschuwingen versturen (expliciete opt-in)",
+          "notify_service": "Home Assistant-notificatieservice (notify.<service>)"
+        }
+      },
+      "reconfigure": {
+        "title": "Runtime omschakelen",
+        "description": "Kies expliciet welke runtime deze entry moet bezitten. De wijziging vervangt data en opties atomair en herlaadt de entry via de bestaande lifecycle-listener.",
+        "data": {
+          "runtime_mode": "Runtime"
+        }
+      },
+      "reconfigure_worker_only": {
+        "title": "Omschakelen naar worker-only",
+        "description": "Providergeheimen worden niet naar worker-only geprojecteerd en worden uit deze Home Assistant-entry verwijderd. Beheer ze in de Worker App.",
+        "data": {
+          "persons": "Life360-personen",
+          "test_tracker_entity": "Fictieve tracker (optioneel, alleen voor tests)",
+          "radar_radius_km": "Radarbereik",
+          "engine_sharing_distance_km": "Afstand waarop targets dezelfde engine delen",
+          "netatmo_radius_km": "Netatmo-stationsradius",
+          "lightning_source_mode": "Bliksembron",
           "open_meteo_enabled": "Open-Meteo-modelbegeleiding inschakelen (optioneel)"
+        }
+      },
+      "reconfigure_legacy": {
+        "title": "Omschakelen naar normale Home Assistant-verwerking",
+        "description": "Providergegevens en de optionele notificatie-instelling worden uitsluitend voor deze expliciete normale Home Assistant-runtime opgeslagen en gebruikt. Een melding is een eigen modelverwachting, geen officiële waarschuwing.",
+        "data": {
+          "persons": "Life360-personen",
+          "test_tracker_entity": "Fictieve tracker (optioneel, alleen voor tests)",
+          "radar_radius_km": "Radarbereik",
+          "engine_sharing_distance_km": "Afstand waarop targets dezelfde engine delen",
+          "eumetsat_consumer_key": "EUMETSAT consumer key (optionele Blitzortung-back-up)",
+          "eumetsat_consumer_secret": "EUMETSAT consumer secret",
+          "meteofrance_api_token": "Météo-France tijdelijk API-token (optionele terugval)",
+          "meteofrance_application_id": "Météo-France APPLICATION_ID voor automatische tokenvernieuwing",
+          "hsaf_username": "H SAF FTP-gebruikersnaam",
+          "hsaf_password": "H SAF FTP-wachtwoord",
+          "knmi_api_key": "KNMI API-key",
+          "knmi_wms_api_key": "KNMI WMS API-key (optioneel; anders dezelfde key)",
+          "netatmo_client_id": "Netatmo client-ID",
+          "netatmo_client_secret": "Netatmo client secret",
+          "netatmo_refresh_token": "Netatmo refresh-token",
+          "netatmo_radius_km": "Netatmo-stationsradius",
+          "lightning_source_mode": "Bliksembron",
+          "open_meteo_enabled": "Open-Meteo-modelbegeleiding inschakelen (optioneel)",
+          "analysis_mode": "Analyse- en kalibratiemodus",
+          "warning_notifications_enabled": "Eigen modelwaarschuwingen versturen (expliciete opt-in)",
+          "notify_service": "Home Assistant-notificatieservice (notify.<service>)"
         }
       }
     },
     "abort": {
-      "single_instance_allowed": "Storm Tracker kan maar eenmaal worden geconfigureerd."
+      "single_instance_allowed": "Storm Tracker kan maar eenmaal worden geconfigureerd.",
+      "invalid_runtime_mode": "De entry heeft geen consistente expliciete runtime_mode.",
+      "legacy_mode_required": "Providergegevens zijn uitsluitend beschikbaar nadat legacy expliciet is gekozen.",
+      "worker_only_mode_required": "Dit formulier is uitsluitend beschikbaar nadat worker-only expliciet is gekozen.",
+      "reconfigure_successful": "De runtimekeuze is opgeslagen en de Storm Tracker-entry wordt herladen."
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "Locaties beheren",
-        "description": "Thuis is altijd actief. Beheer hier de Life360-personen en de optionele fictieve testtracker. Herstart Home Assistant nadat je de opties hebt opgeslagen.",
+        "description": "Thuis is altijd actief. Beheer hier de Life360-personen en de optionele fictieve testtracker. Providergeheimen en opt-ins voor RAW-retentie beheer je uitsluitend in de Storm Tracker Worker App via Supervisor; Home Assistant leest of gebruikt deze waarden niet in worker-only modus. Herstart Home Assistant nadat je de opties hebt opgeslagen.",
+        "data": {
+          "persons": "Life360-personen",
+          "test_tracker_entity": "Fictieve tracker (optioneel, alleen voor tests)",
+          "radar_radius_km": "Radarbereik",
+          "engine_sharing_distance_km": "Afstand waarop targets dezelfde engine delen",
+          "netatmo_radius_km": "Netatmo-stationsradius",
+          "lightning_source_mode": "Bliksembron",
+          "open_meteo_enabled": "Open-Meteo-modelbegeleiding inschakelen (optioneel)"
+        }
+      },
+      "legacy": {
+        "title": "Normale Home Assistant-runtime beheren",
+        "description": "Deze expliciete legacy-modus draait de volledige provider-, OFE- en StormEngine-verwerking in Home Assistant. Beheer hier de providergegevens en de standaard uitgeschakelde eigen modelmeldingen. Dit zijn geen officiële waarschuwingen. Omschakelen naar worker-only doe je via Herconfigureren.",
         "data": {
           "persons": "Life360-personen",
           "test_tracker_entity": "Fictieve tracker (optioneel, alleen voor tests)",
@@ -53,16 +140,35 @@
           "netatmo_refresh_token": "Netatmo refresh-token",
           "netatmo_radius_km": "Netatmo-stationsradius",
           "lightning_source_mode": "Bliksembron",
-          "open_meteo_enabled": "Open-Meteo-modelbegeleiding inschakelen (optioneel)"
+          "open_meteo_enabled": "Open-Meteo-modelbegeleiding inschakelen (optioneel)",
+          "analysis_mode": "Analyse- en kalibratiemodus",
+          "warning_notifications_enabled": "Eigen modelwaarschuwingen versturen (expliciete opt-in)",
+          "notify_service": "Home Assistant-notificatieservice (notify.<service>)"
         }
       }
+    },
+    "abort": {
+      "invalid_runtime_mode": "De entry heeft geen consistente expliciete runtime_mode.",
+      "legacy_mode_required": "Providergegevens zijn uitsluitend beschikbaar voor een expliciete legacy-entry."
     }
   },
   "selector": {
+    "runtime_mode": {
+      "options": {
+        "worker_only": "Worker-only (standaard)",
+        "legacy": "Normale Home Assistant-verwerking"
+      }
+    },
     "lightning_source_mode": {
       "options": {
         "auto": "Automatisch (Blitzortung met satellietfallback)",
         "satellite_test": "Satelliet forceren (testmodus)"
+      }
+    },
+    "analysis_mode": {
+      "options": {
+        "full_send": "Full send (iedere cyclus volledige analyse en kalibratie)",
+        "thermal_throttle": "Thermal throttle (kwartierkalibratie en begrenzing vanaf 75 °C)"
       }
     }
   }

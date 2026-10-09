@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field, replace
 import hashlib
 import json
 import math
@@ -10,7 +10,8 @@ from typing import Any
 
 from pyproj import Transformer
 
-from .thin_provider_adapters import ThinRadarField
+from .thin_provider_adapters import RadarFieldIdentity, ThinRadarField
+from .thin_system_motion import admit_weather_system_motion
 from .tracking_core.engine.analysis_grid import AnalysisGrid
 from .tracking_core.engine.cell_track_lifecycle import CellTrackLifecyclePolicy
 from .tracking_core.engine.hierarchical_detection import (
@@ -30,6 +31,10 @@ from .tracking_core.engine.lucas_kanade_flow import (
 )
 from .tracking_core.engine.recursive_track_estimator import (
     RecursiveTrackEstimatorPolicy,
+)
+from .tracking_core.engine.motion_consensus import (
+    MotionConsensusResult,
+    build_transition_motion_consensus,
 )
 from .tracking_core.engine.weather_system_grouping import (
     WeatherSystemGroupingPolicy,
@@ -100,10 +105,10 @@ def _thin_tracking_policy() -> CellTrackEnginePolicy:
             method="conservative_mean",
         ),
         weather_system=WeatherSystemGroupingPolicy(
-            policy_id="thin-operational-systems-v1",
+            policy_id="thin-operational-systems-candidate-policy-v1",
             pixel_connectivity=8,
             maximum_footprint_gap_m=20_000.0,
-            maximum_motion_difference_m_s=1_000_000.0,
+            maximum_motion_difference_m_s=15.0,
             maximum_motion_age_s=10_000.0,
             maximum_motion_time_difference_s=10_000.0,
         ),
@@ -121,9 +126,12 @@ def _thin_tracking_policy() -> CellTrackEnginePolicy:
         exact_solution_limit=4,
         maximum_exact_current_detections=12,
         maximum_frame_pixels=100_000,
-        maximum_detected_objects=128,
-        maximum_active_tracks=128,
-        maximum_candidate_edges=16_384,
+        maximum_detected_objects=256,
+        # Keep the capacity bounds consistent with the configured two-frame
+        # lifecycle gap.  Otherwise one fragmented but valid regional frame
+        # can fill the active set and make every later frame fail closed.
+        maximum_active_tracks=768,
+        maximum_candidate_edges=196_608,
         maximum_total_tracks=4_096,
         maximum_lifecycle_events=32_768,
         maximum_track_history_detections=2_048,
@@ -150,7 +158,25 @@ class RadarTrack:
     rain_rate_mm_h: float
     velocity_east_kmh: float
     velocity_north_kmh: float
+    motion_ready: bool
     geometry: dict[str, Any]
+    motion_status: str = "indeterminate"
+    motion_confidence: str = "indeterminate"
+    motion_method: str | None = None
+    motion_reason_codes: tuple[str, ...] = ()
+    motion_supporting_methods: tuple[str, ...] = ()
+    motion_agreement_angle_deg: float | None = None
+    mean_rain_rate_mm_h: float | None = None
+    field_identity: RadarFieldIdentity | None = None
+    footprint_pixels: tuple[tuple[int, int], ...] = ()
+    lineage_status: str = "unknown"
+    predecessor_system_ids: tuple[str, ...] = ()
+    lineage_reason_codes: tuple[str, ...] = ()
+    radar_field: ThinRadarField | None = dataclass_field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
 
 def _footprint_geometry(
@@ -222,6 +248,13 @@ class ThinRadarTracker:
     def __init__(self) -> None:
         self._policy = _thin_tracking_policy()
         self._states: dict[tuple[str, str], CellTrackEngineState] = {}
+        self._motion_consensus: dict[
+            tuple[str, str],
+            dict[str, MotionConsensusResult],
+        ] = {}
+        self._latest_field_identities: dict[
+            tuple[str, str], RadarFieldIdentity
+        ] = {}
 
     def advance(
         self,
@@ -230,9 +263,20 @@ class ThinRadarTracker:
     ) -> CellTrackTransitionResult | None:
         key = (field.provider_id, str(target.target_id))
         state = self._states.get(key)
-        if state is not None and state.last_frame is not None and field.observed_at <= state.last_frame.valid_at:
-            # Skip before cropping: repeated processing ticks are not new frames.
-            return None
+        if state is not None and state.last_frame is not None:
+            if math.isclose(
+                field.observed_at,
+                state.last_frame.valid_at,
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            ):
+                # A corrected same-time revision updates provenance but is not
+                # independent temporal evidence for tracking or hysteresis.
+                assert field.identity is not None
+                self._latest_field_identities[key] = field.identity
+                return None
+            if field.observed_at < state.last_frame.valid_at:
+                return None
         prepared = build_target_radar_frame(
             field, target, maximum_pixels=self._policy.maximum_frame_pixels
         )
@@ -242,14 +286,44 @@ class ThinRadarTracker:
                 self._policy,
             )
         result = advance_cell_track_engine(state, prepared.frame, self._policy)
+        if (
+            result.status == "indeterminate"
+            and "analysis_grid_changed" in result.reason_codes
+        ):
+            state = create_cell_track_engine_state(state.engine_id, self._policy)
+            result = advance_cell_track_engine(
+                state, prepared.frame, self._policy
+            )
         self._states[key] = result.next_state
+        assert field.identity is not None
+        self._latest_field_identities[key] = field.identity
+        self._motion_consensus[key] = dict(
+            build_transition_motion_consensus(result)
+        )
         return result
+
+    def latest_field_identity(
+        self,
+        provider_id: str,
+        target_id: str,
+    ) -> RadarFieldIdentity:
+        return self._latest_field_identities[(provider_id, target_id)]
+
+    def latest_evidence_revision(
+        self,
+        provider_id: str,
+        target_id: str,
+    ) -> int:
+        return self._states[(provider_id, target_id)].revision
 
     def tracks(self, field: ThinRadarField, target_id: str) -> tuple[RadarTrack, ...]:
         state = self._states.get((field.provider_id, target_id))
         if state is None or state.last_frame is None:
             return ()
         inverse = Transformer.from_crs(field.crs, "EPSG:4326", always_xy=True)
+        consensus_by_track = self._motion_consensus.get(
+            (field.provider_id, target_id), {}
+        )
         tracks: list[RadarTrack] = []
         for track in state.ledger.tracks:
             if track.lifecycle_state == "ended":
@@ -258,21 +332,201 @@ class ThinRadarTracker:
             x_m, y_m = estimate.x_m, estimate.y_m
             longitude, latitude = inverse.transform(x_m, y_m)
             hierarchy = state.hierarchy(track.track_id)
+            consensus = consensus_by_track.get(track.track_id)
+            motion_ready = bool(
+                consensus is not None
+                and consensus.status in {
+                    "ready_high", "ready_medium", "fallback", "stationary",
+                }
+                and consensus.confidence in {"high", "medium"}
+                and consensus.vx_m_s is not None
+                and consensus.vy_m_s is not None
+            )
+            velocity_east_kmh = (
+                float(consensus.vx_m_s) * 3.6 if motion_ready else 0.0
+            )
+            velocity_north_kmh = (
+                float(consensus.vy_m_s) * 3.6 if motion_ready else 0.0
+            )
             tracks.append(RadarTrack(
                 track_id=track.track_id,
                 provider_id=field.provider_id,
                 observed_at=estimate.valid_at,
                 latitude=float(latitude), longitude=float(longitude),
                 rain_rate_mm_h=float(hierarchy.maximum_value),
-                velocity_east_kmh=estimate.vx_m_s * 3.6,
-                velocity_north_kmh=estimate.vy_m_s * 3.6,
+                mean_rain_rate_mm_h=float(hierarchy.mean_value),
+                velocity_east_kmh=velocity_east_kmh,
+                velocity_north_kmh=velocity_north_kmh,
+                motion_ready=motion_ready,
                 geometry=_footprint_geometry(
                     hierarchy.footprint_pixels,
                     state.last_frame.grid,
                     inverse,
                 ),
+                motion_status=(
+                    "indeterminate" if consensus is None else consensus.status
+                ),
+                motion_confidence=(
+                    "indeterminate"
+                    if consensus is None
+                    else consensus.confidence
+                ),
+                motion_method=(
+                    None if consensus is None else consensus.selected_method
+                ),
+                motion_reason_codes=(
+                    ("motion_consensus_unavailable",)
+                    if consensus is None
+                    else consensus.reason_codes
+                ),
+                motion_supporting_methods=(
+                    () if consensus is None else consensus.supporting_methods
+                ),
+                motion_agreement_angle_deg=(
+                    None if consensus is None else consensus.agreement_angle_deg
+                ),
+                field_identity=field.identity,
+                footprint_pixels=_source_footprint_pixels(
+                    hierarchy.footprint_pixels, state.last_frame.grid, field,
+                ),
+                lineage_status="tracked",
+                radar_field=field,
             ))
         return tuple(tracks)
+
+    def systems(self, field: ThinRadarField, target_id: str) -> tuple[RadarTrack, ...]:
+        """Expose current WeatherSystems as forecastable aggregate footprints."""
+        state = self._states.get((field.provider_id, target_id))
+        if (
+            state is None
+            or state.last_frame is None
+            or state.weather_systems is None
+        ):
+            return ()
+        inverse = Transformer.from_crs(field.crs, "EPSG:4326", always_xy=True)
+        grid = state.last_frame.grid
+        systems: list[RadarTrack] = []
+        consensus_by_track = self._motion_consensus.get(
+            (field.provider_id, target_id), {}
+        )
+        for system in state.weather_systems.systems:
+            pixels = system.aggregate_current_footprint
+            if not pixels:
+                continue
+            x_m = math.fsum(
+                grid.origin_x_m + (column + 0.5) * grid.x_resolution_m
+                for _row, column in pixels
+            ) / len(pixels)
+            y_m = math.fsum(
+                grid.origin_y_m - (row + 0.5) * grid.y_resolution_m
+                for row, _column in pixels
+            ) / len(pixels)
+            longitude, latitude = inverse.transform(x_m, y_m)
+            values = tuple(
+                float(state.last_frame.values[row][column])
+                for row, column in pixels
+                if state.last_frame.values[row][column] is not None
+            )
+            if not values:
+                continue
+            admission = admit_weather_system_motion(
+                system, consensus_by_track,
+            )
+            ready = admission.motion_ready
+            east_kmh = 0.0 if not ready else float(admission.vx_m_s) * 3.6
+            north_kmh = 0.0 if not ready else float(admission.vy_m_s) * 3.6
+            systems.append(RadarTrack(
+                track_id=system.system_id,
+                provider_id=field.provider_id,
+                observed_at=system.valid_at,
+                latitude=float(latitude),
+                longitude=float(longitude),
+                rain_rate_mm_h=max(values),
+                mean_rain_rate_mm_h=math.fsum(values) / len(values),
+                velocity_east_kmh=east_kmh,
+                velocity_north_kmh=north_kmh,
+                motion_ready=ready,
+                geometry=_footprint_geometry(pixels, grid, inverse),
+                motion_status=admission.status,
+                motion_confidence=admission.confidence,
+                motion_method=(
+                    "weather_system_member_consensus" if ready else None
+                ),
+                motion_reason_codes=tuple(sorted(set(
+                    (*system.system_uncertainty, *admission.reason_codes)
+                ))),
+                motion_supporting_methods=admission.supporting_methods,
+                motion_agreement_angle_deg=None,
+                field_identity=field.identity,
+                footprint_pixels=_source_footprint_pixels(pixels, grid, field),
+                lineage_status=admission.lineage_status,
+                predecessor_system_ids=admission.predecessor_system_ids,
+                lineage_reason_codes=tuple(system.system_uncertainty),
+                radar_field=field,
+            ))
+        return tuple(systems)
+
+    def forecast_tracks(self, field: ThinRadarField, target_id: str) -> tuple[RadarTrack, ...]:
+        """Keep full systems, adding only admitted current shields of blocked ones.
+
+        Never apply a usable member's vector to its untracked neighbours. The
+        blocked aggregate remains diagnostic only (motion_ready=False), while
+        each partial forecast retains its own quantitative pixels and vector.
+        """
+        systems = self.systems(field, target_id)
+        if not systems:
+            return self.tracks(field, target_id)
+        state = self._states[(field.provider_id, target_id)]
+        assert state.weather_systems is not None
+        systems_by_id = {item.track_id: item for item in systems}
+        members_by_id = {
+            item.track_id: item for item in self.tracks(field, target_id)
+            if item.motion_ready
+        }
+        result = list(systems)
+        selected: set[str] = set()
+        for system in state.weather_systems.systems:
+            aggregate = systems_by_id.get(system.system_id)
+            if aggregate is None or aggregate.motion_ready:
+                continue
+            for member in system.member_tracks:
+                track = members_by_id.get(member.track_id)
+                if (
+                    member.object_kind != "rain_shield"
+                    or track is None
+                    or track.track_id in selected
+                    or not math.isclose(
+                        track.observed_at, system.valid_at,
+                        rel_tol=0.0, abs_tol=1e-6,
+                    )
+                ):
+                    continue
+                selected.add(track.track_id)
+                result.append(replace(
+                    track,
+                    motion_reason_codes=tuple(sorted(set((
+                        *track.motion_reason_codes,
+                        "partial_system_member_forecast",
+                    )))),
+                    lineage_status="partial_system",
+                    predecessor_system_ids=aggregate.predecessor_system_ids,
+                    lineage_reason_codes=tuple(sorted(set((
+                        *aggregate.lineage_reason_codes,
+                        *aggregate.motion_reason_codes,
+                    )))),
+                ))
+        return tuple(result)
+
+
+def _source_footprint_pixels(
+    pixels: tuple[tuple[int, int], ...],
+    grid: AnalysisGrid,
+    field: ThinRadarField,
+) -> tuple[tuple[int, int], ...]:
+    """Bind crop-local labels to the original QPE raster used by advection."""
+    row_offset = round((field.origin_y_m - grid.origin_y_m) / field.y_resolution_m)
+    column_offset = round((grid.origin_x_m - field.origin_x_m) / field.x_resolution_m)
+    return tuple((row + row_offset, column + column_offset) for row, column in pixels)
 
 
 def _digest(value: Any) -> str:

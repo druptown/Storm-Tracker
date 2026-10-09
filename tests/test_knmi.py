@@ -1,7 +1,9 @@
 """Storm Tracker V3 — tests/test_knmi.py v0.1.0"""
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -55,3 +57,41 @@ def test_current_time_str_rounds_down_to_5_minutes(knmi_module, monkeypatch):
     monkeypatch.setattr(knmi_module, "datetime", _FixedDatetime)
     provider = knmi_module.KnmiProvider(51.5, 5.0, api_key="k")
     assert provider._current_time_str() == "2026-07-12T12:05:00Z"
+
+
+def test_knmi_wms_protocol_version_stays_1_3_0():
+    source = (
+        Path(__file__).parents[1]
+        / "custom_components"
+        / "storm_tracker_v3"
+        / "providers"
+        / "knmi.py"
+    ).read_text(encoding="utf-8")
+    assert '"VERSION": "1.3.0"' in source
+
+
+@pytest.mark.asyncio
+async def test_nowcast_fetch_keeps_all_steps_with_bounded_concurrency(
+    knmi_module, monkeypatch,
+):
+    provider = knmi_module.KnmiProvider(51.5, 5.0, api_key="k")
+    active = 0
+    maximum = 0
+    calls = []
+
+    async def fake_fetch(dataset, layer, time_str, source, auth=True):
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        calls.append((dataset, time_str, source))
+        await asyncio.sleep(0.001)
+        active -= 1
+        return []
+
+    monkeypatch.setattr(provider, "_fetch_frame", fake_fetch)
+    assert await provider.fetch_observations() == []
+    forecast_calls = [
+        call for call in calls if call[0] == knmi_module.DATASET_FORECAST
+    ]
+    assert len(forecast_calls) == 19
+    assert maximum <= knmi_module.KNMI_FORECAST_CONCURRENCY

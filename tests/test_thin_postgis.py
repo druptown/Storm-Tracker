@@ -1,19 +1,29 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from pathlib import Path
 from types import MappingProxyType
 
 import pytest
 
 from storm_tracker_worker.thin_fusion import fuse_observations
 from storm_tracker_worker.thin_ground_validation import ForecastValidation
-from storm_tracker_worker.thin_nowcast import StormCell, ThinNowcastRuntime
+from storm_tracker_worker.thin_footprint_forecast import TargetPassage
+from storm_tracker_worker.thin_nowcast import StormCell, ThinNowcast, ThinNowcastRuntime
 from storm_tracker_worker.thin_observation import (
     NormalizedObservation,
     ObservationKind,
     ObservationQuality,
 )
-from storm_tracker_worker.thin_postgis import ThinPostGISSettings, ThinPostGISWriter
+from storm_tracker_worker.thin_postgis import (
+    MAX_FORECAST_METADATA_BYTES,
+    ThinPostGISSettings,
+    ThinPostGISWriter,
+    _bounded_json,
+    _forecast_issue_id,
+    _passage_id,
+)
 from storm_tracker_worker.thin_provider_runtime import ProviderResult
 from storm_tracker_worker.thin_regional_radar_fusion import RegionalFusionSummary
 from storm_tracker_worker.thin_region_planner import (
@@ -63,6 +73,48 @@ def _cycle_and_nowcast(valid_at: float, *, observation_count: int = 1):
     )
     nowcast = ThinNowcastRuntime(targets={"home": (50.85, 4.35)}).advance(cycle)
     return cycle, nowcast
+
+
+def test_forecast_and_passage_ids_preserve_versions_and_reentry() -> None:
+    common = dict(
+        target_id="home",
+        issued_at=100.0,
+        policy_version="candidate_policy_v1",
+        region_revision_id="region:v1",
+        input_fingerprints=("field-a",),
+    )
+    first_issue = _forecast_issue_id(
+        algorithm_version="scientific-passage-v1", **common,
+    )
+    second_issue = _forecast_issue_id(
+        algorithm_version="scientific-passage-v2", **common,
+    )
+
+    assert first_issue != second_issue
+    assert _passage_id(first_issue, "system:a", 0) != _passage_id(
+        first_issue, "system:a", 1,
+    )
+    assert _passage_id(first_issue, "system:a", 0) == _passage_id(
+        first_issue, "system:a", 0,
+    )
+
+
+def test_forecast_metadata_has_a_hard_serialized_size_bound() -> None:
+    assert len(_bounded_json({"value": "a" * 100})) < MAX_FORECAST_METADATA_BYTES
+    with pytest.raises(ValueError, match="forecast_metadata_too_large"):
+        _bounded_json({"value": "a" * MAX_FORECAST_METADATA_BYTES})
+
+
+def test_scientific_passage_migration_is_additive_and_idempotent() -> None:
+    migration = Path(
+        "storm_tracker_worker/postgis_migrations/"
+        "0008_scientific_passage_forecast.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS public.stv3_target_forecast_issue" in migration
+    assert "CREATE TABLE IF NOT EXISTS public.stv3_target_passage_issue" in migration
+    assert "ON CONFLICT(migration_id) DO NOTHING" in migration
+    assert "DROP TABLE" not in migration.upper()
 
 
 def _station_cycle_and_nowcast(
@@ -278,7 +330,9 @@ class FakeCursor:
     def execute(self, sql, parameters=None):
         normalized = " ".join(sql.split())
         self.connection.statements.append((normalized, parameters))
-        if normalized.startswith("SELECT station.provider_id,station.station_id"):
+        if normalized.startswith("SELECT to_regclass('public.stv3_target_forecast_issue')"):
+            self.result = ((self.connection.scientific_passage_schema,),)
+        elif normalized.startswith("SELECT station.provider_id,station.station_id"):
             pairs = tuple(zip(parameters[0::2], parameters[1::2]))
             self.result = tuple(
                 pair for pair in pairs if pair in self.connection.known_stations
@@ -299,9 +353,19 @@ class FakeCursor:
     def fetchall(self):
         return self.result
 
+    def fetchone(self):
+        return self.result[0] if self.result else None
+
 
 class FakeConnection:
-    def __init__(self, statements, batch_calls=None, known_stations=None):
+    def __init__(
+        self,
+        statements,
+        batch_calls=None,
+        known_stations=None,
+        *,
+        scientific_passage_schema=True,
+    ):
         self.statements = statements
         self.batch_calls = [] if batch_calls is None else batch_calls
         self.committed = False
@@ -311,6 +375,7 @@ class FakeConnection:
             {("netatmo", "station-1")}
             if known_stations is None else set(known_stations)
         )
+        self.scientific_passage_schema = scientific_passage_schema
 
     def cursor(self):
         return FakeCursor(self)
@@ -326,13 +391,18 @@ class FakeConnection:
 
 
 class ConnectionFactory:
-    def __init__(self):
+    def __init__(self, *, scientific_passage_schema=True):
         self.statements = []
         self.batch_calls = []
         self.connections = []
+        self.scientific_passage_schema = scientific_passage_schema
 
     def __call__(self, **kwargs):
-        connection = FakeConnection(self.statements, self.batch_calls)
+        connection = FakeConnection(
+            self.statements,
+            self.batch_calls,
+            scientific_passage_schema=self.scientific_passage_schema,
+        )
         self.connections.append(connection)
         return connection
 
@@ -541,8 +611,9 @@ async def test_writer_closes_absent_dynamic_region_lifecycle():
 
 
 @pytest.mark.asyncio
-async def test_writer_auto_registers_unknown_ground_station_before_measurement():
-    cycle, nowcast = _station_cycle_and_nowcast(100.0, "home")
+@pytest.mark.parametrize("provider_id", ["netatmo", "meteolux"])
+async def test_writer_auto_registers_unknown_ground_station_before_measurement(provider_id):
+    cycle, nowcast = _station_cycle_and_nowcast(100.0, "home", provider_id=provider_id)
     statements = []
 
     result = await ThinPostGISWriter(
@@ -756,7 +827,7 @@ async def test_writer_persists_polygon_entry_and_exit_passage():
         ]]},
         precipitation_rate_mm_h=4.0, reflectivity_dbz=None, radar_level=None,
         velocity_east_kmh=60.0, velocity_north_kmh=0.0,
-        speed_kmh=60.0, heading_deg=90.0,
+        speed_kmh=60.0, heading_deg=90.0, motion_ready=True,
     )
     nowcast = ThinNowcastRuntime(targets={"home": (0.0, 0.10)}).advance(
         cycle, tracked_cells=(cell,),
@@ -766,12 +837,85 @@ async def test_writer_persists_polygon_entry_and_exit_passage():
 
     inserts = [
         item for item in factory.statements
-        if item[0].startswith("INSERT INTO stv3_target_passage")
+        if item[0].startswith("INSERT INTO stv3_target_passage(")
     ]
     assert result.written_rows["target_passages"] == 1
     assert len(inserts) == 1
     assert inserts[0][1][4] < inserts[0][1][5]
     assert inserts[0][1][6] == "translated_footprint"
+
+
+@pytest.mark.asyncio
+async def test_provisional_passage_is_immutable_without_fabricated_exit() -> None:
+    factory = ConnectionFactory()
+    writer = ThinPostGISWriter(_settings(), connect_factory=factory)
+    cycle, nowcast = _cycle_and_nowcast(100.0)
+    provisional = TargetPassage(
+        target_id="home",
+        evaluated_at=nowcast.evaluated_at,
+        cell_id="system:a",
+        provider_id="fusion:home",
+        entry_at=200.0,
+        exit_at=None,
+        method="advected_labelled_qpe",
+        predicted_intensity_mm_h=2.0,
+        footprint=MappingProxyType({
+            "type": "Point", "coordinates": [4.35, 50.85],
+        }),
+        right_censored=True,
+        interval_ordinal=1,
+        quantity="precipitation_rate",
+        unit="mm/h",
+        field_fingerprint="e" * 64,
+        passage_system_id="passage:system-a",
+        passage_status="candidate",
+    )
+    nowcast = replace(nowcast, target_passages=(provisional,))
+
+    first = await writer.write_cycle(cycle, nowcast)
+    second = await writer.write_cycle(cycle, nowcast)
+
+    issue_rows = [
+        row for sql, row in factory.statements
+        if sql.startswith("INSERT INTO stv3_target_forecast_issue")
+    ]
+    passage_rows = [
+        row for sql, row in factory.statements
+        if sql.startswith("INSERT INTO stv3_target_passage_issue")
+    ]
+    geometric_rows = [
+        row for sql, row in factory.statements
+        if sql.startswith("INSERT INTO stv3_target_passage(")
+    ]
+    assert first.status == second.status == "current"
+    assert len(issue_rows) == 2
+    assert issue_rows[0][0] == issue_rows[1][0]
+    assert len(passage_rows) == 2
+    assert passage_rows[0][0] == passage_rows[1][0]
+    assert passage_rows[0][7] is None
+    assert geometric_rows == []
+
+
+@pytest.mark.asyncio
+async def test_writer_keeps_base_projection_current_before_migration_0008() -> None:
+    factory = ConnectionFactory(scientific_passage_schema=False)
+    writer = ThinPostGISWriter(_settings(), connect_factory=factory)
+    cycle, nowcast = _cycle_and_nowcast(100.0)
+
+    result = await writer.write_cycle(cycle, nowcast)
+
+    assert result.status == "current"
+    assert result.written_rows["target_forecasts"] == 1
+    assert result.written_rows["forecast_issues"] == 0
+    assert result.written_rows["passage_issues"] == 0
+    assert any(
+        sql.startswith("INSERT INTO stv3_target_forecast(")
+        for sql, _parameters in factory.statements
+    )
+    assert not any(
+        sql.startswith("INSERT INTO stv3_target_forecast_issue")
+        for sql, _parameters in factory.statements
+    )
 
 
 @pytest.mark.asyncio
@@ -788,7 +932,7 @@ async def test_writer_keeps_revision_on_cells_tracks_and_target_forecasts():
         ]]},
         precipitation_rate_mm_h=4.0, reflectivity_dbz=None, radar_level=None,
         velocity_east_kmh=60.0, velocity_north_kmh=0.0,
-        speed_kmh=60.0, heading_deg=90.0,
+        speed_kmh=60.0, heading_deg=90.0, motion_ready=True,
     )
     positions = {"home": (0.0, 0.10), "child": (0.0, 0.20)}
     nowcast = ThinNowcastRuntime(targets=positions).advance(
@@ -811,10 +955,10 @@ async def test_writer_keeps_revision_on_cells_tracks_and_target_forecasts():
     )
     forecast_rows = {
         row[0]: row for sql, row in factory.statements
-        if sql.startswith("INSERT INTO stv3_target_forecast")
+        if sql.startswith("INSERT INTO stv3_target_forecast(")
     }
     assert cell_row[-1] == "region-revision:test:v1"
-    assert track_row[-1] == "region-revision:test:v1"
+    assert track_row[-2] == "region-revision:test:v1"
     assert set(forecast_rows) == {"home", "child"}
     assert {row[-1] for row in forecast_rows.values()} == {
         "region-revision:test:v1"
@@ -822,6 +966,56 @@ async def test_writer_keeps_revision_on_cells_tracks_and_target_forecasts():
     for target_id, forecast in nowcast.target_results.items():
         assert forecast_rows[target_id][4] == forecast.precipitation_rate_mm_h
         assert forecast_rows[target_id][5] == forecast.eta_minutes
+
+
+@pytest.mark.asyncio
+async def test_writer_uses_cell_source_region_when_active_regions_overlap():
+    factory = ConnectionFactory()
+    cycle, _unused = _cycle_and_nowcast(100.0)
+    plan = _split_region_plan(100.0)
+    plan = replace(
+        plan,
+        regions=(
+            plan.regions[0],
+            replace(plan.regions[1], center_longitude=15.81),
+        ),
+    )
+    cell = StormCell(
+        cell_id="external-cell",
+        provider_id="opera_radar",
+        observed_at=100.0,
+        latitude=38.35,
+        longitude=15.8,
+        geometry={"type": "Point", "coordinates": [15.8, 38.35]},
+        precipitation_rate_mm_h=4.0,
+        reflectivity_dbz=None,
+        radar_level=None,
+        velocity_east_kmh=0.0,
+        velocity_north_kmh=0.0,
+        speed_kmh=0.0,
+        heading_deg=None,
+        motion_ready=False,
+        region_id="region:child",
+    )
+    nowcast = ThinNowcastRuntime(targets={}).advance(
+        cycle,
+        tracked_cells=(cell,),
+    )
+
+    await ThinPostGISWriter(
+        _settings(), connect_factory=factory,
+    ).write_cycle(cycle, nowcast, region_plan=plan)
+
+    cell_row = next(
+        row for sql, row in factory.statements
+        if sql.startswith("INSERT INTO stv3_storm_cell")
+    )
+    track_row = next(
+        row for sql, row in factory.statements
+        if sql.startswith("INSERT INTO stv3_track_point")
+    )
+    assert cell_row[-1] == "region-revision:child:v1"
+    assert "region-revision:child:v1" in track_row
 
 
 @pytest.mark.asyncio

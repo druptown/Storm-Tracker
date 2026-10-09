@@ -5,3 +5,5 @@ h5py>=3.11,<4
 numpy>=2.0,<3
 Pillow>=11,<13
 pyproj>=3.6,<4
+# Offline historical radar replay only; not a worker runtime dependency.
+shapely>=2,<3

@@ -39,9 +39,9 @@ def _plan() -> ThinRegionPlan:
     )
 
 
-def _providers() -> dict[str, ProviderResult]:
+def _providers(*, observed_at: float = 1_000.0) -> dict[str, ProviderResult]:
     field = ThinRadarField(
-        "radar", "rain-rate", 1_000.0, "EPSG:3857",
+        "radar", "rain-rate", observed_at, "EPSG:3857",
         -2_000.0, 2_000.0, 1_000.0, 1_000.0,
         np.ones((4, 4), dtype=float),
         np.ones((4, 4), dtype=bool),
@@ -49,7 +49,7 @@ def _providers() -> dict[str, ProviderResult]:
     return {
         "radar": ProviderResult(
             "radar", True, "operational", None, (),
-            1_000.0, 1_000.0, (field,),
+            observed_at, observed_at, (field,),
         ),
     }
 
@@ -96,4 +96,76 @@ def test_identical_completed_fingerprint_is_not_scheduled_again():
     time.sleep(0.02)
 
     assert calls == ["region:home"]
+    coordinator.close()
+
+
+def test_new_inputs_do_not_replace_an_in_flight_fusion():
+    gate = threading.Event()
+    started = threading.Event()
+    calls: list[float] = []
+
+    def fuse(region, provider_results, *, evaluated_at):
+        calls.append(provider_results["radar"].radar_fields[0].observed_at)
+        started.set()
+        gate.wait(1.0)
+        return object()
+
+    coordinator = ThinRegionalRadarFusionCoordinator(max_workers=2, fuse=fuse)
+    coordinator.submit(
+        _plan(), _providers(observed_at=1_000.0), evaluated_at=1_000.0,
+    )
+    assert started.wait(1.0)
+
+    coordinator.submit(
+        _plan(), _providers(observed_at=1_001.0), evaluated_at=1_001.0,
+    )
+    time.sleep(0.02)
+
+    assert calls == [1_000.0]
+    gate.set()
+    deadline = time.monotonic() + 1.0
+    while not coordinator.poll() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    coordinator.submit(
+        _plan(), _providers(observed_at=1_001.0), evaluated_at=1_001.0,
+    )
+    deadline = time.monotonic() + 1.0
+    while len(calls) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert calls == [1_000.0, 1_001.0]
+    coordinator.close()
+
+
+def test_completed_raster_remains_available_during_refresh():
+    second_gate = threading.Event()
+    second_started = threading.Event()
+    calls = 0
+
+    def fuse(region, provider_results, *, evaluated_at):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            second_started.set()
+            second_gate.wait(1.0)
+        return f"fusion-{calls}"
+
+    coordinator = ThinRegionalRadarFusionCoordinator(max_workers=2, fuse=fuse)
+    coordinator.submit(
+        _plan(), _providers(observed_at=1_000.0), evaluated_at=1_000.0,
+    )
+    deadline = time.monotonic() + 1.0
+    completed = {}
+    while not completed and time.monotonic() < deadline:
+        completed = coordinator.poll()
+        time.sleep(0.01)
+    assert completed == {"region:home": "fusion-1"}
+
+    coordinator.submit(
+        _plan(), _providers(observed_at=1_001.0), evaluated_at=1_001.0,
+    )
+    assert second_started.wait(1.0)
+
+    assert coordinator.poll() == {"region:home": "fusion-1"}
+    second_gate.set()
     coordinator.close()

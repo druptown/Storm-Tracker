@@ -44,7 +44,7 @@ ITALIAMETEO_DPC_HISTORICAL_CATALOG_ENDPOINT = (
     "https://meteohub.agenziaitaliameteo.it/api/datasets/"
     "radar_sri_dpc/opendata"
 )
-METEOLUX_WEATHER_ENDPOINT = "https://metapi.ana.lu/api/v1/metapp/weather"
+METEOLUX_WEATHER_ENDPOINT = "https://metapi.ana.lu/api/v1/hvd/observations"
 OPERA_LISTING_ENDPOINT = "https://s3.waw3-1.cloudferro.com/openradar-24h/"
 OPERA_OBJECT_BASE = "https://s3.waw3-1.cloudferro.com/openradar-24h"
 METAR_ENDPOINT = "https://aviationweather.gov/api/data/metar"
@@ -58,7 +58,6 @@ KMI_AWS_ENDPOINT = "https://opendata.meteo.be/geoserver/ows"
 KMI_APPV4_USER_AGENT = "be.meteo.app"
 KMI_APPV4_MAX_FRAME_AGE_SECONDS = 20 * 60
 KMI_APPV4_ALLOWED_IMAGE_HOSTS = frozenset({"app.meteo.be", "cdn.meteo.be"})
-KMI_APPV4_BOUNDS = (-2.5, 46.5, 10.5, 53.0)
 _KMI_APPV4_REQUEST_SECRET = "r9EnW374jkJ9acc"
 MAX_OPERA_SPATIAL_CELLS = 64
 OPERA_MAX_FRAME_AGE_SECONDS = 15 * 60
@@ -129,6 +128,124 @@ _KNMI_DOWNLOAD_HOST_SUFFIXES = (
 )
 
 
+def _radar_grid_id(
+    *,
+    crs: str,
+    origin_x_m: float,
+    origin_y_m: float,
+    x_resolution_m: float,
+    y_resolution_m: float,
+    shape: tuple[int, int],
+) -> str:
+    payload = json.dumps(
+        {
+            "crs": crs,
+            "origin_x_m": float(origin_x_m),
+            "origin_y_m": float(origin_y_m),
+            "x_resolution_m": float(x_resolution_m),
+            "y_resolution_m": float(y_resolution_m),
+            "shape": [int(shape[0]), int(shape[1])],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "radar-grid:" + hashlib.sha256(payload).hexdigest()
+
+
+def _radar_content_fingerprint(values: Any, valid_mask: Any) -> str:
+    import numpy as np
+
+    digest = hashlib.sha256()
+    normalized_values = np.asarray(values, dtype="<f8", order="C")
+    normalized_mask = np.asarray(valid_mask, dtype=np.uint8, order="C")
+    digest.update(str(normalized_values.shape).encode("ascii"))
+    digest.update(normalized_values.tobytes(order="C"))
+    digest.update(normalized_mask.tobytes(order="C"))
+    return digest.hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class RadarFieldIdentity:
+    """Scientific identity and issue-time provenance for one radar raster."""
+
+    quantity: str
+    unit: str
+    quality_kind: str
+    processing_version: str
+    source_composition: tuple[str, ...]
+    canonical_valid_at: float
+    received_at: float
+    available_at: float
+    grid_id: str
+    content_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if not all((
+            self.quantity,
+            self.unit,
+            self.quality_kind,
+            self.processing_version,
+            self.grid_id,
+        )):
+            raise ValueError("radar_field_provenance_invalid")
+        if not self.source_composition or any(
+            not value for value in self.source_composition
+        ):
+            raise ValueError("radar_field_source_composition_invalid")
+        if not all(math.isfinite(value) for value in (
+            self.canonical_valid_at,
+            self.received_at,
+            self.available_at,
+        )):
+            raise ValueError("radar_field_provenance_time_invalid")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.content_fingerprint):
+            raise ValueError("radar_field_content_fingerprint_invalid")
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        provider_id: str,
+        quantity: str,
+        unit: str,
+        quality_kind: str,
+        processing_version: str,
+        source_composition: tuple[str, ...] | None,
+        canonical_valid_at: float,
+        received_at: float,
+        available_at: float,
+        crs: str,
+        origin_x_m: float,
+        origin_y_m: float,
+        x_resolution_m: float,
+        y_resolution_m: float,
+        values: Any,
+        valid_mask: Any,
+        grid_id: str | None = None,
+    ) -> "RadarFieldIdentity":
+        return cls(
+            quantity=quantity,
+            unit=unit,
+            quality_kind=quality_kind,
+            processing_version=processing_version,
+            source_composition=(provider_id,)
+            if source_composition is None
+            else tuple(source_composition),
+            canonical_valid_at=float(canonical_valid_at),
+            received_at=float(received_at),
+            available_at=float(available_at),
+            grid_id=grid_id or _radar_grid_id(
+                crs=crs,
+                origin_x_m=origin_x_m,
+                origin_y_m=origin_y_m,
+                x_resolution_m=x_resolution_m,
+                y_resolution_m=y_resolution_m,
+                shape=tuple(values.shape),
+            ),
+            content_fingerprint=_radar_content_fingerprint(values, valid_mask),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class ThinRadarField:
     """Decoded native radar data held in memory for the current work cycle."""
@@ -143,6 +260,7 @@ class ThinRadarField:
     y_resolution_m: float
     rain_rate_mm_h: Any
     valid_mask: Any
+    identity: RadarFieldIdentity | None = None
 
     def __post_init__(self) -> None:
         import numpy as np
@@ -167,6 +285,115 @@ class ThinRadarField:
             raise ValueError("radar_field_empty")
         if not np.all(np.isfinite(self.rain_rate_mm_h[self.valid_mask])):
             raise ValueError("radar_field_valid_values_nonfinite")
+        identity = self.identity
+        if identity is None:
+            identity = RadarFieldIdentity.create(
+                provider_id=self.provider_id,
+                quantity="precipitation_rate",
+                unit="mm/h",
+                quality_kind="source_valid_mask",
+                processing_version="legacy-decoder-v1",
+                source_composition=(self.provider_id,),
+                canonical_valid_at=self.observed_at,
+                received_at=self.observed_at,
+                available_at=self.observed_at,
+                crs=self.crs,
+                origin_x_m=self.origin_x_m,
+                origin_y_m=self.origin_y_m,
+                x_resolution_m=self.x_resolution_m,
+                y_resolution_m=self.y_resolution_m,
+                values=self.rain_rate_mm_h,
+                valid_mask=self.valid_mask,
+            )
+            object.__setattr__(self, "identity", identity)
+        elif not math.isclose(
+            identity.canonical_valid_at,
+            self.observed_at,
+            rel_tol=0.0,
+            abs_tol=1e-6,
+        ):
+            raise ValueError("radar_field_canonical_time_mismatch")
+
+    @property
+    def is_quantitative_precipitation(self) -> bool:
+        assert self.identity is not None
+        return (
+            self.identity.quantity.casefold()
+            in {"precipitation_rate", "rain_rate", "qpe_rate"}
+            and self.identity.unit.casefold().replace(" ", "")
+            in {"mm/h", "mmh-1", "mmhr-1"}
+        )
+
+    @property
+    def motion_compatibility_key(self) -> tuple[object, ...]:
+        assert self.identity is not None
+        return (
+            self.identity.quantity.casefold(),
+            self.identity.unit.casefold().replace(" ", ""),
+            self.identity.grid_id,
+            self.identity.processing_version,
+            self.identity.source_composition,
+        )
+
+
+RAINVIEWER_COVERAGE_TTL_SECONDS = 86400.0
+
+
+@dataclass(frozen=True, slots=True)
+class RainViewerNominalCoverage:
+    """Published mask sample, NOT a measurement or live uptime assertion."""
+
+    target_id: str
+    latitude: float
+    longitude: float
+    state: str
+    checked_at: float | None
+
+
+def rainviewer_nominal_coverage_for_target(fields, target, *, now):
+    result = {"state": "unknown", "checked_at": None,
+              "source": "rainviewer_published_mask", "live_operation_confirmed": False}
+    samples = [sample for field in fields if field.provider_id == "rainviewer"
+               for sample in field.nominal_coverage
+               if sample.target_id == target.target_id
+               and sample.latitude == target.latitude and sample.longitude == target.longitude
+               and sample.checked_at is not None
+               and 0 <= now - sample.checked_at <= RAINVIEWER_COVERAGE_TTL_SECONDS]
+    if samples:
+        sample = max(samples, key=lambda item: item.checked_at)
+        if sample.state in {"inside", "outside", "unknown"}:
+            result.update(state=sample.state, checked_at=sample.checked_at)
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class ThinVisualRadarField:
+    """Native display classes, deliberately not quantitative precipitation."""
+
+    provider_id: str
+    product_id: str
+    observed_at: float
+    longitude_left: float
+    latitude_top: float
+    longitude_scale: float
+    latitude_scale: float
+    levels: Any
+    # The affine axes above use source-CRS units (degrees by default).
+    crs: str = "EPSG:4326"
+    nominal_coverage: tuple[RainViewerNominalCoverage, ...] = ()
+
+    def __post_init__(self) -> None:
+        import numpy as np
+
+        if not isinstance(self.levels, np.ndarray) or self.levels.ndim != 2 or not self.levels.size:
+            raise ValueError("visual_radar_grid_invalid")
+        if not all(math.isfinite(value) for value in (
+            self.observed_at, self.longitude_left, self.latitude_top,
+            self.longitude_scale, self.latitude_scale,
+        )) or min(self.longitude_scale, self.latitude_scale) <= 0:
+            raise ValueError("visual_radar_georeference_invalid")
+        if np.any((self.levels < 0) | (self.levels > 8)):
+            raise ValueError("visual_radar_classes_invalid")
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -175,6 +402,7 @@ class ThinAdapterResult(Sequence[NormalizedObservation]):
 
     observations: tuple[NormalizedObservation, ...]
     radar_fields: tuple[ThinRadarField, ...] = ()
+    visual_radar_fields: tuple[ThinVisualRadarField, ...] = ()
 
     def __iter__(self) -> Iterator[NormalizedObservation]:
         return iter(self.observations)
@@ -187,7 +415,9 @@ class ThinAdapterResult(Sequence[NormalizedObservation]):
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, ThinAdapterResult):
-            return self.observations == other.observations and self.radar_fields == other.radar_fields
+            return (self.observations == other.observations
+                    and self.radar_fields == other.radar_fields
+                    and self.visual_radar_fields == other.visual_radar_fields)
         return self.observations == other
 
 
@@ -741,6 +971,7 @@ class KmiAwsAdapter:
                 )
 
         observations: list[NormalizedObservation] = []
+        ground_radius_km = max(0.0, float(request.ground_radius_km))
         measurement_specs = (
             ("temp_dry_shelter_avg", ObservationKind.TEMPERATURE, "°C", "temperature"),
             ("pressure", ObservationKind.PRESSURE, "hPa", "pressure"),
@@ -766,7 +997,7 @@ class KmiAwsAdapter:
                     longitude,
                     target.latitude,
                     target.longitude,
-                ) > target.observation_radius_km:
+                ) > ground_radius_km:
                     continue
                 common = {
                     "provider_id": request.provider_id,
@@ -1076,7 +1307,7 @@ class ItaliaMeteoDpcHistoricalCatalogAdapter:
 
 
 class MeteoLuxValidationAdapter:
-    """Validate MeteoLux location guidance without inventing data semantics."""
+    """Official Findel ground observations, never app forecasts at a target."""
 
     def __init__(self, *, endpoint: str = METEOLUX_WEATHER_ENDPOINT) -> None:
         self._endpoint = endpoint
@@ -1088,63 +1319,104 @@ class MeteoLuxValidationAdapter:
         *,
         now: float,
     ) -> tuple[NormalizedObservation, ...]:
-        del now
-        for target in request.targets:
-            payload = await fetcher.get_json(
-                self._endpoint,
-                params={
-                    "langcode": "en",
-                    "lat": f"{target.latitude:.5f}",
-                    "long": f"{target.longitude:.5f}",
-                },
-                maximum_bytes=4 * 1024 * 1024,
-            )
-            if not isinstance(payload, Mapping):
-                raise ValueError("meteolux_payload_invalid")
-            city = payload.get("city")
-            forecast = payload.get("forecast")
-            current = (
-                forecast.get("current")
-                if isinstance(forecast, Mapping)
-                else None
-            )
-            if (
-                not isinstance(city, Mapping)
-                or not isinstance(current, Mapping)
-                or current.get("type") != "current"
-                or not isinstance(current.get("temperature"), Mapping)
-                or not isinstance(current.get("wind"), Mapping)
-                or "rain" not in current
-            ):
-                raise ValueError("meteolux_current_invalid")
-            try:
-                datetime.fromisoformat(current.get("date"))
-                city_latitude = float(city.get("lat"))
-                city_longitude = float(city.get("long"))
-            except (TypeError, ValueError):
-                raise ValueError("meteolux_current_invalid") from None
-            if (
-                not math.isfinite(city_latitude)
-                or not math.isfinite(city_longitude)
-                or not -90.0 <= city_latitude <= 90.0
-                or not -180.0 <= city_longitude <= 180.0
-            ):
-                raise ValueError("meteolux_current_invalid")
-        # The endpoint does not declare units/accumulation intervals for its
-        # display strings. Until that semantic contract is public, it proves
-        # availability only and must not enter quantitative fusion.
-        return ()
+        base = self._endpoint.rsplit("/", 1)[0]
+        station_payload = await fetcher.get_json(
+            f"{base}/stations/LUX0000001", maximum_bytes=512 * 1024,
+        )
+        station = station_payload.get("data") if isinstance(station_payload, Mapping) else None
+        coordinates = station.get("location") if isinstance(station, Mapping) else None
+        if (not isinstance(station, Mapping) or station.get("id") != "LUX0000001"
+                or not isinstance(coordinates, list) or len(coordinates) != 2):
+            raise ValueError("meteolux_station_invalid")
+        longitude, latitude = map(_optional_float, coordinates)
+        if (latitude is None or longitude is None or not -90 <= latitude <= 90
+                or not -180 <= longitude <= 180):
+            raise ValueError("meteolux_station_invalid")
+        targets = tuple(target for target in request.targets if _haversine_km(
+            latitude, longitude, target.latitude, target.longitude,
+        ) <= request.ground_radius_km)
+        if not targets:
+            return ()
+        payload = await fetcher.get_json(self._endpoint, maximum_bytes=512 * 1024)
+        metadata_payload = await fetcher.get_json(
+            f"{self._endpoint}/metadata", maximum_bytes=512 * 1024,
+        )
+        if not isinstance(payload, Mapping) or not isinstance(payload.get("data"), list):
+            raise ValueError("meteolux_payload_invalid")
+        try:
+            date = datetime.fromisoformat(str(payload.get("timestamp")).replace("Z", "+00:00"))
+            if date.tzinfo is None:
+                raise ValueError
+            observed_at = date.timestamp()
+        except (ValueError, TypeError):
+            raise ValueError("meteolux_timestamp_invalid") from None
+        if now - observed_at > 600 or observed_at - now > 60:
+            raise ProviderStale("meteolux_observations_stale")
+        if not isinstance(metadata_payload, Mapping) or not isinstance(metadata_payload.get("data"), list):
+            raise ValueError("meteolux_metadata_invalid")
+        metadata_by_id = {item.get("id"): item for item in metadata_payload["data"] if isinstance(item, Mapping)}
+        values = {item.get("id"): item.get("value") for item in payload["data"] if isinstance(item, Mapping)}
+        specs = (
+            ("srr", ObservationKind.RAIN_ACCUMULATION, "mm", "mm", "rain_accumulation", 60),
+            ("spsl", ObservationKind.PRESSURE, "hPa", "hPa", "pressure", 60),
+            ("st", ObservationKind.TEMPERATURE, "degC", "°C", "temperature", 60),
+            ("su", ObservationKind.RELATIVE_HUMIDITY, "%", "%", "relative_humidity", 60),
+            ("s2ff_rwymd0", ObservationKind.WIND_SPEED, "m/s", "m/s", "wind_speed", 120),
+            ("s2dd_rwymd0", ObservationKind.WIND_DIRECTION, "degrees", "°", "wind_direction", 120),
+            ("s2ffgust_rwymd0", ObservationKind.WIND_SPEED, "m/s", "m/s", "wind_gust", 120),
+        )
+        observations = []
+        for field, kind, source_unit, unit, measurement, window in specs:
+            value = _optional_float(values.get(field))
+            if value is None:
+                continue
+            semantic = metadata_by_id.get(field, {})
+            if (semantic.get("unit") != source_unit or semantic.get("timeResolution") != "PT1M"
+                    or semantic.get("dataType") != "realtime"):
+                raise ValueError("meteolux_metadata_invalid")
+            if semantic.get("qualityCode") != 0:
+                continue
+            metadata = {"station_id": "LUX0000001", "measurement": measurement,
+                        "source_parameter": field, "source_unit": source_unit,
+                        "source_quality_code": 0, "averaging_window_seconds": window}
+            if field == "srr":
+                metadata["accumulation_window_seconds"] = 60
+            if field == "spsl":
+                metadata["pressure_reference"] = "mean_sea_level_QFF"
+            if field == "s2ffgust_rwymd0":
+                metadata["gust_sampling_seconds"] = 3
+            for target in targets:
+                common = dict(provider_id=request.provider_id, product_id=request.product_id,
+                              target_id=target.target_id, observed_at=observed_at, received_at=now,
+                              latitude=latitude, longitude=longitude, geometry=_point(longitude, latitude),
+                              quality=ObservationQuality.GOOD, maximum_age_seconds=600)
+                observations.append(NormalizedObservation.create(
+                    **common, kind=kind, value=value, unit=unit, metadata=metadata,
+                ))
+                if field == "srr":
+                    observations.append(NormalizedObservation.create(
+                        **common, kind=ObservationKind.RAIN_RATE, value=value * 60, unit="mm/h",
+                        metadata={**metadata, "measurement": "rain_rate",
+                                  "rate_semantics": "one_minute_accumulation_equivalent"},
+                    ))
+        return tuple(observations)
 
 
 _KMI_COLORS = (
-    ((144, 238, 144), 1),
-    ((0, 200, 100), 2),
-    ((0, 150, 255), 3),
-    ((0, 0, 255), 4),
-    ((255, 255, 0), 5),
-    ((255, 150, 0), 6),
-    ((255, 0, 0), 7),
-    ((180, 0, 180), 8),
+    ((233, 255, 255, 144), 1),
+    ((82, 255, 241, 160), 2),
+    ((75, 209, 220, 192), 3),
+    ((68, 162, 200, 200), 4),
+)
+
+# The INCA-BE mobile images use Belgian Lambert 2008 (EPSG:3812).  The
+# image axes are very slightly rotated relative to the projected axes.  These
+# coefficients map projected metres to normalized image coordinates; the
+# translation is anchored from the coordinates returned with every AppV4
+# response so a server-side crop shift cannot move the radar layer.
+_KMI_LAMBERT_TO_IMAGE = (
+    (2.28737432e-6, -2.32300157e-8),
+    (-2.22248944e-8, -3.00083858e-6),
 )
 
 
@@ -1168,19 +1440,10 @@ def _kmi_appv4_frame_url(value: Any) -> str:
 
 
 def _kmi_level(pixel: tuple[int, int, int, int]) -> int:
-    red, green, blue, alpha = pixel
-    if alpha < 128:
-        return 0
-    distance, level = min(
-        (
-            (red - expected[0]) ** 2
-            + (green - expected[1]) ** 2
-            + (blue - expected[2]) ** 2,
-            value,
-        )
-        for expected, value in _KMI_COLORS
+    return next(
+        (level for expected, level in _KMI_COLORS if tuple(pixel) == expected),
+        0,
     )
-    return level if distance < 20_000 else 0
 
 
 class KmiRadarAdapter:
@@ -1209,7 +1472,8 @@ class KmiRadarAdapter:
             headers=self._headers,
             maximum_bytes=4 * 1024 * 1024,
         )
-        sequence = payload.get("animation", {}).get("sequence", [])
+        animation = payload.get("animation", {})
+        sequence = animation.get("sequence", [])
         if not isinstance(sequence, list) or not sequence:
             raise ValueError("kmi_sequence_missing")
         frames = [item for item in sequence if isinstance(item, Mapping) and item.get("uri")]
@@ -1239,17 +1503,63 @@ class KmiRadarAdapter:
         image = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
         width, height = image.size
         rgba = np.asarray(image, dtype=np.uint8)
-        rgb = rgba[..., :3].astype(np.int32)
-        palette = np.asarray([item[0] for item in _KMI_COLORS], dtype=np.int32)
-        distances = np.sum((rgb[..., None, :] - palette) ** 2, axis=3)
-        nearest = np.argmin(distances, axis=2)
-        minimum = np.min(distances, axis=2)
-        levels = (nearest + 1).astype(np.uint8)
-        levels[(rgba[..., 3] < 128) | (minimum >= 20_000)] = 0
+        levels = np.zeros((height, width), dtype=np.uint8)
+        for expected, level in _KMI_COLORS:
+            levels[np.all(rgba == np.asarray(expected, dtype=np.uint8), axis=2)] = level
+
+        try:
+            anchor_ratio_x = float(animation["localisationLayerRatioX"])
+            anchor_ratio_y = float(animation["localisationLayerRatioY"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("kmi_georeference_missing") from None
+        if not (
+            0.0 <= anchor_ratio_x <= 1.0
+            and 0.0 <= anchor_ratio_y <= 1.0
+        ):
+            raise ValueError("kmi_georeference_invalid")
+
+        from pyproj import Transformer
+
+        to_lambert = Transformer.from_crs("EPSG:4326", "EPSG:3812", always_xy=True)
+        to_geographic = Transformer.from_crs("EPSG:3812", "EPSG:4326", always_xy=True)
+        (ratio_x_x, ratio_x_y), (ratio_y_x, ratio_y_y) = _KMI_LAMBERT_TO_IMAGE
+        anchor_x, anchor_y = to_lambert.transform(
+            representative.longitude,
+            representative.latitude,
+        )
+        offset_x = anchor_ratio_x - ratio_x_x * anchor_x - ratio_x_y * anchor_y
+        offset_y = anchor_ratio_y - ratio_y_x * anchor_x - ratio_y_y * anchor_y
+
+        def projected_to_ratio(x: float, y: float) -> tuple[float, float]:
+            return (
+                ratio_x_x * x + ratio_x_y * y + offset_x,
+                ratio_y_x * x + ratio_y_y * y + offset_y,
+            )
+
+        determinant = ratio_x_x * ratio_y_y - ratio_x_y * ratio_y_x
+
+        def ratio_to_lonlat(ratio_x: float, ratio_y: float) -> tuple[float, float]:
+            shifted_x = ratio_x - offset_x
+            shifted_y = ratio_y - offset_y
+            projected_x = (
+                shifted_x * ratio_y_y - ratio_x_y * shifted_y
+            ) / determinant
+            projected_y = (
+                ratio_x_x * shifted_y - ratio_y_x * shifted_x
+            ) / determinant
+            return to_geographic.transform(projected_x, projected_y)
+
         observations: list[NormalizedObservation] = []
         for target in request.targets:
-            column = min(width - 1, max(0, int((target.longitude + 2.5) / 13.0 * width)))
-            row = min(height - 1, max(0, int((53.0 - target.latitude) / 6.5 * height)))
+            target_x, target_y = to_lambert.transform(
+                target.longitude,
+                target.latitude,
+            )
+            ratio_x, ratio_y = projected_to_ratio(target_x, target_y)
+            if not (0.0 <= ratio_x < 1.0 and 0.0 <= ratio_y < 1.0):
+                continue
+            column = min(width - 1, max(0, int(ratio_x * width)))
+            row = min(height - 1, max(0, int(ratio_y * height)))
             level = int(levels[row, column])
             if level <= 0:
                 continue
@@ -1272,30 +1582,41 @@ class KmiRadarAdapter:
                     "operational_use": "visualisation_only",
                     "quantitative_semantics_eligible": False,
                     "semantic_class": "categorical_visualisation",
+                    "source_projection": "EPSG:3812",
                 },
                 maximum_age_seconds=KMI_APPV4_MAX_FRAME_AGE_SECONDS,
             ))
 
-        left, bottom, right, top = KMI_APPV4_BOUNDS
         roi = np.zeros(levels.shape, dtype=bool)
         for target in request.targets:
-            latitude_radius = target.observation_radius_km / 110.574
-            longitude_radius = target.observation_radius_km / max(
-                1.0,
-                111.320 * math.cos(math.radians(target.latitude)),
+            center_x, center_y = to_lambert.transform(
+                target.longitude,
+                target.latitude,
             )
-            column0 = max(0, math.floor((target.longitude - longitude_radius - left) / (right - left) * width))
-            column1 = min(width, math.ceil((target.longitude + longitude_radius - left) / (right - left) * width))
-            row0 = max(0, math.floor((top - target.latitude - latitude_radius) / (top - bottom) * height))
-            row1 = min(height, math.ceil((top - target.latitude + latitude_radius) / (top - bottom) * height))
+            radius_m = target.observation_radius_km * 1_000.0
+            corners = (
+                projected_to_ratio(center_x - radius_m, center_y - radius_m),
+                projected_to_ratio(center_x - radius_m, center_y + radius_m),
+                projected_to_ratio(center_x + radius_m, center_y - radius_m),
+                projected_to_ratio(center_x + radius_m, center_y + radius_m),
+            )
+            columns = [ratio[0] * width for ratio in corners]
+            rows = [ratio[1] * height for ratio in corners]
+            column0 = max(0, math.floor(min(columns)))
+            column1 = min(width, math.ceil(max(columns)))
+            row0 = max(0, math.floor(min(rows)))
+            row1 = min(height, math.ceil(max(rows)))
             if row0 < row1 and column0 < column1:
                 roi[row0:row1, column0:column1] = True
 
-        pixel_height_km = (top - bottom) * 110.574 / height
-        mean_latitude = sum(item.latitude for item in request.targets) / len(request.targets)
-        pixel_width_km = (
-            (right - left) * 111.320 * math.cos(math.radians(mean_latitude)) / width
-        )
+        pixel_width_km = 1.0 / math.hypot(
+            ratio_x_x * width,
+            ratio_y_x * height,
+        ) / 1_000.0
+        pixel_height_km = 1.0 / math.hypot(
+            ratio_x_y * width,
+            ratio_y_y * height,
+        ) / 1_000.0
         block_rows = max(1, int(round(5.0 / pixel_height_km)))
         block_columns = max(1, int(round(5.0 / max(pixel_width_km, 0.1))))
         source = np.where(roi, levels, 0)
@@ -1337,17 +1658,16 @@ class KmiRadarAdapter:
             def corner_to_lonlat(grid_row: int, grid_column: int) -> tuple[float, float]:
                 pixel_row = min(height, grid_row * block_rows)
                 pixel_column = min(width, grid_column * block_columns)
-                return (
-                    left + pixel_column / width * (right - left),
-                    top - pixel_row / height * (top - bottom),
-                )
+                return ratio_to_lonlat(pixel_column / width, pixel_row / height)
 
             rows = [item[0] for item in component]
             columns = [item[1] for item in component]
             center_row = (min(rows) + max(rows) + 1) * block_rows / 2.0
             center_column = (min(columns) + max(columns) + 1) * block_columns / 2.0
-            longitude = left + center_column / width * (right - left)
-            latitude = top - center_row / height * (top - bottom)
+            longitude, latitude = ratio_to_lonlat(
+                center_column / width,
+                center_row / height,
+            )
             spatial.append(NormalizedObservation.create(
                 provider_id=request.provider_id,
                 product_id=request.product_id,
@@ -1367,6 +1687,7 @@ class KmiRadarAdapter:
                     "operational_use": "visualisation_only",
                     "quantitative_semantics_eligible": False,
                     "semantic_class": "categorical_visualisation",
+                    "source_projection": "EPSG:3812",
                 },
                 maximum_age_seconds=KMI_APPV4_MAX_FRAME_AGE_SECONDS,
             ))
@@ -1670,7 +1991,18 @@ class OperaRadarAdapter:
             f"{self._object_base_url}/{key}",
             maximum_bytes=384 * 1024 * 1024,
         )
-        return _decode_opera_targets(data, request, received_at=now)
+        # h5py keeps a process-wide lock.  Decoding OPERA inline can therefore
+        # block the MQTT event loop while another HDF5 radar decoder owns that
+        # lock, freezing heartbeats, control replies and the complete cycle.
+        # Share the bounded radar decode pool used by KNMI/DWD so HDF5 work is
+        # serialized and never executes on the event loop.
+        async with _RADAR_DECODE_SEMAPHORE:
+            return await asyncio.to_thread(
+                _decode_opera_targets,
+                data,
+                request,
+                received_at=now,
+            )
 
 
 def _latest_aemet_frame(payload: bytes) -> tuple[bytes, float]:
@@ -1708,7 +2040,7 @@ def _decode_aemet_radar(
     *,
     observed_at: float,
     received_at: float,
-) -> tuple[NormalizedObservation, ...]:
+) -> ThinAdapterResult:
     import numpy as np
     from PIL import Image
 
@@ -1765,7 +2097,7 @@ def _decode_aemet_radar(
         pixel_height_m=latitude_scale * 110_574.0,
         maximum_age_seconds=AEMET_MAX_FRAME_AGE_SECONDS,
     )
-    return tuple(
+    observations = tuple(
         NormalizedObservation.create(
             provider_id=item.provider_id,
             product_id=item.product_id,
@@ -1783,6 +2115,19 @@ def _decode_aemet_radar(
             maximum_age_seconds=AEMET_MAX_FRAME_AGE_SECONDS,
         )
         for item in level_observations
+    )
+    return ThinAdapterResult(
+        observations=observations,
+        visual_radar_fields=(ThinVisualRadarField(
+            provider_id=request.provider_id,
+            product_id=request.product_id,
+            observed_at=observed_at,
+            longitude_left=longitude_left,
+            latitude_top=latitude_top,
+            longitude_scale=longitude_scale,
+            latitude_scale=latitude_scale,
+            levels=np.where(valid, values, 0).astype(np.uint8),
+        ),),
     )
 
 
@@ -1836,14 +2181,20 @@ def _decode_meteofrance_radar(
             raw * _attribute_number(data_what["gain"])
             + _attribute_number(data_what["offset"])
         )
-        rain_rate = decoded * 12.0
+        # ODIM undetect is a measured below-threshold sample, not nodata.
+        # Use zero as its quantitative no-echo representation; this is not
+        # proof of exactly zero physical rainfall. Keep echo selection separate
+        # from source validity so dry coverage survives regional fusion.
+        undetect = raw == _attribute_number(data_what["undetect"])
+        rain_rate = np.where(undetect, 0.0, decoded * 12.0)
         valid = (
             (raw != _attribute_number(data_what["nodata"]))
-            & (raw != _attribute_number(data_what["undetect"]))
+            & np.isfinite(raw)
             & np.isfinite(rain_rate)
-            & (rain_rate >= 0.1)
+            & (rain_rate >= 0.0)
             & (rain_rate < 500.0)
         )
+        echo_valid = valid & ~undetect & (rain_rate >= 0.1)
         crs = _attribute_text(where["projdef"])
         xscale = _attribute_number(where["xscale"])
         yscale = _attribute_number(where["yscale"])
@@ -1882,7 +2233,7 @@ def _decode_meteofrance_radar(
 
     observations = _national_radar_observations(
         rain_rate,
-        valid,
+        echo_valid,
         request,
         observed_at=observed_at,
         received_at=received_at,
@@ -2253,6 +2604,25 @@ def _rainviewer_tile_bounds(
     return latitude_top, latitude_bottom, longitude_left, longitude_right
 
 
+def _decode_rainviewer_coverage(payload: bytes) -> Any:
+    """Official convention: transparent = available, black = unavailable.
+
+    Ambiguous colours/alpha remain unknown. This mask is infrequently updated
+    by the publisher and does not confirm current radar operation.
+    """
+    import numpy as np
+    from PIL import Image
+
+    with Image.open(io.BytesIO(payload)) as image:
+        if image.format != "PNG" or image.size != (RAINVIEWER_TILE_SIZE, RAINVIEWER_TILE_SIZE):
+            raise ValueError("rainviewer_coverage_tile_invalid")
+        pixels = np.asarray(image.convert("RGBA"))
+    mask = np.zeros(pixels.shape[:2], dtype=np.uint8)
+    mask[pixels[:, :, 3] == 0] = 1
+    mask[(pixels[:, :, 3] == 255) & np.all(pixels[:, :, :3] == 0, axis=2)] = 2
+    return mask
+
+
 def _decode_rainviewer_levels(payload: bytes) -> Any:
     from PIL import Image
     import numpy as np
@@ -2413,9 +2783,100 @@ def _rainviewer_tile_observations(
     return tuple(observations)
 
 
+def _rainviewer_spatial_observations(
+    decoded: Mapping[tuple[int, int], Any],
+    request: ThinProviderRequest,
+    *,
+    observed_at: float,
+    received_at: float,
+) -> tuple[NormalizedObservation, ...]:
+    spatial: list[NormalizedObservation] = []
+    for (tile_x, tile_y), levels in decoded.items():
+        spatial.extend(_rainviewer_tile_observations(
+            levels,
+            request,
+            tile_x=tile_x,
+            tile_y=tile_y,
+            observed_at=observed_at,
+            received_at=received_at,
+        ))
+    return tuple(spatial)
+
+
+def _rainviewer_visual_fields(decoded, centers, request, observed_at):
+    """Stitch fetched tiles without resampling or inventing rain rates."""
+    import numpy as np
+
+    count = 2**RAINVIEWER_ZOOM
+    size = RAINVIEWER_TILE_SIZE
+    world = 2 * math.pi * 6378137.0
+    resolution = world / (count * size)
+    fields = []
+    used = set()
+    for latitude, longitude in centers:
+        gx, gy = _rainviewer_global_pixel(latitude, longitude)
+        cx = int(gx // size) % count
+        cy = min(count - 1, max(0, int(gy // size)))
+        if (cx, cy) in used:
+            continue
+        used.add((cx, cy))
+        y0, y1 = max(0, cy - 1), min(count, cy + 2)
+        mosaic = np.zeros(((y1-y0)*size, 3*size), dtype=np.uint8)
+        for column, x in enumerate(range(cx-1, cx+2)):
+            for row, y in enumerate(range(y0, y1)):
+                mosaic[row*size:(row+1)*size, column*size:(column+1)*size] = decoded[(x % count, y)]
+        fields.append(ThinVisualRadarField(
+            request.provider_id, request.product_id, observed_at,
+            (cx-1)*size*resolution-world/2,
+            world/2-y0*size*resolution,
+            resolution, resolution, mosaic, crs="EPSG:3857",
+        ))
+    return tuple(fields)
+
+
 class RainViewerRadarAdapter:
     def __init__(self, *, manifest_url: str = RAINVIEWER_MANIFEST_ENDPOINT) -> None:
         self._manifest_url = manifest_url
+        # At most 64 small masks, reused across normal source cycles. Failed
+        # requests are negatively cached; no retries or forced provider polls.
+        self._coverage_cache: dict[tuple[int, int], tuple[Any, float, float]] = {}
+
+    async def _coverage_samples(self, request, fetcher, *, now):
+        samples = []
+        count = 2**RAINVIEWER_ZOOM
+        for target in request.targets:
+            x, y = _rainviewer_global_pixel(target.latitude, target.longitude)
+            key = (int(x // RAINVIEWER_TILE_SIZE) % count,
+                   min(count - 1, max(0, int(y // RAINVIEWER_TILE_SIZE))))
+            cached = self._coverage_cache.get(key)
+            if cached is None or not cached[1] <= now < cached[2]:
+                mask = None
+                try:
+                    payload = await asyncio.wait_for(fetcher.get_bytes(
+                        f"{RAINVIEWER_TILE_HOST}/v2/coverage/0/{RAINVIEWER_TILE_SIZE}"
+                        f"/{RAINVIEWER_ZOOM}/{key[0]}/{key[1]}/0/0_0.png",
+                        maximum_bytes=1024 * 1024,
+                    ), timeout=5.0)
+                    async with _RADAR_DECODE_SEMAPHORE:
+                        mask = await asyncio.to_thread(_decode_rainviewer_coverage, payload)
+                except Exception:
+                    # Auxiliary metadata must never take functioning radar down.
+                    pass
+                if key not in self._coverage_cache and len(self._coverage_cache) >= 64:
+                    self._coverage_cache.pop(next(iter(self._coverage_cache)))
+                cached = (mask, now, now + (RAINVIEWER_COVERAGE_TTL_SECONDS if mask is not None else 600.0))
+                self._coverage_cache[key] = cached
+            mask, checked_at, _ = cached
+            state = "unknown"
+            if mask is not None and abs(target.latitude) <= 85.05112878:
+                row = int(y) % RAINVIEWER_TILE_SIZE
+                column = int(x) % RAINVIEWER_TILE_SIZE
+                state = {1: "inside", 2: "outside"}.get(int(mask[row, column]), "unknown")
+            samples.append(RainViewerNominalCoverage(
+                target.target_id, target.latitude, target.longitude, state,
+                checked_at if mask is not None else None,
+            ))
+        return tuple(samples)
 
     async def fetch(self, request, fetcher, *, now):
         manifest = await fetcher.get_json(
@@ -2462,7 +2923,11 @@ class RainViewerRadarAdapter:
                 f"/{RAINVIEWER_TILE_SIZE}/{RAINVIEWER_ZOOM}/{tile_x}/{tile_y}/2/0_0.png"
             )
             payload = await fetcher.get_bytes(url, maximum_bytes=4 * 1024 * 1024)
-            decoded[(tile_x, tile_y)] = _decode_rainviewer_levels(payload)
+            async with _RADAR_DECODE_SEMAPHORE:
+                decoded[(tile_x, tile_y)] = await asyncio.to_thread(
+                    _decode_rainviewer_levels,
+                    payload,
+                )
 
         observations: list[NormalizedObservation] = []
         for target in request.targets:
@@ -2498,22 +2963,27 @@ class RainViewerRadarAdapter:
                     },
                     maximum_age_seconds=RAINVIEWER_MAX_FRAME_AGE_SECONDS,
                 ))
-        spatial = []
-        for (tile_x, tile_y), levels in decoded.items():
-            spatial.extend(_rainviewer_tile_observations(
-                levels,
+        async with _RADAR_DECODE_SEMAPHORE:
+            spatial = await asyncio.to_thread(
+                _rainviewer_spatial_observations,
+                decoded,
                 request,
-                tile_x=tile_x,
-                tile_y=tile_y,
                 observed_at=observed_at,
                 received_at=now,
-            ))
+            )
         observations.extend(sorted(
             spatial,
             key=lambda item: (item.value, item.metadata.get("block_count", 0)),
             reverse=True,
         )[:MAX_NATIONAL_RADAR_SPATIAL_CELLS])
-        return tuple(observations)
+        async with _RADAR_DECODE_SEMAPHORE:
+            visual_fields = await asyncio.to_thread(
+                _rainviewer_visual_fields, decoded, centers, request, observed_at,
+            )
+        from dataclasses import replace
+        coverage = await self._coverage_samples(request, fetcher, now=now)
+        visual_fields = tuple(replace(field, nominal_coverage=coverage) for field in visual_fields)
+        return ThinAdapterResult(tuple(observations), visual_radar_fields=visual_fields)
 
 
 class MeteoFranceOAuthTokenProvider:
@@ -2575,9 +3045,12 @@ class MetarAdapter:
         self._endpoint = endpoint
 
     async def fetch(self, request, fetcher, *, now):
-        if request.station_selection_reason:
+        if request.station_selection_reason and request.station_selection_reason != "station_catalog_no_match":
             raise ProviderBlocked(request.station_selection_reason)
-        if request.station_selection_applied and not request.selected_station_ids:
+        discovery_ids = set(request.station_discovery_target_ids)
+        if request.station_selection_reason == "station_catalog_no_match":
+            discovery_ids.update(target.target_id for target in request.targets)
+        if request.station_selection_applied and not request.selected_station_ids and not discovery_ids:
             return ()
         south = min(item.latitude for item in request.targets) - 2.0
         north = max(item.latitude for item in request.targets) + 2.0
@@ -2587,23 +3060,75 @@ class MetarAdapter:
             "format": "json",
             "hours": "1",
         }
-        if request.station_selection_applied:
+        queries = []
+        if request.station_selection_applied and request.selected_station_ids:
             params["ids"] = ",".join(sorted(set(request.selected_station_ids)))
-        else:
+            queries.append(params)
+        elif not request.station_selection_applied:
             params["bbox"] = f"{south:.3f},{west:.3f},{north:.3f},{east:.3f}"
-        try:
-            payload = await fetcher.get_json(
-                self._endpoint,
-                params=params,
-                maximum_bytes=8 * 1024 * 1024,
+            queries.append(params)
+        # Discover only uncovered locations; never one world-spanning bbox
+        # between Home and a distant fictive target. Normal cadence is unchanged.
+        for target in request.targets:
+            if target.target_id not in discovery_ids:
+                continue
+            bounds = (
+                f"{max(-90.0, target.latitude - 2):.3f},"
+                f"{max(-180.0, target.longitude - 3):.3f},"
+                f"{min(90.0, target.latitude + 2):.3f},"
+                f"{min(180.0, target.longitude + 3):.3f}"
             )
-        except HttpStatusError as error:
-            if error.status_code == 204:
-                return ()
-            raise
-        if not isinstance(payload, list):
-            raise ValueError("metar_payload_invalid")
+            query = {"format": "json", "hours": "1", "bbox": bounds}
+            if query not in queries:
+                queries.append(query)
+        payload = []
+        for query in queries:
+            try:
+                response = await fetcher.get_json(
+                    self._endpoint, params=query, maximum_bytes=8 * 1024 * 1024,
+                )
+            except HttpStatusError as error:
+                if error.status_code == 204:
+                    response = []
+                else:
+                    raise
+            if not isinstance(response, list):
+                raise ValueError("metar_payload_invalid")
+            payload.extend(response)
+            if "ids" in query:
+                # Catalog proximity does not prove a station still reports.
+                # Resolve uncovered targets from actual fresh local reports,
+                # with at most one bounded discovery query per target in this
+                # normal provider cycle (never a faster retry/poll).
+                for target in request.targets:
+                    covered = False
+                    for station in response:
+                        if not isinstance(station, Mapping):
+                            continue
+                        latitude = _optional_float(station.get("lat"))
+                        longitude = _optional_float(station.get("lon"))
+                        observed_at = _parse_timestamp(station.get("obsTime"), fallback=float("nan"))
+                        if (latitude is None or longitude is None
+                                or not 0 <= now - observed_at <= 3600  # same one-hour report window as the API query
+                                or _haversine_km(latitude, longitude, target.latitude, target.longitude) > request.ground_radius_km):
+                            continue
+                        if any(_optional_float(station.get(name)) is not None
+                               for name in ("temp", "altim", "wspd", "wgst", "wdir", "precip")):
+                            covered = True
+                            break
+                    if covered:
+                        continue
+                    bounds = (
+                        f"{max(-90.0, target.latitude - 2):.3f},"
+                        f"{max(-180.0, target.longitude - 3):.3f},"
+                        f"{min(90.0, target.latitude + 2):.3f},"
+                        f"{min(180.0, target.longitude + 3):.3f}"
+                    )
+                    discovery = {"format": "json", "hours": "1", "bbox": bounds}
+                    if discovery not in queries:
+                        queries.append(discovery)
         observations: list[NormalizedObservation] = []
+        seen = set()
         for station in payload:
             if not isinstance(station, Mapping):
                 continue
@@ -2613,6 +3138,10 @@ class MetarAdapter:
                 continue
             observed_at = _parse_timestamp(station.get("obsTime"), fallback=now)
             station_id = str(station.get("icaoId") or "unknown")
+            key = (station_id, observed_at)
+            if key in seen:
+                continue
+            seen.add(key)
             for target in request.targets:
                 if _haversine_km(latitude, longitude, target.latitude, target.longitude) > max(
                     150.0, target.observation_radius_km
@@ -2840,14 +3369,24 @@ class NetatmoAdapter:
         self._last_summary_signature: tuple[tuple[str, float], ...] = ()
 
     async def fetch(self, request, fetcher, *, now):
-        if request.station_selection_reason:
+        catalog_discovery = (
+            request.station_selection_reason == "station_catalog_no_match"
+        )
+        discovery_target_ids = set(request.station_discovery_target_ids)
+        if catalog_discovery:
+            discovery_target_ids.update(target.target_id for target in request.targets)
+        if request.station_selection_reason and not catalog_discovery:
             raise ProviderBlocked(request.station_selection_reason)
         access_token = self._access_token
         if not access_token and self._access_token_provider is not None:
             access_token = await self._access_token_provider()
         if not access_token:
             raise ProviderBlocked("external_access_required")
-        if request.station_selection_applied and not request.selected_station_ids:
+        if (
+            request.station_selection_applied
+            and not request.selected_station_ids
+            and not discovery_target_ids
+        ):
             return ()
         observations: dict[
             tuple[str, str, ObservationKind, str],
@@ -2906,11 +3445,6 @@ class NetatmoAdapter:
                 measures = station.get("measures", {})
                 measurements = _netatmo_measurements(measures)
                 station_id = str(station.get("_id", "unknown"))
-                if (
-                    request.station_selection_applied
-                    and station_id.casefold() not in allowed_station_ids
-                ):
-                    continue
                 for target in group:
                     distance_km = _haversine_km(
                         latitude,
@@ -2919,6 +3453,12 @@ class NetatmoAdapter:
                         target.longitude,
                     )
                     if distance_km > local_radius_km:
+                        continue
+                    if (
+                        request.station_selection_applied
+                        and target.target_id not in discovery_target_ids
+                        and station_id.casefold() not in allowed_station_ids
+                    ):
                         continue
                     station_observations: list[NormalizedObservation] = []
                     for kind, value, unit, label in measurements:

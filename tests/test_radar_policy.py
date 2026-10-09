@@ -50,11 +50,14 @@ def test_stale_rainviewer_is_not_selected(radar_policy_module):
 
 
 def _obs(*, lat=51.0, lon=4.5, timestamp=1_000.0, quality=None,
-         footprint_points=(), source="rainviewer", intensity=2,
+         footprint_points=(), footprint_polygons=(),
+         source="rainviewer", intensity=2,
          mean_dbz=None, max_dbz=None, area_km2=None):
     return SimpleNamespace(
         lat=lat, lon=lon, timestamp=timestamp, quality=quality,
-        footprint_points=footprint_points, source=source, intensity=intensity,
+        footprint_points=footprint_points,
+        footprint_polygons=footprint_polygons,
+        source=source, intensity=intensity,
         mean_dbz=mean_dbz, max_dbz=max_dbz, area_km2=area_km2,
     )
 
@@ -256,6 +259,90 @@ def test_opera_weak_echo_uses_enclosed_national_radar_footprint(
 
     assert len(result.accepted) == 1
     assert result.accepted[0].footprint_points == dpc_footprint
+    assert result.corroborated == 1
+    assert result.rejected == 0
+
+
+def test_opera_weak_echo_is_not_confirmed_inside_structured_dry_hole(
+    radar_policy_module,
+):
+    outer = (
+        (50.50, 3.00), (50.50, 5.00), (51.50, 5.00),
+        (51.50, 3.00), (50.50, 3.00),
+    )
+    hole = (
+        (50.80, 3.70), (50.80, 4.30), (51.20, 4.30),
+        (51.20, 3.70), (50.80, 3.70),
+    )
+    opera = _obs(
+        lat=51.0,
+        lon=4.0,
+        timestamp=1_000.0,
+        quality=0.0,
+        footprint_points=outer,
+        footprint_polygons=((outer, hole),),
+        source="opera",
+        mean_dbz=12.0,
+        max_dbz=20.0,
+        area_km2=1_000.0,
+    )
+    national_radar = _obs(
+        lat=51.0,
+        lon=4.0,
+        timestamp=1_060.0,
+        source="kmi",
+        intensity=2,
+    )
+
+    result = radar_policy_module.verify_opera_observations(
+        [opera],
+        [national_radar],
+        radius_km=0.5,
+    )
+
+    assert result.accepted == ()
+    assert result.corroborated == 0
+    assert result.rejected == 1
+
+
+def test_opera_weak_echo_is_confirmed_inside_structured_wet_area(
+    radar_policy_module,
+):
+    outer = (
+        (50.50, 3.00), (50.50, 5.00), (51.50, 5.00),
+        (51.50, 3.00), (50.50, 3.00),
+    )
+    hole = (
+        (50.80, 3.70), (50.80, 4.30), (51.20, 4.30),
+        (51.20, 3.70), (50.80, 3.70),
+    )
+    opera = _obs(
+        lat=51.0,
+        lon=4.0,
+        timestamp=1_000.0,
+        quality=0.0,
+        footprint_points=outer,
+        footprint_polygons=((outer, hole),),
+        source="opera",
+        mean_dbz=12.0,
+        max_dbz=20.0,
+        area_km2=1_000.0,
+    )
+    national_radar = _obs(
+        lat=51.35,
+        lon=4.0,
+        timestamp=1_060.0,
+        source="kmi",
+        intensity=2,
+    )
+
+    result = radar_policy_module.verify_opera_observations(
+        [opera],
+        [national_radar],
+        radius_km=0.5,
+    )
+
+    assert len(result.accepted) == 1
     assert result.corroborated == 1
     assert result.rejected == 0
 

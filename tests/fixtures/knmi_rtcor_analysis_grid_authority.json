@@ -1,0 +1,101 @@
+{
+  "dataset": "nl_rdr_data_rtcor_5m/1.0",
+  "evidence_records": [
+    {
+      "evidence_class": "official_knmi_dataset_catalog",
+      "facts": {
+        "dataset_edition": 4,
+        "east_bound_longitude": 10.86,
+        "file_format": "HDF5",
+        "north_bound_latitude": 55.97,
+        "reference_system": "+proj=stere +lat_0=90 +lon_0=0 +lat_ts=60 +a=6378.14 +b=6356.75 +x_0=0 y_0=0",
+        "south_bound_latitude": 48.9,
+        "spatial_representation": "grid",
+        "west_bound_longitude": 0.0
+      },
+      "record_id": "knmi_dataset_catalog_edition_4",
+      "source_url": "https://dataplatform.knmi.nl/dataset/nl-rdr-data-rtcor-5m-1-0"
+    },
+    {
+      "evidence_class": "official_knmi_hdf_specification",
+      "facts": {
+        "display_origin_default": "pixel_0_0_is_upper_left_unless_unusual_orientation_is_declared",
+        "geo_column_offset_semantics": "offset_of_pixel_0_0_from_projection_origin",
+        "geo_pixel_def_examples": "CENTRE_or_LU_without_formal_LU_edge_expansion",
+        "image_array_order": "Nrows_x_Ncolumns",
+        "report_version": "3.6",
+        "self_contained_metadata": true
+      },
+      "record_id": "knmi_hdf_spec_v3_6",
+      "source_url": "https://cdn.knmi.nl/knmi/pdf/bibliotheek/knmipubIR/IR2009-01.pdf"
+    },
+    {
+      "evidence_class": "official_knmi_hdf_specification",
+      "facts": {
+        "column_offset_km": 0.0,
+        "columns": 700,
+        "coordinate_dimensions": "KM,KM",
+        "corner_order": "southwest_northwest_northeast_southeast",
+        "corners_lon_lat": [
+          0.0,
+          49.362064,
+          0.0,
+          55.973602,
+          10.856453,
+          55.388973,
+          9.009301,
+          48.895306
+        ],
+        "earth_model_axes_km": [
+          6378.388,
+          6356.906
+        ],
+        "pixel_definition_token": "LU",
+        "pixel_parameters": "X,Y",
+        "pixel_size_x_km": 1.0000035,
+        "pixel_size_y_km": -1.0000049,
+        "projection": "STEREOGRAPHIC",
+        "projection_proj4_params": "+proj=stere +x_0=0 +y_0=0 +lat_0=90 +lon_0=0 +lat_ts=60 +a=6378.388 +b=6356.906",
+        "report_version": "3.8",
+        "row_offset_km": 3649.9814,
+        "rows": 765
+      },
+      "record_id": "knmi_hdf_spec_v3_8_nl25",
+      "source_url": "https://cdn.knmi.nl/system/data_center_publications/files/000/072/301/original/hdftag38.pdf?1739444428="
+    },
+    {
+      "evidence_class": "official_peer_reviewed_product_description",
+      "facts": {
+        "coverage": "netherlands_and_surrounding_area",
+        "grid_area": "approximately_1_km2",
+        "hdf_contains_geographical_metadata": true,
+        "product_semantics": "gauge_adjusted_five_minute_precipitation_accumulation",
+        "publication_year": 2025
+      },
+      "record_id": "knmi_essd_2025_product",
+      "source_url": "https://essd.copernicus.org/articles/17/4715/2025/"
+    },
+    {
+      "evidence_class": "local_unretained_live_observation",
+      "facts": {
+        "content_sha256": "a138f091fb61181d2f83e5892e0ba5db19088211d3fc26ccff41bb90b9927d8d",
+        "filename": "RAD_NL25_RAC_RT_202608012345.h5",
+        "hdf_tag_version": "3.6",
+        "official_bytes_retained_in_validation_corpus": false,
+        "observed_projection_proj4_params": "+proj=stere +x_0=0 +y_0=0 +lat_0=90 +lon_0=0 +lat_ts=60 +a=6378.388 +b=6356.906",
+        "observed_shape": [
+          765,
+          700
+        ],
+        "size_bytes": 39925
+      },
+      "record_id": "local_live_hdf_observation_20260801",
+      "source_url": "https://api.dataplatform.knmi.nl/open-data/v1/datasets/nl_rdr_data_rtcor_5m/versions/1.0/files"
+    }
+  ],
+  "internal_product": "RAD_NL25_COR_NA",
+  "product": "knmi_nl_rdr_data_rtcor_5m_capture",
+  "provider": "knmi",
+  "schema": "stv3-knmi-rtcor-analysis-grid-authority-gate-v1",
+  "status": "withheld"
+}

@@ -1,0 +1,7 @@
+.gitattributes text eol=lf
+.gitignore text eol=lf
+storm_tracker_worker/run.sh text eol=lf
+storm_tracker_worker/config.yaml text eol=lf
+storm_tracker_worker/compose.yaml text eol=lf
+storm_tracker_worker/.env.example text eol=lf
+storm_tracker_worker/.dockerignore text eol=lf

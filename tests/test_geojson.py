@@ -383,3 +383,51 @@ def test_lightning_zone_expires_before_diagnostic_strike_points(geojson_module):
     layers = [item["properties"]["layer"] for item in result["features"]]
     assert "lightning" in layers
     assert "lightning_zone" not in layers
+
+
+def test_only_active_virtual_probe_is_visible_on_live_map(
+    geojson_module,
+):
+    result = geojson_module.build_feature_collection(
+        {},
+        [_region(_storm())],
+        virtual_probe_diagnostics={
+            "probes": [{
+                "probe_id": "probe-a",
+                "region_id": "region-1",
+                "storm_id": "storm-a",
+                "station_id": "station-a",
+                "latitude": 51.1,
+                "longitude": 4.2,
+                "minutes_until_expected": 18.0,
+                "expected_at": 2_000.0,
+                "passage": "raak",
+                "pass_distance_km": 2.5,
+                "motion_confidence": "Matig",
+                "status_text": "Onderweg naar controlepunt",
+                "summary": "Controleert de voorspelde buipassage.",
+            }],
+            "recent_outcomes": [{
+                "probe_id": "probe-old",
+                "region_id": "region-1",
+                "station_id": "station-old",
+                "latitude": 51.2,
+                "longitude": 4.3,
+                "outcome": "regen_bevestigd",
+                "summary": "Regen bevestigd.",
+            }],
+        },
+    )
+    by_layer = {
+        feature["properties"]["layer"]: feature
+        for feature in result["features"]
+        if feature["properties"]["layer"].startswith("virtual_probe")
+    }
+    assert by_layer["virtual_probe"]["geometry"]["coordinates"] == [4.2, 51.1]
+    assert by_layer["virtual_probe"]["properties"]["calibration_only"] is True
+    assert by_layer["virtual_probe_path"]["geometry"]["coordinates"] == [
+        [4.0, 51.0], [4.2, 51.1],
+    ]
+    assert "virtual_probe_outcome" not in by_layer
+    assert result["metadata"]["virtual_probes_included"] == 1
+    assert result["metadata"]["virtual_probe_outcomes_included"] == 0

@@ -1,0 +1,131 @@
+{
+  "contract": "stv3-openmeteo-atomic-activation-blocker-v1",
+  "decision": "blocked_no_partial_activation",
+  "evaluated_at_utc": "2026-08-09T02:23:53Z",
+  "failed_gate": {
+    "gate_id": "fixed_attributable_upstream_model_source_per_region",
+    "reason_code": "current_global_json_profile_has_no_fail_closed_fixed_model_authority",
+    "requirements_not_proven": [
+      "one_fixed_upstream_model_id_for_every_authorized_coordinate",
+      "model_specific_support_for_every_requested_variable",
+      "response_bound_proof_of_the_selected_model_id",
+      "resolved_upstream_model_source_credit_in_query_and_native_receipt"
+    ]
+  },
+  "findings": [
+    {
+      "evidence_id": "current_request_uses_best_match",
+      "local_reference": "storm_tracker_worker/openmeteo_native.py:297",
+      "observation": "The exact request parameter set has no models selector and native provenance records model_selection as automatic_best_match."
+    },
+    {
+      "evidence_id": "current_scope_is_global",
+      "local_reference": "storm_tracker_worker/worker_acquisition_plan.py:588",
+      "observation": "The workload coverage authority is global and does not bind targets to a model-specific numerical domain."
+    },
+    {
+      "evidence_id": "icon_eu_domain_not_closed_for_global_authority",
+      "official_source_id": "openmeteo_dwd_model_documentation",
+      "observation": "The fixed selector icon_eu is documented for Europe, while the current authority admits globally valid latitude and longitude values; the cited official model documentation supplies no canonical numerical polygon or bounding box that closes that mismatch."
+    },
+    {
+      "evidence_id": "variable_profile_is_not_icon_eu_specific",
+      "local_reference": "storm_tracker_worker/openmeteo_native.py:40",
+      "official_source_id": "openmeteo_dwd_model_documentation",
+      "observation": "The current 19-variable profile requests lightning_potential, which the model-specific documentation identifies as ICON-D2-only, and precipitation_probability has ensemble lineage rather than a single deterministic ICON-EU source."
+    },
+    {
+      "evidence_id": "remaining_variable_support_is_unproven",
+      "local_reference": "storm_tracker_worker/openmeteo_native.py:50",
+      "official_source_id": "openmeteo_dwd_model_documentation",
+      "observation": "The cited model-specific documentation does not establish the current lifted_index and convective_inhibition requirements as an exact ICON-EU profile. Absence of proof is treated fail-closed."
+    },
+    {
+      "evidence_id": "json_response_does_not_prove_model",
+      "official_source_id": "openmeteo_forecast_openapi",
+      "observation": "The documented JSON forecast response schema has no model or upstream-source field, so the current JSON artifact and inspector cannot prove which model produced the bytes."
+    },
+    {
+      "evidence_id": "null_only_axes_are_currently_accepted",
+      "local_reference": "storm_tracker_worker/openmeteo_native.py:694",
+      "observation": "The structural inspector validates only non-null values and therefore permits an entire requested variable axis to be null, which cannot prove model-variable support."
+    },
+    {
+      "evidence_id": "upstream_credit_is_explicitly_unresolved",
+      "local_reference": "storm_tracker_worker/openmeteo_native.py:115",
+      "observation": "The immutable attribution policy credits Open-Meteo but explicitly marks upstream_model_credit_resolution_required as true."
+    },
+    {
+      "evidence_id": "flatbuffers_is_not_the_current_exact_raw_contract",
+      "official_source_id": "openmeteo_flatbuffers_sdk",
+      "observation": "The official FlatBuffers schema can expose a per-response model enum, but adopting it would replace the current native JSON product and requires a separately pinned schema, decoder, model enum check and recovery contract. It is not evidence for the current JSON capture."
+    }
+  ],
+  "official_sources": [
+    {
+      "id": "openmeteo_forecast_openapi",
+      "url": "https://github.com/open-meteo/open-meteo/blob/main/openapi/forecast.yml",
+      "supports": [
+        "models is the manual model-selection parameter",
+        "icon_eu is a valid selector",
+        "the documented JSON response schema has no model field"
+      ]
+    },
+    {
+      "id": "openmeteo_dwd_model_documentation",
+      "url": "https://open-meteo.com/en/docs/dwd-api",
+      "supports": [
+        "ICON-EU is a Europe model",
+        "lightning potential is restricted to ICON-D2",
+        "15-minute availability and ensemble-derived variables are model dependent"
+      ]
+    },
+    {
+      "id": "openmeteo_flatbuffers_sdk",
+      "url": "https://github.com/open-meteo/sdk",
+      "supports": [
+        "a FlatBuffers response represents one location and one model",
+        "the weather response schema exposes a model enum"
+      ]
+    },
+    {
+      "id": "openmeteo_license",
+      "url": "https://open-meteo.com/en/license",
+      "supports": [
+        "Open-Meteo attribution requirements",
+        "DWD atmospheric and ensemble forecast source credit"
+      ]
+    }
+  ],
+  "minimum_remediation_before_reevaluation": [
+    "define a fixed model selector and a canonical numeric coverage authority that contains every admitted target",
+    "pin a model-specific variable and temporal-resolution profile with no unsupported or mixed-model fields",
+    "reject null-only required variable axes",
+    "bind the selected model enum and upstream source credit into the query authority, native request, raw receipt and capture receipt",
+    "if FlatBuffers is selected, introduce and audit a new exact-raw product contract with pinned schema identity",
+    "only after the model gate closes, atomically prove the parent-held one-shot usage permit, crash recovery, capacity, activation, terminal raw audit and privacy gates"
+  ],
+  "preserved_runtime_state": {
+    "active_shadow_raw_workloads": 11,
+    "openmeteo_activation_status": "blocked_unwired",
+    "openmeteo_executable": false,
+    "openmeteo_reason_code": "exact_raw_production_handler_not_runtime_audited",
+    "recovery_bindings": 11,
+    "terminal_raw_consumer_bindings": 11,
+    "partial_activation_performed": false,
+    "service_main_ha_mqtt_wiring_changed": false
+  },
+  "observed_component_sha256": {
+    "storm_tracker_worker/acquisition_activation.py": "37034dd9dfd808f74b5948dd5c377138da25c31352be8a5911b25e83a6c33ff4",
+    "storm_tracker_worker/acquisition_capture_recovery.py": "baf9409c871538bd5e794fd029ece23c761239b87fa68355610c6d9358c6d2f0",
+    "storm_tracker_worker/acquisition_handler_child.py": "f20f7dfc3a2bccdb9ccd9cd7c1251c4d3d877202384aefc859f2d94117f636a9",
+    "storm_tracker_worker/acquisition_query_authority.py": "e5dc91b65c9035724cc29a864fd2abca472d35d2065f62664e5d7d78e2fcc78d",
+    "storm_tracker_worker/acquisition_runtime.py": "53b1ee4ed6a65dbc2ef80e7cca564e4274c869fd7dc9ebf4c88905395a46b780",
+    "storm_tracker_worker/openmeteo_native.py": "b1fc8a0e63ca3d6a19b5f9ae674a4d82b4b869270203d2dccad1bd826f3c6ec2",
+    "storm_tracker_worker/openmeteo_usage_authority.py": "010dc4b8d65e5179acf53e0485a98b55063cd57a256e0887a354cc4fff18b63e",
+    "storm_tracker_worker/raw_capacity_ledger.py": "dc1f6121dcfd3b55bdf315c7d5c953b5b0449bb910dc20bfadd532552adaefcb",
+    "storm_tracker_worker/raw_manifest_audit_completion_consumer.py": "6dc8d5f039e6df98351d77ea178563bb704b672af429b16eb6c53a0e1eaccb67",
+    "storm_tracker_worker/worker_acquisition_plan.py": "8c13b6f1c0359bf29a598ec7500876daca07a9151f5afb73369b84d320e9b550",
+    "storm_tracker_worker/terminal_raw_completion_router.py": "a83307c747b0a1db71532fa6329760ad510cf9853f40e916cff0dd242cb9607b"
+  }
+}

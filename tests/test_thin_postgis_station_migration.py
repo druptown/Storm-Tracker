@@ -24,6 +24,7 @@ def _legacy_row(observation_key: str):
         NOW + 1.0,
         "good",
         {"station_id": "station-1", "measurement": "rain_rate"},
+        "rain_rate",
         True,
     )
 
@@ -34,6 +35,7 @@ class _Database:
         self.state = (None, 0, 0, "pending")
         self.canonical = {}
         self.sql = []
+        self.execute_calls = []
         self.commits = 0
         self.rollbacks = 0
 
@@ -52,16 +54,39 @@ class _Cursor:
     def execute(self, sql, parameters=()):
         normalized = " ".join(sql.split())
         self.database.sql.append(normalized)
-        if "FROM stv3_station_measurement_backfill_state" in normalized:
+        self.database.execute_calls.append((normalized, parameters))
+        if normalized.startswith("SELECT source_cursor,copied_count"):
             self.result = (self.database.state,)
+        elif normalized.startswith(
+            "INSERT INTO stv3_station_measurement_backfill_state"
+        ):
+            self.result = ()
         elif normalized.startswith("SELECT observation.observation_key"):
-            source_cursor, repeated_cursor, fetch_limit = parameters
-            assert repeated_cursor == source_cursor
+            (
+                provider,
+                observed_after,
+                cursor_time,
+                repeated_time,
+                repeated_time_again,
+                cursor_key,
+                fetch_limit,
+            ) = parameters
+            assert provider in {"kmi_aws", "metar", "netatmo", "wunderground"}
+            assert repeated_time == repeated_time_again == cursor_time
             rows = [
                 row for row in self.database.rows
-                if source_cursor is None or row[0] > source_cursor
+                if row[1] == provider
+                and row[5] >= observed_after
+                and (
+                    cursor_time is None
+                    or row[5] > cursor_time
+                    or (row[5] == cursor_time and row[0] > cursor_key)
+                )
             ]
-            self.result = tuple(rows[:fetch_limit])
+            self.result = tuple(sorted(
+                rows,
+                key=lambda row: (row[5], row[0]),
+            )[:fetch_limit])
         elif normalized.startswith(
             "UPDATE stv3_station_measurement_backfill_state"
         ):
@@ -73,6 +98,10 @@ class _Cursor:
                 "netatmo", "rain_rate", 1, len(self.database.canonical),
                 NOW, NOW, 2.5, 2.5, max(0, len(self.database.rows) - 1),
             ),)
+        elif "has_table_privilege" in normalized:
+            self.result = ((True, True, True),)
+        elif "rejected_count" in normalized and normalized.startswith("SELECT"):
+            self.result = ((self.database.state[2],),)
         elif "AS unrecognizable_rows" in normalized:
             self.result = ((0,),)
         elif "AS orphan_count" in normalized:
@@ -122,15 +151,31 @@ def test_backfill_resumes_after_last_observation_key_and_deduplicates_targets():
     database = _Database((_legacy_row("a"), _legacy_row("b")))
     repository = _repository(database)
 
-    first = repository.backfill_batch(limit=1)
-    second = repository.backfill_batch(limit=100)
+    first = repository.backfill_batch(limit=1, observed_after=NOW - 21 * 86400)
+    second = repository.backfill_batch(limit=100, observed_after=NOW - 21 * 86400)
+    third = repository.backfill_batch(limit=100, observed_after=NOW - 21 * 86400)
 
     assert first.status == "partial"
-    assert first.source_cursor == "a"
-    assert second.status == "complete"
-    assert second.source_cursor == "b"
+    assert first.source_cursor is not None
+    assert second.status == "partial"
+    assert third.status == "complete"
     assert len(database.canonical) == 1
-    assert database.commits == 2
+    assert database.commits == 3
+
+
+def test_backfill_uses_explicit_time_cutoff_instead_of_fixed_six_month_window():
+    database = _Database((_legacy_row("a"),))
+    repository = _repository(database)
+    cutoff = NOW - 21 * 86400
+
+    repository.backfill_batch(limit=100, observed_after=cutoff)
+
+    legacy_call = next(
+        call for call in database.execute_calls
+        if call[0].startswith("SELECT observation.observation_key")
+    )
+    assert legacy_call[1][1] == cutoff
+    assert "interval '6 months'" not in legacy_call[0]
 
 
 def test_dry_run_never_executes_insert_update_delete_or_drop():
@@ -145,6 +190,31 @@ def test_dry_run_never_executes_insert_update_delete_or_drop():
         if sql.startswith(("INSERT", "UPDATE", "DELETE", "DROP"))
     ]
     assert database.commits == 0
+
+
+def test_dry_run_checks_schema_and_privileges_without_scanning_legacy_rows():
+    database = _Database((_legacy_row("a"),))
+    repository = _repository(database)
+
+    report = repository.dry_run(window_start=NOW - 3600.0, window_end=NOW + 1.0)
+
+    assert report.status == "ready"
+    assert any("has_table_privilege" in sql for sql in database.sql)
+    assert not any("AS legacy_distinct" in sql for sql in database.sql)
+
+
+def test_verify_uses_backfill_rejections_without_rescanning_all_legacy_rows():
+    database = _Database((_legacy_row("a"),))
+    database.state = ("a", 0, 7, "complete")
+    repository = _repository(database)
+
+    report = repository.verify(
+        window_start=NOW - 3600.0,
+        window_end=NOW + 1.0,
+    )
+
+    assert report.unrecognizable_rows == 7
+    assert not any("AS unrecognizable_rows" in sql for sql in database.sql)
 
 
 def test_verify_reports_duplicate_reduction_and_zero_orphans():
@@ -181,3 +251,20 @@ def test_management_cli_can_start_from_the_repository_root():
     assert "dry-run" in result.stdout
     assert "backfill" in result.stdout
     assert "verify" in result.stdout
+
+
+def test_explicit_migration_operations_raise_only_their_transaction_timeout():
+    database = _Database((_legacy_row("a"),))
+    repository = _repository(database)
+
+    repository.backfill_batch(limit=1, observed_after=NOW - 21 * 86400)
+    repository.verify(window_start=NOW - 3600.0, window_end=NOW + 1.0)
+
+    timeout_statements = [
+        sql for sql in database.sql
+        if "set_config('statement_timeout'" in sql
+    ]
+    assert timeout_statements == [
+        "SELECT set_config('statement_timeout', %s, true)",
+        "SELECT set_config('statement_timeout', %s, true)",
+    ]

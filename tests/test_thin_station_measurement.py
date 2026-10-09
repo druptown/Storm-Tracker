@@ -70,14 +70,64 @@ def test_wind_speed_and_gust_are_distinct_measurements():
     assert {row.measurement_type for row in rows} == {"wind_speed", "wind_gust"}
 
 
-@pytest.mark.parametrize(
-    "metadata",
-    ({"measurement": "rain_rate"}, {"station_id": "station-1"}),
-)
-def test_incomplete_station_metadata_stays_outside_station_route(metadata):
+def test_missing_station_id_stays_outside_station_route():
     assert StationMeasurement.from_observation(
-        _observation(metadata=metadata),
+        _observation(metadata={"measurement": "rain_rate"}),
     ) is None
+
+
+def test_measurement_type_can_be_inferred_from_supported_observation_kind():
+    row = StationMeasurement.from_observation(
+        _observation(metadata={"station_id": "station-1"}),
+    )
+
+    assert row is not None
+    assert row.measurement_type == "rain_rate"
+
+
+@pytest.mark.parametrize(
+    ("provider_label", "canonical"),
+    (
+        ("rain_60min", "rain_accumulation"),
+        ("rain_total", "rain_accumulation"),
+        ("rain_accumulation_10min", "rain_accumulation"),
+        ("rain_rate_10min_equivalent", "rain_rate"),
+        ("humidity", "relative_humidity"),
+    ),
+)
+def test_provider_measurement_aliases_use_canonical_station_types(
+    provider_label,
+    canonical,
+):
+    kind = (
+        ObservationKind.RELATIVE_HUMIDITY
+        if canonical == "relative_humidity"
+        else ObservationKind.RAIN_ACCUMULATION
+        if canonical == "rain_accumulation"
+        else ObservationKind.RAIN_RATE
+    )
+    unit = "%" if kind is ObservationKind.RELATIVE_HUMIDITY else (
+        "mm" if kind is ObservationKind.RAIN_ACCUMULATION else "mm/h"
+    )
+    observation = NormalizedObservation.create(
+        provider_id="netatmo",
+        product_id="getpublicdata",
+        target_id="home",
+        kind=kind,
+        value=2.0,
+        unit=unit,
+        observed_at=NOW,
+        received_at=NOW + 1.0,
+        latitude=51.05,
+        longitude=4.42,
+        quality=ObservationQuality.GOOD,
+        metadata={"station_id": "station-1", "measurement": provider_label},
+    )
+
+    row = StationMeasurement.from_observation(observation)
+
+    assert row is not None
+    assert row.measurement_type == canonical
 
 
 def test_unknown_measurement_type_stays_outside_station_route():

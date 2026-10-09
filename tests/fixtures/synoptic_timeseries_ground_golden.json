@@ -1,0 +1,70 @@
+{
+  "UNITS": {
+    "precip_intervals": "Millimeters",
+    "precip_accumulated": "Millimeters"
+  },
+  "QC_SUMMARY": {
+    "QC_TESTS_APPLIED": [
+      "sl_range_check",
+      "ma_range_check"
+    ],
+    "TOTAL_OBSERVATIONS_FLAGGED": 2,
+    "PERCENT_OF_TOTAL_OBSERVATIONS_FLAGGED": 16.667
+  },
+  "STATION": [
+    {
+      "STID": "KJFK",
+      "ID": "12345",
+      "MNET_ID": "1",
+      "NAME": "John F Kennedy International Airport",
+      "LATITUDE": "40.6392",
+      "LONGITUDE": "-73.7639",
+      "ELEVATION": "13.0",
+      "QC_FLAGGED": {
+        "precip_intervals_set_1d": [false, true, null],
+        "precip_intervals_set_2d": [false, false, true],
+        "precip_accumulated_set_1d": [false, true, null],
+        "precip_accumulated_set_2d": [false, false, true]
+      },
+      "SENSOR_VARIABLES": {
+        "precip_intervals": {
+          "precip_intervals_set_1d": {
+            "position": "main",
+            "derived_from": ["precip_accum_one_hour_set_1"]
+          },
+          "precip_intervals_set_2d": {
+            "position": "backup",
+            "derived_from": ["precip_accum_six_hour_set_1"]
+          }
+        },
+        "precip_accumulated": {
+          "precip_accumulated_set_1d": {
+            "position": "main",
+            "derived_from": ["precip_accum_one_hour_set_1"]
+          },
+          "precip_accumulated_set_2d": {
+            "position": "backup",
+            "derived_from": ["precip_accum_six_hour_set_1"]
+          }
+        }
+      },
+      "OBSERVATIONS": {
+        "date_time": [
+          "2026-08-02T12:00:00Z",
+          "2026-08-02T12:05:00Z",
+          "2026-08-02T12:10:00Z"
+        ],
+        "precip_intervals_set_1d": [0.125, 0.000, null],
+        "precip_intervals_set_2d": [null, 0.010, 2e-2],
+        "precip_accumulated_set_1d": [0.125, 0.125, null],
+        "precip_accumulated_set_2d": [null, 0.010, 0.030]
+      }
+    }
+  ],
+  "SUMMARY": {
+    "NUMBER_OF_OBJECTS": 1,
+    "RESPONSE_CODE": 1,
+    "RESPONSE_MESSAGE": "OK",
+    "VERSION": "v2.21.3"
+  }
+}

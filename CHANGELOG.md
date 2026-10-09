@@ -1,5 +1,107 @@
 # Storm Tracker V3 — Versiegeschiedenis
 
+## integration 1.14.152 / worker 1.18.72
+
+- Ontkoppelt provideractualiteit van het gezamenlijke meteorologische
+  snapshot: de workerheartbeat draagt een begrensd, zelfstandig
+  providerstatussnapshot met eigen geldigheid.
+- Home Assistant valideert die status payloadvrij en ververst providertegels
+  op heartbeat-events. Een stale resultaat-/kaartsnapshot maakt daardoor niet
+  langer alle nog actuele providerstatussen tegelijk onbekend.
+- Targets, kaart en voorspellingen blijven fail-closed op hun eigen
+  meteorologische snapshot; een werkelijk verlopen providerstatus wordt
+  afzonderlijk `stale`.
+
+## integration 1.14.151 / worker 1.18.71
+
+- Publiceer de volledige technische-diagnosebron ook vanuit de actieve dunne
+  worker, zodat de diagnosesensor niet langer `diagnostic_source_missing`
+  rapporteert.
+- Laat een verlopen of tijdelijk mislukt control-job-ID opnieuw uitvoeren en
+  herstel de controller automatisch na een online heartbeat met
+  `worker_job_failed`.
+- Behoud bij een verlopen operationele snapshot de afzonderlijke
+  provider-readiness en toon hun effectieve status als `stale`, in plaats van
+  alle bronnen tegelijk als `unknown` voor te stellen. Weerclaims blijven
+  daarbij fail-closed op onvoldoende actuele data.
+
+## integration 1.14.150 / worker 1.18.70
+
+- Maakt de uitgestelde kaarttekening idempotent: overlappende Home Assistant-
+  renders legen eerst de tegel- en SVG-laag, zodat radarvlakken, afstandsringen
+  en bewegingslijnen niet langer exact dubbel worden getekend.
+
+## integration 1.14.149 / worker 1.18.70
+
+- Publiceer alleen een bewegingslijn en aankomstberekening voor een in het
+  actuele radarframe bevestigde track met minstens twee echte detecties en
+  een meetbare intervalvector.
+- Houd voorlopige en coastende celsporen wel als ruwe trackpunten in PostGIS,
+  maar label hun beweging operationeel als niet gereed. Daardoor veroorzaken
+  verdwenen of onzeker gekoppelde cellen geen rode lijnen over honderden
+  kilometers en geen fictieve waarschuwing.
+
+## integration 1.14.149 / worker 1.18.69
+
+- Vervang snelle puntinterpolatie door begrensde, vectoriële
+  oppervlaktebemonstering. Kleine natte bronpixels blijven daardoor bij
+  downsampling meetellen in plaats van tussen analysecelcentra te verdwijnen.
+- Behoud nearest-neighbour voor geldigheid en nodata, maar bereken intensiteit
+  en dekkingsfractie uit afzonderlijk bemonsterd geldig oppervlak.
+- Behoud ook op het maximale raster de snelle livewerking: lokaal circa 2,8 s
+  per bronprojectie en 8,9 s voor een volledige driebronnenfusie.
+
+## integration 1.14.149 / worker 1.18.68
+
+- Projecteer een maximaal regionaal radarraster voortaan in één vectoriële
+  NumPy/pyproj-bewerking in plaats van bronpixel per bronpixel in Python.
+- Rangschik, begrens en combineer de beste drie radarbronnen eveneens
+  vectorieel. Op een raster van 250.000 pixels daalt één projectie lokaal van
+  circa 11,2 naar 0,3 seconden en een driebronnenfusie van meer dan 30 naar
+  circa 2,7 seconden.
+- Behoud geldige nulwaarden, nodata-afbakening, bronactualiteit,
+  kwaliteitsweging, top-drie-provenance en de bestaande veilige fallback.
+
+## integration 1.14.149 / worker 1.18.67
+
+- Laat de gekozen regionale radarlaag ook expliciet een droge geldige pixel
+  publiceren. Een conflicterende losse radarpuntwaarde kan de doelstatus dan
+  niet meer op regen houden terwijl de kaart rond dat doel droog is.
+- Een werkelijk nat fysiek grondstation blijft de droge radarwaarde wel
+  overrulen; grondwaarneming gaat dus niet verloren.
+
+## integration 1.14.149 / worker 1.18.66
+
+- Toont tijdens een lopende regionale fusie nog slechts één geografisch
+  toepasselijke radarbron in plaats van alle ruwe providerlagen te stapelen.
+- Gebruikt in België tijdelijk KMI als voorkeurslaag en laat dezelfde ene laag
+  ook de tijdelijke doelstatus bepalen, zodat kaart en status overeenkomen.
+- Verwijdert de impliciete route waarbij een lege trackinguitkomst opnieuw
+  alle ruwe radarpolygonen activeerde.
+
+## integration 1.14.149 / worker 1.18.65
+
+- Corrigeert de KMI AppV4-radarprojectie naar Belgian Lambert 2008 en gebruikt
+  het actuele KMI-RGBA-palet, zodat buivormen niet langer over West-Europa
+  worden uitgerekt of verkeerd geklasseerd.
+- Visuele, niet-kwantitatieve radarproducten mogen niet langer zelfstandig
+  de actuele doelstatus op `regen` zetten.
+
+## integration 1.14.149 / worker 1.18.64
+
+- Volg een radarcellenveld nog maar één keer per actieve regio in plaats van
+  opnieuw per doelpersoon. Targets in dezelfde regio blijven afzonderlijke
+  puntmetingen en passagevoorspellingen houden.
+- Verwijder daarmee dubbele buicellen en tegenstrijdige richtingslijnen en
+  verminder de regionale trackinglast evenredig met het aantal targets.
+
+## integration 1.14.145 / worker 1.18.58
+
+- Laat de integratie onmiddellijk starten wanneer een geconfigureerde
+  Life360-tracker tijdens de HA-opstart nog geen coördinaten heeft.
+- Sla uitsluitend die tracker tijdelijk over en voeg hem via de bestaande
+  state-listener automatisch toe zodra zijn eerste geldige positie aankomt.
+
 ## integration 1.14.144 / worker 1.18.58
 
 - Laat de actuele doelstatus tijdens wachtende of ontbrekende regionale fusie
@@ -3034,3 +3136,40 @@ blijven uitsluitend staan om de prototypegeschiedenis niet te herschrijven.
 - Negeert achtergebleven aankomstkandidaten van tijdelijk onbeschikbare
   trackers zonder geldige thuisvoorspellingen en kaartcellen te wissen.
 - Logt een begrensde foutcode wanneer radarbronfusie veilig wordt ingehouden.
+# 1.14.148 / 1.18.63
+
+- Laat native celtracking tijdens een nog lopende regionale fusie niet langer
+  de eerste snapshot blokkeren. Directe regen-op-target blijft beschikbaar;
+  zodra fusie gereed is, draait tracking op het ene regionale veld. Alleen bij
+  een echte fusiefout wordt het versste native veld als fallback getrackt.
+
+# 1.14.147 / 1.18.62
+
+- Publiceert de eerste cyclus zonder ieder nationaal radarveld opnieuw per
+  doelpersoon te segmenteren. Directe radarwaarden blijven als tijdelijke
+  statusfallback beschikbaar; celtracking start in de volgende cyclus op het
+  reeds gebouwde regionale fusieveld.
+
+# 1.14.146 / 1.18.61
+
+- Start alle werkelijk due providers op de dedicated NAS-HA in één parallelle
+  I/O-golf in plaats van golven van acht. CPU-zware radardecodering blijft
+  afzonderlijk begrensd op twee threads.
+- Voert ook RainViewer-tiledecode en vormextractie buiten de MQTT-eventloop uit
+  en logt begrensde fase-tijden voor een bronbatch.
+
+# 1.14.145 / 1.18.60
+
+- Voert de zware OPERA/HDF5-decode niet langer op de MQTT-eventloop uit.
+  OPERA deelt nu de begrensde radar-decodepool met KNMI en DWD, zodat een
+  HDF5-lock geen workerbesturing of volledige providercyclus meer blokkeert.
+- Voegt een regressietest toe die afdwingt dat OPERA via `asyncio.to_thread`
+  wordt gedecodeerd.
+
+# 1.14.145 / 1.18.59
+
+- Houdt de laatste voltooide operationele snapshot gedurende de volledige
+  toegestane vijfminutenperiode geldig, zodat een normale trage providerbatch
+  de HA-bronstatussen niet voortijdig op onbekend zet.
+- Behoudt de afzonderlijke bronversheidscontroles en workerheartbeat; echte
+  uitval en verouderde meetgegevens blijven fail-closed zichtbaar.

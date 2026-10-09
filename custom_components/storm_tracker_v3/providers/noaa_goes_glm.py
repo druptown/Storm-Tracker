@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 import h5py
 import numpy as np
 
+from ..engine.bounded_payload import iter_limited_async
 from ..engine.observation import Observation, ObservationType
 
 _LOGGER = logging.getLogger(__name__)
@@ -21,8 +22,23 @@ _LOGGER = logging.getLogger(__name__)
 SATELLITES = (18, 19)
 PRODUCT_PREFIX = "GLM-L2-LCFA"
 MAX_FILE_BYTES = 5 * 1024 * 1024
+MAX_LIST_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_FILES_PER_POLL = 12
 MAX_FLASH_AGE_S = 5 * 60
+_HTTP_CHUNK_BYTES = 64 * 1024
+
+
+async def _read_bounded_response(response, *, maximum_bytes: int) -> bytes:
+    headers = response.headers
+    encoding = headers.get("Content-Encoding")
+    if encoding and encoding.lower() != "identity":
+        raise ValueError("GOES GLM-response gebruikt onverwachte transportcompressie")
+    return await iter_limited_async(
+        response.content.iter_chunked(_HTTP_CHUNK_BYTES),
+        maximum_bytes=maximum_bytes,
+        declared_bytes=headers.get("Content-Length"),
+        require_declared_match=headers.get("Content-Length") is not None,
+    )
 
 
 def preferred_source_for_longitude(lon: float) -> str | None:
@@ -133,8 +149,9 @@ def parse_goes_flashes(payload: bytes, satellite: int) -> list[Observation]:
 class NoaaGoesGlmProvider:
     """Anonieme client voor de openbare NOAA GOES S3-buckets."""
 
-    def __init__(self, session) -> None:
+    def __init__(self, session, hass=None) -> None:
         self._session = session
+        self._hass = hass
         self._processed: set[str] = set()
         self._processed_order: deque[str] = deque()
         self.status = {18: "initializing", 19: "initializing"}
@@ -148,9 +165,14 @@ class NoaaGoesGlmProvider:
             async with self._session.get(
                 bucket,
                 params={"list-type": "2", "prefix": prefix, "max-keys": "1000"},
+                headers={"Accept-Encoding": "identity"},
             ) as response:
                 response.raise_for_status()
-                root = ET.fromstring(await response.text())
+                payload = await _read_bounded_response(
+                    response,
+                    maximum_bytes=MAX_LIST_RESPONSE_BYTES,
+                )
+                root = ET.fromstring(payload)
             keys.update(
                 node.text for node in root.findall(".//{*}Key") if node.text
             )
@@ -158,18 +180,15 @@ class NoaaGoesGlmProvider:
 
     async def _download(self, satellite: int, key: str) -> bytes:
         url = f"https://noaa-goes{satellite}.s3.amazonaws.com/{quote(key, safe='/')}"
-        chunks = []
-        total = 0
-        async with self._session.get(url) as response:
+        async with self._session.get(
+            url,
+            headers={"Accept-Encoding": "identity"},
+        ) as response:
             response.raise_for_status()
-            if response.content_length and response.content_length > MAX_FILE_BYTES:
-                raise ValueError(f"GOES GLM-bestand te groot: {response.content_length}")
-            async for chunk in response.content.iter_chunked(64 * 1024):
-                total += len(chunk)
-                if total > MAX_FILE_BYTES:
-                    raise ValueError("GOES GLM-bestand overschrijdt veiligheidslimiet")
-                chunks.append(chunk)
-        return b"".join(chunks)
+            return await _read_bounded_response(
+                response,
+                maximum_bytes=MAX_FILE_BYTES,
+            )
 
     def _remember(self, key: str) -> None:
         if key in self._processed:
@@ -206,6 +225,52 @@ class NoaaGoesGlmProvider:
         self, satellites: set[int] | None = None,
     ) -> list[Observation]:
         selected = set(SATELLITES if satellites is None else satellites)
+        if self._hass is not None:
+            try:
+                from ..worker_bridge import async_request_worker_job
+                result = await async_request_worker_job(
+                    self._hass,
+                    "goes_glm_fetch",
+                    {
+                        "satellites": sorted(selected),
+                        "processed_keys": list(self._processed_order),
+                    },
+                    timeout=55,
+                )
+                raw = result.get("observations")
+                if not isinstance(raw, list) or len(raw) > 4000:
+                    raise ValueError("ongeldig GOES GLM-workerresultaat")
+                observations = [
+                    Observation(
+                        obs_type=ObservationType.LIGHTNING,
+                        lat=float(item["lat"]), lon=float(item["lon"]),
+                        timestamp=float(item["timestamp"]),
+                        source=str(item["source"]),
+                    )
+                    for item in raw
+                    if isinstance(item, dict)
+                    and item.get("obs_type") == "lightning"
+                ]
+                if len(observations) != len(raw):
+                    raise ValueError("onvolledige GOES GLM-workerobservaties")
+                self._processed.clear()
+                self._processed_order.clear()
+                for key in result.get("processed_keys") or ():
+                    self._remember(str(key))
+                statuses = result.get("status") or {}
+                for satellite in SATELLITES:
+                    self.status[satellite] = str(
+                        statuses.get(str(satellite), "standby")
+                    )
+                return observations
+            except Exception as err:
+                for satellite in selected:
+                    self.status[satellite] = "error"
+                _LOGGER.warning(
+                    "GOES GLM-workerfout; lokale verwerking blijft uit: %s",
+                    err,
+                )
+                return []
         for satellite in SATELLITES:
             if satellite not in selected:
                 self.status[satellite] = "standby"

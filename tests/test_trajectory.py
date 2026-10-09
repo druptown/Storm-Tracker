@@ -58,9 +58,13 @@ def test_predictably_curved_track_selects_constant_acceleration(
     assert result.acceleration_kmh2 == pytest.approx(80.0, rel=0.08)
     assert result.prediction_error_km < result.linear_prediction_error_km
     assert result.fit_quality > 0.95
+    assert abs(result.turn_rate_deg_per_hour) >= 5.0
+    assert result.is_curved is True
 
 
-def test_implausible_acceleration_is_rejected(trajectory_module):
+def test_high_acceleration_is_selected_when_hindcast_supports_it(
+    trajectory_module,
+):
     points = [
         _point(
             51.0,
@@ -75,4 +79,22 @@ def test_implausible_acceleration_is_rejected(trajectory_module):
     result = trajectory_module.fit_adaptive_trajectory(points)
 
     assert result is not None
+    assert result.model == "constant_acceleration"
+    assert result.acceleration_kmh2 > 160.0
+    assert result.speed_at(90.0) > 180.0
+    assert result.prediction_error_km < result.linear_prediction_error_km
+
+
+def test_isolated_centroid_jump_is_rejected(trajectory_module):
+    points = [
+        _point(51.0, 4.0, index * 300.0, index * 4.0, 0.0)
+        for index in range(8)
+    ]
+    points[4] = _point(51.0, 4.0, 4 * 300.0, 55.0, 35.0)
+
+    result = trajectory_module.fit_adaptive_trajectory(points)
+
+    assert result is not None
     assert result.model == "linear"
+    assert result.outliers_rejected == 1
+    assert result.speed_kmh == pytest.approx(48.0, rel=0.08)

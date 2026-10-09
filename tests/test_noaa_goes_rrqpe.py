@@ -41,11 +41,13 @@ def test_goes_satellite_selection(noaa_goes_rrqpe_module):
     assert module.satellite_for_longitude(120) is None
 
 
-def test_goes_decode_is_offloaded_from_home_assistant_event_loop():
+def test_goes_decode_is_owned_by_worker_in_live_home_assistant():
     source = Path(
         "custom_components/storm_tracker_v3/providers/noaa_goes_rrqpe.py"
     ).read_text(encoding="utf-8")
-    assert "sat_obs, overlay = await asyncio.to_thread(" in source
+    assert '"goes_rrqpe_fetch"' in source
+    assert "if self._hass is not None:" in source
+    assert "lokale verwerking blijft uit" in source
 
 
 def test_goes_rrqpe_decodes_real_projection(noaa_goes_rrqpe_module, base_module):

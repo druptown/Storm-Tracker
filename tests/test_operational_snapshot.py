@@ -860,6 +860,18 @@ def test_mark_worker_offline_atomically_removes_every_weather_claim():
     assert cache.snapshot_sha256 == original_digest
 
 
+@pytest.mark.parametrize(
+    "status",
+    ["candidate", "confirmed", "coasting", "current", "ended", "cancelled", "indeterminate"],
+)
+def test_scientific_passage_statuses_survive_snapshot_validation(status):
+    snapshot = _snapshot()
+    snapshot["targets"]["items"][0]["next_threat"]["passage_status"] = status
+    assert contract.validate_snapshot(snapshot)["targets"]["items"][0][
+        "next_threat"
+    ]["passage_status"] == status
+
+
 def test_monotonic_expiry_compare_and_swap_cannot_touch_another_cache_head():
     cache = contract.OperationalSnapshotCache()
     cache.apply_snapshot(_snapshot(1))

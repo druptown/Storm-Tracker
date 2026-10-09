@@ -38,4 +38,69 @@ def test_history_replaces_the_same_minute_and_remains_bounded(radar_frame_module
     diagnostics = history.diagnostics()
     assert diagnostics["regions"]["region-1"]["frames"] == 3
     assert diagnostics["regions"]["region-1"]["latest_nominal_timestamp"] == 1_380
-    assert diagnostics["feeds_detection"] is False
+    assert diagnostics["feeds_detection"] is True
+
+
+def test_recent_serialized_frames_survive_restart(radar_frame_module):
+    bounds = (3.9, 49.9, 4.1, 50.1)
+    original = radar_frame_module.RadarFrameHistory(max_frames=3)
+    for timestamp in (1_200, 1_800, 2_400):
+        original.add_overlay(
+            "region-1", _overlay(timestamp, source="rainviewer", runs=[_run()]),
+            bounds,
+        )
+    restored = radar_frame_module.RadarFrameHistory(max_frames=3)
+    count = restored.restore(
+        original.serialized(),
+        {"region-1": bounds},
+        now=2_460,
+    )
+
+    assert count == 3
+    assert restored.frames("region-1") == original.frames("region-1")
+
+
+def test_restore_rejects_stale_or_changed_region_grid(radar_frame_module):
+    bounds = (3.9, 49.9, 4.1, 50.1)
+    original = radar_frame_module.RadarFrameHistory(max_frames=3)
+    original.add_overlay(
+        "region-1", _overlay(1_200, source="rainviewer", runs=[_run()]),
+        bounds,
+    )
+    restored = radar_frame_module.RadarFrameHistory(max_frames=3)
+
+    assert restored.restore(
+        original.serialized(),
+        {"region-1": (4.0, 50.0, 4.2, 50.2)},
+        now=1_260,
+    ) == 0
+    assert restored.restore(
+        original.serialized(),
+        {"region-1": bounds},
+        now=10_000,
+    ) == 0
+
+
+def test_restart_audit_detects_missing_and_restored_storm_object(
+    radar_frame_module,
+):
+    frame = radar_frame_module.frame_from_overlay(
+        _overlay(1_200, source="rainviewer", runs=[_run()]),
+        (3.9, 49.9, 4.1, 50.1),
+    )
+
+    missing = radar_frame_module.audit_storm_object_recovery((frame,), [])
+    assert missing["status"] == "ontbrekend_stormobject"
+
+    class RestoredStorm:
+        storm_id = "continued"
+        last_radar_timestamp = 1_190
+
+    restored = radar_frame_module.audit_storm_object_recovery(
+        (frame,), [RestoredStorm()]
+    )
+    assert restored == {
+        "status": "hersteld",
+        "latest_cached_frame": 1_200.0,
+        "matched_storm_ids": ["continued"],
+    }

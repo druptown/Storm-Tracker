@@ -29,6 +29,7 @@ class TrajectoryEstimate:
     prediction_error_km: float
     linear_prediction_error_km: float
     model_gain: float
+    outliers_rejected: int = 0
 
     @property
     def speed_kmh(self) -> float:
@@ -48,6 +49,37 @@ class TrajectoryEstimate:
             self.acceleration_east_kmh2,
             self.acceleration_north_kmh2,
         )
+
+    @property
+    def turn_rate_deg_per_hour(self) -> float:
+        """Signed heading change over the next hour."""
+        if self.speed_kmh < 1.0:
+            return 0.0
+        future_east = self.velocity_east_kmh + self.acceleration_east_kmh2
+        future_north = self.velocity_north_kmh + self.acceleration_north_kmh2
+        if math.hypot(future_east, future_north) < 1.0:
+            return 0.0
+        current = math.degrees(math.atan2(
+            self.velocity_east_kmh, self.velocity_north_kmh
+        ))
+        future = math.degrees(math.atan2(future_east, future_north))
+        return (future - current + 180.0) % 360.0 - 180.0
+
+    @property
+    def is_curved(self) -> bool:
+        return (
+            self.model == "constant_acceleration"
+            and abs(self.turn_rate_deg_per_hour) >= 5.0
+            and self.model_gain >= 0.10
+        )
+
+    @property
+    def curvature_radius_km(self) -> float | None:
+        """Approximate instantaneous turn radius; None means effectively straight."""
+        turn_rate = abs(math.radians(self.turn_rate_deg_per_hour))
+        if turn_rate < math.radians(1.0) or self.speed_kmh < 1.0:
+            return None
+        return self.speed_kmh / turn_rate
 
     def displacement_km(self, minutes: float) -> tuple[float, float]:
         """Geef oost/noord-verplaatsing vanaf de huidige positie."""
@@ -73,13 +105,20 @@ def fit_adaptive_trajectory(
     """Pas lineair en constant-versneld model en kies via hindcastfout.
 
     Een parabool krijgt alleen voorrang wanneer voldoende historie beschikbaar
-    is, de afgeleide snelheden meteorologisch plausibel blijven en de laatste
-    waarnemingen aantoonbaar beter worden voorspeld dan door een rechte baan.
+    is en de laatste waarnemingen aantoonbaar beter worden voorspeld dan door
+    een rechte baan. Snelheid of versnelling krijgt bewust geen vaste
+    meteorologische afkeurgrens; de gemeten posities en hindcastvaardigheid zijn
+    de evidence.
     """
     points = sorted(history, key=lambda item: item.ts)
     if len(points) < 2:
         return None
     points = _deduplicate_timestamps(points)
+    if len(points) < 2:
+        return None
+    raw_count = len(points)
+    points = _reject_position_outliers(points)
+    rejected = raw_count - len(points)
     if len(points) < 2:
         return None
 
@@ -108,19 +147,10 @@ def fit_adaptive_trajectory(
         accelerated = _fit_model(samples, degree=2)
         accelerated_error = _rolling_prediction_error(samples, degree=2)
         if accelerated is not None:
-            acceleration = math.hypot(
-                2.0 * accelerated[0][2],
-                2.0 * accelerated[1][2],
-            )
-            future_speed = math.hypot(
-                accelerated[0][1] + 2.0 * accelerated[0][2] * 1.5,
-                accelerated[1][1] + 2.0 * accelerated[1][2] * 1.5,
-            )
             improvement = (
                 (linear_error - accelerated_error) / max(linear_error, 0.1)
             )
             fit_improvement = accelerated[2] - linear[2]
-            plausible = acceleration <= 160.0 and future_speed <= 180.0
             demonstrably_better = (
                 accelerated_error + 0.25 < linear_error * 0.85
                 or (
@@ -128,7 +158,7 @@ def fit_adaptive_trajectory(
                     and fit_improvement >= 0.12
                 )
             )
-            if plausible and demonstrably_better:
+            if demonstrably_better:
                 selected = accelerated
                 selected_degree = 2
                 selected_error = accelerated_error
@@ -147,7 +177,45 @@ def fit_adaptive_trajectory(
         prediction_error_km=selected_error,
         linear_prediction_error_km=linear_error,
         model_gain=model_gain,
+        outliers_rejected=rejected,
     )
+
+
+def _reject_position_outliers(points: list[PositionPoint]) -> list[PositionPoint]:
+    """Reject isolated centroid jumps using a robust linear residual envelope."""
+    if len(points) < 6:
+        return points
+    origin = points[-1]
+    cos_lat = max(0.05, math.cos(math.radians(origin.lat)))
+    samples = [
+        (
+            (point.ts - origin.ts) / 3600.0,
+            (point.lon - origin.lon) * 111.32 * cos_lat,
+            (point.lat - origin.lat) * 110.574,
+        )
+        for point in points
+    ]
+    fitted = _fit_model(samples, degree=1)
+    if fitted is None:
+        return points
+    east, north, _ = fitted
+    residuals = [
+        math.hypot(
+            sample[1] - _evaluate(east, sample[0]),
+            sample[2] - _evaluate(north, sample[0]),
+        )
+        for sample in samples
+    ]
+    ordered = sorted(residuals)
+    median = ordered[len(ordered) // 2]
+    deviations = sorted(abs(value - median) for value in residuals)
+    mad = deviations[len(deviations) // 2]
+    threshold = max(3.0, median + 3.5 * max(mad, 0.25))
+    kept = [
+        point for point, residual in zip(points, residuals)
+        if residual <= threshold
+    ]
+    return kept if len(kept) >= 5 else points
 
 
 def _deduplicate_timestamps(points: list[PositionPoint]) -> list[PositionPoint]:

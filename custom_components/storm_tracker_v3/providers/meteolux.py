@@ -1,9 +1,27 @@
 """Publieke MeteoLux-nowcast als lokale validatiebron."""
 from __future__ import annotations
 
+import json
+
+from ..engine.bounded_payload import iter_limited_async
 from .base import Capability, CoverageResult
 
 URL = "https://metapi.ana.lu/api/v1/metapp/weather"
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+_HTTP_CHUNK_BYTES = 64 * 1024
+
+
+async def _read_bounded_response(response, *, maximum_bytes: int) -> bytes:
+    headers = response.headers
+    encoding = headers.get("Content-Encoding")
+    if encoding and encoding.lower() != "identity":
+        raise ValueError("MeteoLux-response gebruikt onverwachte transportcompressie")
+    return await iter_limited_async(
+        response.content.iter_chunked(_HTTP_CHUNK_BYTES),
+        maximum_bytes=maximum_bytes,
+        declared_bytes=headers.get("Content-Length"),
+        require_declared_match=headers.get("Content-Length") is not None,
+    )
 
 
 class MeteoLuxProvider:
@@ -27,8 +45,20 @@ class MeteoLuxProvider:
     async def async_fetch(self):
         snapshots = []
         for area in self._areas:
-            async with self._session.get(URL, params={"langcode": "en", "lat": area.center_lat, "long": area.center_lon}) as response:
+            async with self._session.get(
+                URL,
+                params={
+                    "langcode": "en",
+                    "lat": area.center_lat,
+                    "long": area.center_lon,
+                },
+                headers={"Accept-Encoding": "identity"},
+            ) as response:
                 response.raise_for_status()
-                snapshots.append(await response.json())
+                raw = await _read_bounded_response(
+                    response,
+                    maximum_bytes=MAX_RESPONSE_BYTES,
+                )
+                snapshots.append(json.loads(raw.decode("utf-8")))
         self.diagnostics = {"areas_queried": len(snapshots), "source_role": "validation_only", "official_api": URL}
         return []

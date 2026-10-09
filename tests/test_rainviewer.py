@@ -74,6 +74,147 @@ def test_extract_observations_from_synthetic_tile(rainviewer_module):
     assert provider.overlay["runs"]
 
 
+def _radar_observation(observation_module, cell_id, lat, lon, area, footprint):
+    return observation_module.Observation(
+        obs_type=observation_module.ObservationType.RADAR,
+        lat=lat,
+        lon=lon,
+        timestamp=1_700_000_000.0,
+        intensity=3,
+        area_km2=area,
+        footprint_points=footprint,
+        radar_cell_id=cell_id,
+        parent_system_id=cell_id,
+        parent_area_km2=area,
+        parent_footprint_points=footprint,
+        source="rainviewer",
+    )
+
+
+def test_group_frame_systems_merges_adjacent_tile_components(
+    rainviewer_module, observation_module
+):
+    first = _radar_observation(
+        observation_module, "rainviewer:1700000000:t16_10:c0", 50.0, 4.00, 20.0,
+        ((49.98, 3.98), (50.00, 4.04)),
+    )
+    second = _radar_observation(
+        observation_module, "rainviewer:1700000000:t17_10:c0", 50.0, 4.08, 30.0,
+        ((50.00, 4.05), (50.02, 4.11)),
+    )
+
+    grouped = rainviewer_module.group_frame_systems(
+        [first, second], 1_700_000_000.0, max_gap_km=3.0
+    )
+
+    assert grouped[0].parent_system_id == grouped[1].parent_system_id
+    assert grouped[0].parent_area_km2 == pytest.approx(50.0)
+    assert grouped[1].parent_area_km2 == pytest.approx(50.0)
+    assert len(grouped[0].parent_footprint_points) == 4
+
+
+def test_group_frame_systems_preserves_each_component_polygon(
+    rainviewer_module, observation_module
+):
+    first = _radar_observation(
+        observation_module,
+        "rainviewer:1700000000:t16_10:c0",
+        50.0,
+        4.00,
+        20.0,
+        ((49.98, 3.98), (49.98, 4.04), (50.02, 4.04), (49.98, 3.98)),
+    )
+    second = _radar_observation(
+        observation_module,
+        "rainviewer:1700000000:t17_10:c0",
+        50.0,
+        4.08,
+        30.0,
+        ((49.98, 4.05), (49.98, 4.11), (50.02, 4.11), (49.98, 4.05)),
+    )
+    first.footprint_polygons = ((first.footprint_points,),)
+    second.footprint_polygons = ((second.footprint_points,),)
+
+    grouped = rainviewer_module.group_frame_systems(
+        [first, second],
+        1_700_000_000.0,
+        max_gap_km=3.0,
+    )
+
+    assert len(grouped[0].parent_footprint_polygons) == 2
+    assert (
+        grouped[0].parent_footprint_polygons
+        == grouped[1].parent_footprint_polygons
+    )
+
+
+def test_group_frame_systems_keeps_distant_weather_separate(
+    rainviewer_module, observation_module
+):
+    first = _radar_observation(
+        observation_module, "rainviewer:1700000000:t16_10:c0", 50.0, 4.0, 20.0, ((50.0, 4.0),)
+    )
+    second = _radar_observation(
+        observation_module, "rainviewer:1700000000:t17_10:c0", 50.0, 5.0, 30.0, ((50.0, 5.0),)
+    )
+
+    grouped = rainviewer_module.group_frame_systems(
+        [first, second], 1_700_000_000.0
+    )
+
+    assert grouped[0].parent_system_id != grouped[1].parent_system_id
+
+
+def test_group_frame_system_ids_are_deterministic(
+    rainviewer_module, observation_module
+):
+    def build(reverse):
+        observations = [
+            _radar_observation(
+                observation_module, "rainviewer:1700000000:t17_10:c0", 50.0, 4.08, 30.0,
+                ((50.0, 4.05),),
+            ),
+            _radar_observation(
+                observation_module, "rainviewer:1700000000:t16_10:c0", 50.0, 4.00, 20.0,
+                ((50.0, 4.04),),
+            ),
+        ]
+        return rainviewer_module.group_frame_systems(
+            list(reversed(observations)) if reverse else observations,
+            1_700_000_000.0,
+            max_gap_km=3.0,
+        )
+
+    forward = {
+        item.radar_cell_id: item.parent_system_id for item in build(False)
+    }
+    reverse = {
+        item.radar_cell_id: item.parent_system_id for item in build(True)
+    }
+    assert forward == reverse
+
+
+def test_merge_frame_systems_emits_one_area_weighted_position(
+    rainviewer_module, observation_module
+):
+    first = _radar_observation(
+        observation_module, "rainviewer:1700000000:t16_10:c0", 50.0, 4.00, 20.0, ((50.0, 4.04),)
+    )
+    second = _radar_observation(
+        observation_module, "rainviewer:1700000000:t17_10:c0", 50.0, 4.10, 30.0, ((50.0, 4.05),)
+    )
+
+    merged = rainviewer_module.merge_frame_systems(
+        [first, second], 1_700_000_000.0, max_gap_km=3.0
+    )
+
+    assert len(merged) == 1
+    assert merged[0].lat == pytest.approx(50.0)
+    assert merged[0].lon == pytest.approx(4.06)
+    assert merged[0].area_km2 == pytest.approx(50.0)
+    assert merged[0].radar_cell_id == merged[0].parent_system_id
+
+
 def test_opaque_grey_pixels_do_not_count_as_rain(rainviewer_module):
     assert rainviewer_module._universal_blue_intensity(200, 200, 200, 255) == 0
 
@@ -98,7 +239,9 @@ def test_extract_observations_all_dry_gives_empty_list(rainviewer_module):
     assert obs == []
 
 
-def test_same_frame_reuses_last_observations(rainviewer_module, observation_module):
+def test_same_frame_reuses_last_observations(
+    rainviewer_module, observation_module, monkeypatch
+):
     async def _run():
         provider = rainviewer_module.RainViewerProvider(48.3904, -4.4861)
         calls = 0
@@ -126,7 +269,7 @@ def test_same_frame_reuses_last_observations(rainviewer_module, observation_modu
 
         provider._fetch_latest_frame = _frame
         provider._fetch_tile_observations = _observations
-        rainviewer_module.time.time = lambda: 1_100.0
+        monkeypatch.setattr(rainviewer_module.time, "time", lambda: 1_100.0)
         first = await provider.fetch_observations()
         second = await provider.fetch_observations()
         return first, second, calls, provider.diagnostics
@@ -138,7 +281,7 @@ def test_same_frame_reuses_last_observations(rainviewer_module, observation_modu
     assert diagnostics["last_frame_ts"] == 1_000.0
 
 
-def test_stale_frame_is_rejected(rainviewer_module):
+def test_stale_frame_is_rejected(rainviewer_module, monkeypatch):
     async def _run():
         provider = rainviewer_module.RainViewerProvider(51.026, 4.478)
 
@@ -152,7 +295,7 @@ def test_stale_frame_is_rejected(rainviewer_module):
 
         provider._fetch_latest_frame = _frame
         provider._fetch_tile_observations = _must_not_fetch
-        rainviewer_module.time.time = lambda: 2_201.0
+        monkeypatch.setattr(rainviewer_module.time, "time", lambda: 2_201.0)
         observations = await provider.fetch_observations()
         return observations, provider.diagnostics
 

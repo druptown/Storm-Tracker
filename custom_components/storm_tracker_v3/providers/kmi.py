@@ -10,7 +10,9 @@ Versiegeschiedenis:
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
 import logging
 import math
 from datetime import datetime
@@ -18,6 +20,7 @@ from typing import Optional
 
 import aiohttp
 
+from ..engine.bounded_payload import iter_limited_async
 from ..engine.observation import Observation, ObservationType
 from .raster_components import extract_components, extract_intensity_runs
 
@@ -28,12 +31,28 @@ KMI_SECRET    = "r9EnW374jkJ9acc"
 KMI_UA        = "be.meteo.app"
 KMI_TIMEOUT_S = 15
 KMI_IMG_SIZE  = 512   # pixels van het radarplaatje
+KMI_FORECAST_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+KMI_RADAR_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+_HTTP_CHUNK_BYTES = 64 * 1024
 
 # Geo-grenzen van het KMI radarplaatje
 KMI_LAT_TOP    = 53.0
 KMI_LAT_BOTTOM = 46.5
 KMI_LON_LEFT   = -2.5
 KMI_LON_RIGHT  = 10.5
+
+
+async def _read_bounded_response(response, *, maximum_bytes: int) -> bytes:
+    """Lees één ongecomprimeerde HTTP-body onder een expliciet bytecontract."""
+    encoding = response.headers.get("Content-Encoding")
+    if encoding and encoding.lower() != "identity":
+        raise ValueError("KMI-response gebruikt onverwachte transportcompressie")
+    return await iter_limited_async(
+        response.content.iter_chunked(_HTTP_CHUNK_BYTES),
+        maximum_bytes=maximum_bytes,
+        declared_bytes=response.headers.get("Content-Length"),
+        require_declared_match=True,
+    )
 
 
 def _kmi_key(service: str) -> str:
@@ -88,9 +107,10 @@ class KmiProvider:
     Alle natte pixels → RADAR Observations met hun werkelijke lat/lon.
     """
 
-    def __init__(self, lat: float, lon: float) -> None:
+    def __init__(self, lat: float, lon: float, hass=None) -> None:
         self._lat = lat
         self._lon = lon
+        self._hass = hass
         self._last_uri:  Optional[str]   = None
         self._last_ww:   int              = 0
         self._last_ww_ts: str             = ""
@@ -101,6 +121,35 @@ class KmiProvider:
 
     async def fetch_observations(self) -> list[Observation]:
         self.last_fetch_updated = False
+        if self._hass is not None:
+            try:
+                from ..worker_radar_client import async_fetch_worker_radar
+
+                observations, overlay, diagnostics, artifact = await async_fetch_worker_radar(
+                    self._hass,
+                    "kmi_fetch",
+                    {"center_lat": self._lat, "center_lon": self._lon},
+                    provider="kmi",
+                    timeout=60,
+                    max_age_seconds=20 * 60,
+                )
+                frame_timestamp = float(overlay["timestamp"])
+                if frame_timestamp == self.last_frame_timestamp:
+                    return []
+                self.last_frame_timestamp = frame_timestamp
+                self.overlay = overlay
+                self.last_worker_artifact = artifact
+                self._last_ww = int(diagnostics.get("ww") or 0)
+                self._last_ww_ts = str(diagnostics.get("weather_timestamp") or "")
+                self._last_temp = diagnostics.get("temperature")
+                self.last_fetch_updated = True
+                return observations
+            except Exception as err:
+                _LOGGER.warning(
+                    "KMI-worker niet beschikbaar; lokale decode is bewust uitgeschakeld: %s",
+                    err,
+                )
+                return []
         try:
             # Stap 1: haal animatiesequentie op voor locatie
             url = (
@@ -108,7 +157,7 @@ class KmiProvider:
                 f"&k={_kmi_key('getForecasts')}"
                 f"&lat={self._lat}&long={self._lon}"
             )
-            headers = {"User-Agent": KMI_UA}
+            headers = {"Accept-Encoding": "identity", "User-Agent": KMI_UA}
 
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=KMI_TIMEOUT_S)
@@ -117,7 +166,11 @@ class KmiProvider:
                     if resp.status != 200:
                         _LOGGER.warning("KmiProvider: %d", resp.status)
                         return []
-                    data = await resp.json(content_type=None)
+                    raw = await _read_bounded_response(
+                        resp,
+                        maximum_bytes=KMI_FORECAST_MAX_RESPONSE_BYTES,
+                    )
+                    data = json.loads(raw.decode("utf-8"))
 
             # Weercode uitlezen uit huidige observatie
             obs = data.get("obs", {})
@@ -154,10 +207,15 @@ class KmiProvider:
                     if resp.status != 200:
                         _LOGGER.warning("KmiProvider: image %d voor %s", resp.status, uri)
                         return []
-                    image_data = await resp.read()
+                    image_data = await _read_bounded_response(
+                        resp,
+                        maximum_bytes=KMI_RADAR_MAX_RESPONSE_BYTES,
+                    )
 
-            observations = self._extract_observations(
-                image_data, self.last_frame_timestamp
+            observations = await asyncio.to_thread(
+                self._extract_observations,
+                image_data,
+                self.last_frame_timestamp,
             )
             self.last_fetch_updated = True
             return observations
@@ -218,10 +276,12 @@ class KmiProvider:
                     area_km2=area_km2,
                     quality=0.95,
                     footprint_points=component.boundary,
+                    footprint_polygons=component.polygons,
                     radar_cell_id=component_id,
                     parent_system_id=component_id,
                     parent_area_km2=area_km2,
                     parent_footprint_points=component.boundary,
+                    parent_footprint_polygons=component.polygons,
                     source="kmi",
                 ))
 

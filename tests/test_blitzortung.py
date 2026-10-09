@@ -1,6 +1,7 @@
 """Storm Tracker V3 — tests/test_blitzortung.py v0.1.0"""
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 
@@ -12,7 +13,7 @@ def test_handle_message_valid_payload_calls_callback(blitzortung_module):
     provider = blitzortung_module.BlitzortungProvider(on_observation=lambda obs: received.append(obs))
 
     payload = json.dumps({"lat": 51.026, "lon": 4.478, "time": 1_700_000_000_000_000_000}).encode()
-    provider._handle_message(payload)
+    asyncio.run(provider._handle_message(payload))
 
     assert len(received) == 1
     obs = received[0]
@@ -28,14 +29,16 @@ def test_handle_message_missing_lat_lon_is_ignored(blitzortung_module):
     provider = blitzortung_module.BlitzortungProvider(on_observation=lambda obs: received.append(obs))
 
     payload = json.dumps({"time": 1_700_000_000_000_000_000}).encode()  # geen lat/lon
-    provider._handle_message(payload)
+    asyncio.run(provider._handle_message(payload))
 
     assert received == []
 
 
 def test_handle_message_invalid_json_does_not_raise(blitzortung_module):
     provider = blitzortung_module.BlitzortungProvider(on_observation=lambda obs: None)
-    provider._handle_message(b"dit is geen geldige JSON")  # mag geen exception geven
+    asyncio.run(
+        provider._handle_message(b"dit is geen geldige JSON")
+    )  # mag geen exception geven
 
 
 def test_handle_message_missing_time_falls_back_to_now(blitzortung_module):
@@ -44,11 +47,29 @@ def test_handle_message_missing_time_falls_back_to_now(blitzortung_module):
 
     payload = json.dumps({"lat": 51.0, "lon": 4.0}).encode()  # geen 'time'
     before = time.time()
-    provider._handle_message(payload)
+    asyncio.run(provider._handle_message(payload))
     after = time.time()
 
     assert len(received) == 1
     assert before <= received[0].timestamp <= after
+
+
+def test_async_callback_finishes_before_message_is_considered_handled(
+    blitzortung_module,
+):
+    events = []
+
+    async def on_observation(_observation):
+        events.append("started")
+        await asyncio.sleep(0)
+        events.append("persisted")
+
+    provider = blitzortung_module.BlitzortungProvider(
+        on_observation=on_observation
+    )
+    payload = json.dumps({"lat": 51.0, "lon": 4.0}).encode()
+    asyncio.run(provider._handle_message(payload))
+    assert events == ["started", "persisted"]
 
 
 def test_blitzortung_factory_always_supports(blitzortung_module):

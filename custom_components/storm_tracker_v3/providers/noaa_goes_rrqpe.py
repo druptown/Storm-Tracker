@@ -14,6 +14,7 @@ import h5py
 import numpy as np
 from pyproj import CRS, Transformer
 
+from ..engine.bounded_payload import iter_limited_async
 from ..engine.observation import Observation, ObservationType
 from .odim_hdf5 import rain_rate_to_intensity
 from .raster_components import extract_components, extract_intensity_runs
@@ -23,9 +24,24 @@ _LOGGER = logging.getLogger(__name__)
 SATELLITES = (18, 19)
 PRODUCT_PREFIX = "ABI-L2-RRQPEF"
 MAX_FILE_BYTES = 8 * 1024 * 1024
+MAX_LIST_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_FRAME_AGE_SECONDS = 45 * 60
 POLL_INTERVAL_SECONDS = 10 * 60
 MIN_RAIN_RATE = 0.1
+_HTTP_CHUNK_BYTES = 64 * 1024
+
+
+async def _read_bounded_response(response, *, maximum_bytes: int) -> bytes:
+    """Lees één ongecomprimeerde HTTP-body onder een expliciet bytecontract."""
+    encoding = response.headers.get("Content-Encoding")
+    if encoding and encoding.lower() != "identity":
+        raise ValueError("GOES-response gebruikt onverwachte transportcompressie")
+    return await iter_limited_async(
+        response.content.iter_chunked(_HTTP_CHUNK_BYTES),
+        maximum_bytes=maximum_bytes,
+        declared_bytes=response.headers.get("Content-Length"),
+        require_declared_match=True,
+    )
 
 
 def satellite_for_longitude(lon: float) -> int | None:
@@ -164,9 +180,12 @@ def parse_rrqpe_netcdf(payload: bytes, satellite: int, areas: tuple, *, now=None
                     obs_type=ObservationType.RADAR, lat=lat, lon=lon,
                     timestamp=timestamp, intensity=component.max_intensity,
                     area_km2=area_km2, quality=0.9,
-                    footprint_points=component.boundary, radar_cell_id=cell_id,
+                    footprint_points=component.boundary,
+                    footprint_polygons=component.polygons,
+                    radar_cell_id=cell_id,
                     parent_system_id=cell_id, parent_area_km2=area_km2,
                     parent_footprint_points=component.boundary,
+                    parent_footprint_polygons=component.polygons,
                     source="noaa_goes_rrqpe",
                 ))
     return observations, {"source": "noaa_goes_rrqpe", "timestamp": timestamp, "runs": runs}
@@ -177,8 +196,9 @@ class NoaaGoesRrqpeProvider:
 
     plugin_id = "noaa_goes_rrqpe"
 
-    def __init__(self, session):
+    def __init__(self, session, *, hass=None):
         self._session = session
+        self._hass = hass
         self._cache = {}
         self._last_poll_attempt = {}
         self._last_success_ts = None
@@ -192,9 +212,21 @@ class NoaaGoesRrqpeProvider:
         bucket = f"https://noaa-goes{satellite}.s3.amazonaws.com/"
         for moment in (now - timedelta(hours=1), now):
             prefix = f"{PRODUCT_PREFIX}/{moment.year}/{moment.timetuple().tm_yday:03d}/{moment.hour:02d}/"
-            async with self._session.get(bucket, params={"list-type": "2", "prefix": prefix, "max-keys": "100"}) as response:
+            async with self._session.get(
+                bucket,
+                params={
+                    "list-type": "2",
+                    "prefix": prefix,
+                    "max-keys": "100",
+                },
+                headers={"Accept-Encoding": "identity"},
+            ) as response:
                 response.raise_for_status()
-                root = ET.fromstring(await response.text())
+                payload = await _read_bounded_response(
+                    response,
+                    maximum_bytes=MAX_LIST_RESPONSE_BYTES,
+                )
+                root = ET.fromstring(payload)
             keys.extend(node.text for node in root.findall(".//{*}Key") if node.text)
         if not keys:
             raise ValueError(f"GOES-{satellite} RRQPE bevat geen recent frame")
@@ -202,14 +234,15 @@ class NoaaGoesRrqpeProvider:
 
     async def _download(self, satellite: int, key: str) -> bytes:
         url = f"https://noaa-goes{satellite}.s3.amazonaws.com/{quote(key, safe='/')}"
-        async with self._session.get(url) as response:
+        async with self._session.get(
+            url,
+            headers={"Accept-Encoding": "identity"},
+        ) as response:
             response.raise_for_status()
-            if response.content_length and response.content_length > MAX_FILE_BYTES:
-                raise ValueError("GOES RRQPE-bestand te groot")
-            payload = await response.read()
-        if len(payload) > MAX_FILE_BYTES:
-            raise ValueError("GOES RRQPE-bestand te groot")
-        return payload
+            return await _read_bounded_response(
+                response,
+                maximum_bytes=MAX_FILE_BYTES,
+            )
 
     async def async_fetch(self, areas: tuple):
         selected = {sat: tuple(area for area in areas if satellite_for_longitude(area.center_lon) == sat) for sat in SATELLITES}
@@ -219,6 +252,53 @@ class NoaaGoesRrqpeProvider:
             return []
         observations, overlays, downloaded = [], [], 0
         now = time.time()
+        if self._hass is not None:
+            try:
+                from ..worker_radar_client import async_fetch_worker_radar
+
+                worker_observations, overlay, diagnostics, artifact = (
+                    await async_fetch_worker_radar(
+                        self._hass,
+                        "goes_rrqpe_fetch",
+                        {
+                            "areas": [
+                                {
+                                    "center_lat": area.center_lat,
+                                    "center_lon": area.center_lon,
+                                    "horizon_km": area.horizon_km,
+                                }
+                                for values in selected.values()
+                                for area in values
+                            ]
+                        },
+                        provider="noaa_goes_rrqpe",
+                        timeout=80,
+                        max_age_seconds=MAX_FRAME_AGE_SECONDS,
+                    )
+                )
+                self.overlay = overlay
+                self.last_worker_artifact = artifact
+                self._last_success_ts = time.time()
+                self.healthy = True
+                self.diagnostics = {
+                    "status": "active",
+                    "observations": len(worker_observations),
+                    "transport": "worker",
+                    **diagnostics,
+                }
+                return list(worker_observations)
+            except Exception as err:
+                self.healthy = False
+                self.diagnostics = {
+                    "status": "error",
+                    "error": str(err),
+                    "transport": "worker",
+                }
+                _LOGGER.warning(
+                    "GOES RRQPE-workerfout; lokale verwerking blijft uit: %s",
+                    err,
+                )
+                return []
         try:
             for satellite, satellite_areas in selected.items():
                 signature = tuple((round(a.center_lat, 3), round(a.center_lon, 3), round(a.horizon_km, 1)) for a in satellite_areas)

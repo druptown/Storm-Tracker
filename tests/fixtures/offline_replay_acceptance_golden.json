@@ -1,0 +1,62 @@
+{
+  "artifacts": [
+    {
+      "artifact_id": "synthetic-annotation-protocol",
+      "media_type": "application/json",
+      "role": "annotation_protocol",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "size_bytes": 101
+    },
+    {
+      "artifact_id": "synthetic-event-split",
+      "media_type": "application/json",
+      "role": "event_split_manifest",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "size_bytes": 202
+    },
+    {
+      "artifact_id": "synthetic-golden-label-commitment",
+      "media_type": "application/json",
+      "role": "golden_label_commitment",
+      "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "size_bytes": 303
+    },
+    {
+      "artifact_id": "synthetic-raw-input-manifest",
+      "media_type": "application/json",
+      "role": "raw_input_manifest",
+      "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "size_bytes": 404
+    }
+  ],
+  "contract_id": "synthetic-heldout-golden-schema-fixture",
+  "contract_version": "stv3-offline-heldout-golden-input-v1",
+  "corpus_id": "synthetic-heldout-golden-corpus",
+  "external_truth_context_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "frames": [
+    {
+      "event_id": "synthetic-event-a",
+      "frame_id": "synthetic-event-a-frame-000",
+      "raw_frame_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0",
+      "valid_time_utc": 1800000000.0
+    },
+    {
+      "event_id": "synthetic-event-a",
+      "frame_id": "synthetic-event-a-frame-001",
+      "raw_frame_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1",
+      "valid_time_utc": 1800000300.0
+    },
+    {
+      "event_id": "synthetic-event-a",
+      "frame_id": "synthetic-event-a-frame-002",
+      "raw_frame_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2",
+      "valid_time_utc": 1800000600.0
+    }
+  ],
+  "golden_consensus_confirmed": true,
+  "label_sources_candidate_independent": true,
+  "labels_blinded_to_candidate": true,
+  "partition": "test",
+  "scientific_manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "split_policy_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+}

@@ -4,7 +4,7 @@ from __future__ import annotations
 from homeassistant.components.http import HomeAssistantView
 
 from .const import DOMAIN
-from .engine.geojson import build_feature_collection
+from .geojson_http_payload import with_radar_overlays
 
 
 class StormTrackerGeoJsonView(HomeAssistantView):
@@ -19,14 +19,19 @@ class StormTrackerGeoJsonView(HomeAssistantView):
 
     async def get(self, request):
         data = self._hass.data.get(DOMAIN, {})
-        manager = data.get("storm_manager")
-        collection = build_feature_collection(
-            data.get("targets", {}),
-            manager.get_all_engines() if manager else [],
-            active_radar_source=data.get("active_radar_source"),
-            radar_sources_by_engine=data.get("radar_sources_by_engine"),
-            lightning_events=data.get("recent_lightning"),
+        collection = data.get("geojson_worker_collection")
+        if not isinstance(collection, dict):
+            collection = {
+                "type": "FeatureCollection",
+                "features": [],
+                "metadata": {
+                    "feature_count": 0,
+                    "state": "wacht_op_worker",
+                },
+            }
+        collection = with_radar_overlays(
+            collection,
+            data.get("radar_overlays_by_engine", {}),
         )
-        collection["radar_overlays"] = data.get("radar_overlays_by_engine", {})
         collection["pysteps_input"] = data.get("pysteps_input", {})
         return self.json(collection)

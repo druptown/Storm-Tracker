@@ -2,8 +2,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
+
+
+class _FakeContent:
+    def __init__(self, payload):
+        self._body = json.dumps(
+            payload,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    async def iter_chunked(self, maximum_chunk_bytes):
+        for offset in range(0, len(self._body), maximum_chunk_bytes):
+            yield self._body[offset:offset + maximum_chunk_bytes]
 
 
 class _FakeGetResponse:
@@ -11,6 +24,7 @@ class _FakeGetResponse:
         self._payload = payload
         self.status = status
         self.headers = headers or {}
+        self.content = _FakeContent(payload)
 
     async def __aenter__(self):
         return self
@@ -35,8 +49,13 @@ class _FakeGetSession:
     async def __aexit__(self, *args):
         return False
 
-    def get(self, url, params=None, timeout=None):
-        self.calls.append({"url": url, "params": params, "timeout": timeout})
+    def get(self, url, params=None, timeout=None, headers=None):
+        self.calls.append({
+            "url": url,
+            "params": params,
+            "timeout": timeout,
+            "headers": headers,
+        })
         return _FakeGetResponse(self.payload, self.status, self.headers)
 
 

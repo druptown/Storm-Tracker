@@ -28,7 +28,6 @@ def test_only_one_ordered_five_minute_provider_cycle_is_scheduled():
     for old_callback in (
         "_poll_radar",
         "_poll_radar_comparison",
-        "_poll_netatmo",
         "_poll_open_meteo",
         "_poll_national_providers",
     ):
@@ -36,21 +35,255 @@ def test_only_one_ordered_five_minute_provider_cycle_is_scheduled():
             f"async_track_time_interval(hass, {old_callback}, timedelta(minutes="
             not in runtime
         )
+    assert (
+        "async_track_time_interval(hass, _poll_netatmo, "
+        "timedelta(minutes=1))"
+        in runtime
+    )
     cycle = _function_source("_poll_all")
     assert cycle.index("_poll_national_providers()") < cycle.index(
         "_poll_radar_comparison()"
     ) < cycle.index("_poll_radar()")
     assert "provider_cycle_lock" in cycle
-    assert cycle.count("_bounded_provider_stage") == 6
+    assert cycle.count("_bounded_provider_stage") == 9
+    assert "asyncio.create_task(_poll_netatmo())" in cycle
+    assert "asyncio.create_task(_poll_open_meteo())" in cycle
+    assert "virtual_probe_evaluation" in cycle
+    assert cycle.index("virtual_probe_evaluation") > cycle.index("open_meteo")
     assert cycle.index("_poll_radar()") < cycle.index(
         "_flush_calibration_data()"
     )
     assert cycle.index("_poll_radar()") < cycle.index(
         "_flush_region_observation_batches()"
     ) < cycle.index("_queue_target_verification_samples()")
+    assert cycle.index("_queue_target_verification_samples()") < cycle.index(
+        "warning_dispatcher.async_process"
+    ) < cycle.index("_flush_calibration_data()")
     bounded = _function_source("_bounded_provider_stage")
     assert "asyncio.wait_for" in bounded
     assert "provider_stage_timeouts" in bounded
+
+
+def test_tracking_worker_failure_never_runs_local_batch_fallback():
+    tracking = _function_source("_run_independent_tracking_check")
+    assert "worker_applied = False" in tracking
+    assert "worker_applied = True" in tracking
+    assert "return worker_applied" in tracking
+    assert "DurableProcessingError" in tracking
+    assert "zonder lokale CPU-fallback" in tracking
+    assert "calculate_batch_candidate" not in tracking
+    assert "lokale_tracking_fallback" not in tracking
+
+
+def test_tracking_worker_result_is_bound_to_batch_state_and_revision():
+    tracking = _function_source("_run_independent_tracking_check")
+    for required in (
+        "'tracking_protocol_version': 5",
+        "'batch_id': batch_id",
+        "'start_revision': start_revision",
+        "'input_digest': input_digest",
+        "'start_state_digest': start_state_digest",
+        "independent_tracking_batch_v5",
+        "_valid_tracking_v5_snapshot",
+        "_matching_sha256",
+        "_tracking_state_digest",
+        "expected_revision=start_revision",
+        "batch_id=batch_id",
+    ):
+        assert required in tracking
+    assert tracking.index("_matching_sha256") < tracking.index(
+        "replace_tracking_state"
+    )
+
+
+def test_netatmo_poll_does_not_publish_moved_probe_diagnostics():
+    poll = _function_source("_poll_netatmo")
+    assert "probe_diagnostics" not in poll
+    evaluator = _function_source("_update_virtual_probes_from_cache")
+    assert "virtual_probe_update" in evaluator
+
+
+def test_virtual_probe_worker_is_background_and_never_blocks_provider_stage():
+    evaluator = _function_source("_update_virtual_probes_from_cache")
+    assert "virtual_probe_operational" in evaluator
+    assert "async_create_background_task" in evaluator
+    assert "await worker_task" not in evaluator
+    assert "'mode': 'operationeel'" in evaluator
+    assert "'state': 'worker_onbeschikbaar'" in evaluator
+    assert "probe_manager.update(" not in evaluator
+
+
+def test_all_provider_activity_waits_for_home_assistant_started():
+    runtime = _function_source("_async_setup_runtime")
+    initial = _function_source("_do_initial_setup")
+    cycle = _function_source("_poll_all")
+    timeout = _function_source("_schedule_start_timeout")
+    starter = _function_source("_start_runtime_background")
+
+    assert "HA_START_WAIT_TIMEOUT_S" in timeout
+    assert "hass.loop.call_later" in timeout
+    assert "async_create_background_task" in starter
+    assert "_await_ha_started" not in runtime
+    assert "CoreState.running" in cycle
+    assert "_activate_polling_schedules()" in initial
+    assert "blitz.start()" in initial
+    assert initial.index("await _update_fictieve_location()") < initial.index(
+        "_activate_polling_schedules()"
+    )
+    assert initial.index(
+        "await _update_secondary_target(spec, initial=True)"
+    ) < initial.index("_activate_polling_schedules()")
+    assert initial.index("_activate_polling_schedules()") < initial.index(
+        "blitz.start()"
+    )
+    assert runtime.index("blitz = BlitzortungProvider") < runtime.index(
+        "async def _do_initial_setup"
+    )
+    source_setter = _function_source("_set_lightning_source_mode")
+    assert "not ha_started.is_set()" in source_setter
+    assert source_setter.index("not ha_started.is_set()") < source_setter.index(
+        "blitz.start()"
+    )
+
+
+def test_global_startup_admission_opens_only_after_recovery_and_integrity():
+    runtime = _function_source("_async_setup_runtime")
+    initial = _function_source("_do_initial_setup")
+    cycle = _function_source("_poll_all")
+    source_setter = _function_source("_set_lightning_source_mode")
+
+    assert runtime.count("storm_manager.begin_durable_recovery()") == 1
+    assert runtime.index("storm_manager = StormManager") < runtime.index(
+        "storm_manager.begin_durable_recovery()"
+    ) < runtime.index("active_region = storm_manager.assign_target")
+    assert runtime.index(
+        "durable_processing_store.integrity_check"
+    ) < runtime.index("storm_manager.verify_durable_integrity")
+    assert (
+        "integrity_healthy=bool(durable_integrity.get('healthy'))"
+        in runtime
+    )
+    assert initial.index(
+        "await _update_secondary_target(spec, initial=True)"
+    ) < initial.index("storm_manager.complete_durable_recovery()")
+    assert initial.index(
+        "storm_manager.complete_durable_recovery()"
+    ) < initial.index("_activate_polling_schedules()")
+    assert "'status': 'integrity_verified'" in runtime
+    assert "'admission_ready': False" in runtime
+    assert "'admission_ready': True" in initial
+    assert "storm_manager.admission_ready" in cycle
+    assert "storm_manager.admission_ready" in source_setter
+
+
+def test_system_telemetry_covers_live_entities_and_radar_hot_paths():
+    assert "sensor.system_monitor_processor_use" in INIT_SOURCE
+    assert "sensor.system_monitor_processortemperatuur" in INIT_SOURCE
+    assert "raster_normalization:" in INIT_SOURCE
+    assert "pysteps_preflight:" in INIT_SOURCE
+
+
+def test_raster_normalization_and_frame_serialization_leave_event_loop():
+    overlays = _function_source("_refresh_radar_overlays")
+    assert "frame_from_overlay" not in overlays
+    assert "async_add_executor_job" not in overlays
+    assert "radar_frame_worker" in overlays
+    assert ".async_process(overlays, regions)" in overlays
+    assert "'mode': 'worker_first'" in overlays
+    assert ".add_overlay(" not in overlays
+    assert "def _serialize_and_save_frame_history" in overlays
+    assert ".async_run_io(_serialize_and_save_frame_history)" in overlays
+    assert "if not changed_frames:" in overlays
+    assert "frame_history.serialized()" not in overlays
+    assert (
+        "save_pysteps_frames, frame_history.serialized()"
+        not in overlays
+    )
+
+
+def test_pysteps_regions_use_two_bounded_executor_workers():
+    overlays = _function_source("_refresh_radar_overlays")
+    assert "asyncio.Semaphore(2)" in overlays
+    assert "async_request_worker_job(" in overlays
+    assert "motion_preflight" in overlays
+    assert "evaluate_pysteps_frames" not in overlays
+    assert "asyncio.gather" in overlays
+
+
+def test_offline_worker_is_rejected_before_tracking_payload_work():
+    tracking = _function_source("_run_independent_tracking_check")
+    heartbeat = tracking.index("worker_is_available(hass)")
+    serialization = tracking.index("for observation in observations")
+    durable_prepare = tracking.index("durable_store.prepare_batch")
+    assert heartbeat < serialization < durable_prepare
+    assert "raise WorkerTrackingRequiredError" in tracking
+
+
+def test_temperature_alone_never_throttles_experimental_analysis():
+    calibration = _function_source("_record_calibration_frame")
+    overlays = _function_source("_refresh_radar_overlays")
+    throttling = _function_source("_system_reports_hardware_throttling")
+    # Calibration capture is now a constant-size artifact descriptor.  It may
+    # never discard meteorological evidence because of temperature or load.
+    assert "analysis_mode" not in calibration
+    assert "thermal_throttle" not in calibration
+    assert "_system_reports_hardware_throttling()" not in calibration
+    assert "worker_artifact_descriptors_v2" in calibration
+    assert "temperature >=" not in calibration
+    assert "analysis_mode" in overlays
+    assert "thermal_throttle" in overlays
+    assert "_system_reports_hardware_throttling()" in overlays
+    assert "temperature >=" not in overlays
+    assert "'status': 'thermal_throttled'" in overlays
+    assert "'feeds_detection': False" in overlays
+    assert "temperature" not in throttling
+    assert "binary_sensor.cpu_throttling" in throttling
+
+
+def test_radar_calibration_is_persisted_and_compared_only_in_worker_corpus():
+    capture = _function_source("_record_calibration_frame")
+    flush = _function_source("_flush_calibration_data_impl")
+    assert "'region_key': str(region.storage_key)" in capture
+    assert "f'{region.engine_id}@{region.storage_key}'" not in capture
+    assert "calibration_corpus_ingest" in flush
+    assert "worker_calibration_corpus_v1" in flush
+    assert "merge_worker_calibration_stage" not in flush
+    assert "calibration_prepare_v2" not in flush
+    assert "_validated_worker_calibration_summary" in flush
+    assert "corpus_profiles" in flush
+    assert "corpus_result.get('statistics')" in flush
+    assert "CALIBRATION_CORPUS_MAX_CAPTURES_PER_JOB" in flush
+    assert "if capture_id not in captures_by_id" in flush
+
+
+def test_worker_corpus_profiles_load_in_background_without_legacy_bias_input():
+    runtime = _function_source("_async_setup_runtime")
+    initial = _function_source("_do_initial_setup")
+    refresh = _function_source("_refresh_worker_calibration_snapshot")
+    assert "calibration_store.load_bias_profiles" not in runtime
+    assert "bias_profiles = []" in runtime
+    assert "calibration_corpus_snapshot" in refresh
+    assert "worker_calibration_corpus_snapshot_v1" in refresh
+    assert "worker_is_available(hass)" in refresh
+    assert "async_create_background_task" in initial
+    assert initial.index(
+        "_refresh_worker_calibration_snapshot()"
+    ) < initial.index("_activate_polling_schedules()")
+
+
+def test_netatmo_worker_job_uses_reference_and_never_transports_secrets():
+    source = _function_source("_cached_worker_netatmo")
+    payload = source[source.index("'netatmo_fetch'"):]
+    assert "'credential_ref': 'worker_environment'" in payload
+    assert "'client_secret':" not in payload
+    assert "'refresh_token':" not in payload
+
+
+def test_netatmo_worker_job_admission_does_not_require_ha_oauth_state():
+    poll = _function_source("_poll_netatmo")
+    assert "worker_observations = _cached_worker_netatmo(" in poll
+    assert "if engine_id in providers" not in poll
+    assert "worker_observations is None and engine_id in providers" not in poll
 
 
 def test_removed_region_immediately_invalidates_published_storms():
@@ -59,6 +292,43 @@ def test_removed_region_immediately_invalidates_published_storms():
     assert "f'{DOMAIN}_storms_updated'" in callback
     assert "key.startswith(f'{region.engine_id}:')" in callback
     assert "on_engine_removed=_on_region_removed" in INIT_SOURCE
+
+
+def test_ha_stop_resets_every_ofe_before_saving_tracking_state():
+    stop_runtime = _function_source("_stop_region_runtime")
+    shutdown_runtime = _function_source("_shutdown_runtime")
+    prepare_shutdown = _function_source("_prepare_shutdown")
+    stop_callback = _function_source("_on_ha_stop")
+    assert "region.ofe.reset()" in stop_runtime
+    assert stop_runtime.index("region.ofe.reset()") < stop_runtime.index(
+        "mcs_store.async_save_engine"
+    )
+    assert shutdown_runtime.index(
+        "provider_lifecycle.async_stop_all()"
+    ) < shutdown_runtime.index("_stop_region_runtime()")
+    assert shutdown_runtime.index(
+        "provider_cycle_lock"
+    ) < shutdown_runtime.index("_stop_region_runtime()")
+    assert "_shutdown_runtime()" in stop_callback
+    assert "hass.data[DOMAIN]['unsubscribers'] = []" in prepare_shutdown
+    assert "async_add_shutdown_job" in INIT_SOURCE
+    assert "HassJob" in INIT_SOURCE
+
+
+def test_quarantined_observations_have_an_operator_retry_service():
+    retry_service = _function_source("_retry_quarantined_observations")
+    assert "region.ofe.async_retry_quarantined()" in retry_service
+    assert "retried_batches" in retry_service
+    assert "SERVICE_RETRY_QUARANTINED_OBSERVATIONS" in INIT_SOURCE
+    assert "hass.services.async_register" in INIT_SOURCE
+    assert "hass.services.async_remove" in INIT_SOURCE
+    services = (
+        Path(__file__).resolve().parents[1]
+        / "custom_components"
+        / "storm_tracker_v3"
+        / "services.yaml"
+    ).read_text(encoding="utf-8")
+    assert "retry_quarantined_observations:" in services
 
 
 def test_moved_target_runs_the_same_complete_cycle():
@@ -77,6 +347,18 @@ def test_every_available_target_gets_its_own_verification_snapshot():
     assert "'longitude': float(lon)" in queue
     assert "'radar_source_decision': dict(source_decision)" in queue
     assert "'scope': 'home_only'" in queue
+
+
+def test_pysteps_preflight_is_persisted_with_the_calibration_batch():
+    refresh = _function_source("_refresh_radar_overlays")
+    flush = _function_source("_flush_calibration_data_impl")
+    assert "'pysteps_preflight_samples_pending'" in refresh
+    assert "'region_key': region.storage_key" in refresh
+    assert "'nominal_minute': latest.nominal_timestamp // 60" in refresh
+    assert "'pysteps_preflight_samples_pending', 'pysteps_preflight_samples'" in flush
+    assert "for runtime_key, batch_key in pending_fields" in flush
+    assert "batch[batch_key] = tuple(values)" in flush
+    assert "batch.get(batch_key, ())" in flush
 
 
 def test_location_scoped_global_sources_are_region_aware():
@@ -140,6 +422,19 @@ def test_every_operational_local_radar_has_state_routing_and_overlay_paths():
         assert source in (overlay + INIT_SOURCE)
 
 
+def test_every_lifecycle_raster_provider_is_persisted_without_whitelist():
+    national_poll = _function_source("_poll_national_providers")
+    assert "for provider_id, observations in results.items()" in national_poll
+    assert "overlay = provider_lifecycle.overlay(provider_id)" in national_poll
+    assert "if not overlay:" in national_poll
+    assert "overlay.get('timestamp')" in national_poll
+    assert "_record_calibration_frame(" in national_poll
+    assert (
+        'if provider_id in {'
+        not in national_poll
+    )
+
+
 def test_lightning_fallbacks_remain_separate_from_radar_routing():
     eumetsat = _function_source("_poll_eumetsat_li")
     goes = _function_source("_poll_goes_glm")
@@ -149,13 +444,15 @@ def test_lightning_fallbacks_remain_separate_from_radar_routing():
         assert "_route_selected_radar" not in poller
 
 
-def test_regional_radar_fetches_are_parallel_and_individually_bounded():
+def test_regional_radar_fetches_are_deduplicated_or_individually_bounded():
     rainviewer = _function_source("_poll_rv")
     opera = _function_source("_poll_opera")
-    for poller in (rainviewer, opera):
-        assert "asyncio.gather" in poller
-        assert "asyncio.wait_for" in poller
-        assert "return_exceptions=True" in poller
+    assert "async_fetch_worker_radar" in rainviewer
+    assert "'regions': [" in rainviewer
+    assert rainviewer.count("'rainviewer_fetch'") == 1
+    assert "asyncio.gather" in opera
+    assert "asyncio.wait_for" in opera
+    assert "return_exceptions=True" in opera
 
 
 def test_source_switch_uses_persistent_directional_transition_profile():

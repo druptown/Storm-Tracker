@@ -1,6 +1,18 @@
 """Contracttests voor de slapende nationale buurlandproviders."""
 
 import asyncio
+import json
+
+
+class _ChunkedBody:
+    """Minimale aiohttp-body voor begrensde transporttests."""
+
+    def __init__(self, payload):
+        self._payload = bytes(payload)
+
+    async def iter_chunked(self, maximum_chunk_bytes):
+        for offset in range(0, len(self._payload), maximum_chunk_bytes):
+            yield self._payload[offset:offset + maximum_chunk_bytes]
 
 
 def test_met_office_selects_latest_hdf_key(met_office_radar_module):
@@ -28,11 +40,17 @@ def test_meteofrance_application_id_refreshes_and_caches_token(
     meteofrance_radar_module,
 ):
     class Response:
+        def __init__(self):
+            payload = json.dumps({
+                "access_token": "fresh",
+                "expires_in": 3600,
+            }).encode("utf-8")
+            self.headers = {"Content-Length": str(len(payload))}
+            self.content = _ChunkedBody(payload)
+
         async def __aenter__(self): return self
         async def __aexit__(self, *args): return False
         def raise_for_status(self): return None
-        async def json(self, content_type=None):
-            return {"access_token": "fresh", "expires_in": 3600}
 
     class Session:
         def __init__(self): self.posts = 0
@@ -107,6 +125,14 @@ def test_italiameteo_does_not_hide_open_meteo_poll_when_disabled(
     italiameteo_module, base_module,
 ):
     class CatalogResponse:
+        def __init__(self):
+            payload = json.dumps([{
+                "date": "2026-07-23",
+                "filename": "radar_sri_dpc.grib",
+            }]).encode("utf-8")
+            self.headers = {"Content-Length": str(len(payload))}
+            self.content = _ChunkedBody(payload)
+
         async def __aenter__(self):
             return self
 
@@ -115,12 +141,6 @@ def test_italiameteo_does_not_hide_open_meteo_poll_when_disabled(
 
         def raise_for_status(self):
             return None
-
-        async def json(self):
-            return [{
-                "date": "2026-07-23",
-                "filename": "radar_sri_dpc.grib",
-            }]
 
     class Session:
         def __init__(self):

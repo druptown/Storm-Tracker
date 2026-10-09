@@ -133,12 +133,43 @@ def _point_in_ring(
 
 def _reference_points(reference) -> tuple[tuple[float, float], ...]:
     """Expose the full corroborating footprint, with centroid fallback."""
-    footprint = tuple(getattr(reference, "footprint_points", ()) or ())
+    polygons = tuple(
+        getattr(reference, "footprint_polygons", ()) or ()
+    )
+    footprint = (
+        tuple(
+            point
+            for polygon in polygons
+            for ring in polygon
+            for point in ring
+        )
+        if polygons
+        else tuple(getattr(reference, "footprint_points", ()) or ())
+    )
     return footprint or ((reference.lat, reference.lon),)
+
+
+def _point_in_geometry(
+    lat: float,
+    lon: float,
+    polygons,
+    legacy_ring,
+) -> bool:
+    if polygons:
+        return any(
+            _point_in_ring(lat, lon, polygon[0])
+            and not any(
+                _point_in_ring(lat, lon, hole)
+                for hole in polygon[1:]
+            )
+            for polygon in polygons
+        )
+    return _point_in_ring(lat, lon, legacy_ring)
 
 
 def _confirmed_footprint_points(
     footprint: Sequence[tuple[float, float]],
+    footprint_polygons,
     references: Sequence,
     radius_km: float,
 ) -> tuple[tuple[float, float], ...]:
@@ -148,8 +179,8 @@ def _confirmed_footprint_points(
 
     confirmed: list[tuple[float, float]] = []
     for reference in references:
-        reference_footprint = tuple(
-            getattr(reference, "footprint_points", ()) or ()
+        reference_polygons = tuple(
+            getattr(reference, "footprint_polygons", ()) or ()
         )
         reference_points = _reference_points(reference)
         for point in footprint:
@@ -158,9 +189,16 @@ def _confirmed_footprint_points(
                 for reference_point in reference_points
             ) and point not in confirmed:
                 confirmed.append(point)
-        for reference_point in reference_footprint:
+        # Ook een puntbron diep binnen de bezette OPERA-vlakgeometrie is een
+        # geldige bevestiging. Gebruik hiervoor de volledige polygonsemantiek:
+        # een punt in een droge binnenring wordt dus niet bevestigd.
+        for reference_point in reference_points:
             if (
-                _point_in_ring(*reference_point, footprint)
+                _point_in_geometry(
+                    *reference_point,
+                    footprint_polygons,
+                    footprint,
+                )
                 and reference_point not in confirmed
             ):
                 confirmed.append(reference_point)
@@ -223,13 +261,28 @@ def verify_opera_observations(
         # Grote of langgerekte cellen kunnen een centroid hebben dat ver van
         # de werkelijk bevestigde regen ligt. Vergelijk daarom ook met de
         # compacte footprint van werkelijk bezette OPERA-rasterpixels.
-        footprint = tuple(getattr(obs, "footprint_points", ()) or ())
+        footprint_polygons = tuple(
+            getattr(obs, "footprint_polygons", ()) or ()
+        )
+        footprint = (
+            tuple(
+                point
+                for polygon in footprint_polygons
+                for ring in polygon
+                for point in ring
+            )
+            if footprint_polygons
+            else tuple(getattr(obs, "footprint_points", ()) or ())
+        )
         recent_references = tuple(
             ref for ref in references
             if abs(float(obs.timestamp) - float(ref.timestamp)) <= max_age_s
         )
         confirmed_points = _confirmed_footprint_points(
-            footprint, recent_references, radius_km
+            footprint,
+            footprint_polygons,
+            recent_references,
+            radius_km,
         )
         if not footprint and any(
             _within_radius_km(
@@ -254,12 +307,14 @@ def verify_opera_observations(
                         if area_km2 is not None else None
                     ),
                     footprint_points=confirmed_points,
+                    footprint_polygons=(),
                     parent_area_km2=(
                         float(getattr(obs, "parent_area_km2")) * coverage
                         if getattr(obs, "parent_area_km2", None) is not None
                         else None
                     ),
                     parent_footprint_points=confirmed_points,
+                    parent_footprint_polygons=(),
                 )
             accepted.append(confirmed_obs)
             if structured:

@@ -13,10 +13,14 @@ htmlcov/
 # Secrets and local Home Assistant configuration
 .env
 .env.*
+!storm_tracker_worker/.env.example
 secrets.yaml
 configuration.yaml
 *.token
 *.key
+.codex-ha-access/
+.codex-local/
+.calibration-data/
 
 # Generated runtime data
 *.log

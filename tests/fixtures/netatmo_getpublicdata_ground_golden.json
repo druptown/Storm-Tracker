@@ -1,0 +1,46 @@
+{
+  "status": "ok",
+  "time_server": 1722000102,
+  "time_exec": 0.0123,
+  "body": [
+    {
+      "_id": "70:ee:50:29:59:56",
+      "mark": 10,
+      "place": {
+        "location": [4.4180, 51.0470],
+        "altitude": 6,
+        "city": "Mechelen"
+      },
+      "measures": {
+        "02:00:00:aa:bb:cc": {
+          "mark": 0,
+          "rain_timeutc": 1722000000,
+          "rain_live": 0.015,
+          "rain_60min": 0.10,
+          "rain_24h": 1.230
+        },
+        "03:00:00:temperature": {
+          "type": ["temperature", "humidity"],
+          "res": {"1722000001": [18.2, 91]}
+        }
+      }
+    },
+    {
+      "_id": "70:ee:50:00:00:02",
+      "place": {"location": [4.500, 51.100]},
+      "measures": {
+        "05:00:00:rain~module/2": {
+          "quality": "raw",
+          "rain_timeutc": "1721999900",
+          "rain": 0,
+          "rain_live": null,
+          "type": ["rain", "temperature"],
+          "res": {
+            "1721999800": [0.000, 17.9],
+            "1721999900": [1e-1, 18.0]
+          }
+        }
+      }
+    }
+  ]
+}

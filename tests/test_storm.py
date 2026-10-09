@@ -164,6 +164,106 @@ def test_radar_tracking_status_requires_two_frames(storm_module):
     assert storm.last_radar_timestamp == 1_300.0
 
 
+def test_structured_footprints_survive_storm_snapshot_roundtrip(storm_module):
+    polygons = (
+        (
+            (
+                (50.9, 3.9), (50.9, 4.3), (51.2, 4.3),
+                (51.2, 3.9), (50.9, 3.9),
+            ),
+            (
+                (51.0, 4.0), (51.0, 4.1), (51.1, 4.1),
+                (51.1, 4.0), (51.0, 4.0),
+            ),
+        ),
+        (
+            (
+                (50.95, 4.5), (50.95, 4.6), (51.05, 4.6),
+                (51.05, 4.5), (50.95, 4.5),
+            ),
+        ),
+    )
+    now = time.time()
+    storm = storm_module.Storm(storm_id="geometry", last_update=now)
+    storm.radar_cells["cell"] = storm_module.RadarCellSnapshot(
+        cell_id="cell",
+        timestamp=now,
+        lat=51.0,
+        lon=4.1,
+        intensity=4,
+        area_km2=100.0,
+        footprint_polygons=polygons,
+        parent_system_id="parent",
+    )
+    storm.radar_system_frames["frame"] = storm_module.RadarSystemFrame(
+        parent_system_id="parent",
+        timestamp=now,
+        area_km2=100.0,
+        footprint_polygons=polygons,
+    )
+
+    restored = storm_module.Storm.from_mcs_snapshot(
+        storm.to_mcs_snapshot(),
+        now=now,
+    )
+
+    assert restored.radar_cells["cell@" + str(round(now, 3))].footprint_polygons == polygons
+    assert restored.radar_system_frames[
+        "parent@" + str(round(now, 3))
+    ].footprint_polygons == polygons
+
+
+def test_legacy_radar_snapshot_restores_with_explicit_unknown_provenance(
+    storm_module,
+):
+    now = time.time()
+    legacy = {
+        "storm_id": "legacy-provenance",
+        "centroid_lat": 51.0,
+        "centroid_lon": 4.0,
+        "first_seen": now - 300.0,
+        "last_update": now - 60.0,
+        "frames": [{
+            "parent_system_id": "legacy-parent",
+            "timestamp": now - 60.0,
+            "area_km2": 100.0,
+        }],
+        "radar_cells": [{
+            "cell_id": "legacy-cell",
+            "timestamp": now - 60.0,
+            "lat": 51.0,
+            "lon": 4.0,
+            "intensity": 3,
+            "area_km2": 20.0,
+            "parent_system_id": "legacy-parent",
+        }],
+    }
+
+    restored = storm_module.Storm.from_mcs_snapshot(legacy, now=now)
+    cell = next(iter(restored.radar_cells.values()))
+    frame = next(iter(restored.radar_system_frames.values()))
+
+    for item in (cell, frame):
+        assert item.source == "unknown"
+        assert item.received_at is None
+        assert item.parser_version == "decoded_legacy"
+        assert item.provenance_grade == "decoded_legacy"
+        assert item.artifact_id is None
+        assert item.raw_artifact_receipt_id is None
+        assert item.upstream_record_id is None
+        assert item.contribution_id is None
+        assert item.provenance is None
+
+    serialized = restored.to_mcs_snapshot()
+    for item in (serialized["radar_cells"][0], serialized["frames"][0]):
+        assert item["source"] == "unknown"
+        assert item["received_at"] is None
+        assert item["parser_version"] == "decoded_legacy"
+        assert item["provenance_grade"] == "decoded_legacy"
+        assert item["raw_artifact_receipt_id"] is None
+        assert item["provenance"] is None
+
+
 def test_radar_tracking_sequence_restarts_after_large_gap(storm_module):
     storm = storm_module.Storm()
     for key, timestamp in (("old", 1_000.0), ("new", 3_000.0)):

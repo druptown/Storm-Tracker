@@ -16,12 +16,14 @@ Versiegeschiedenis:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from typing import Optional
 
 import aiohttp
 
+from ..engine.bounded_payload import iter_limited_async
 from ..engine.observation import Observation, ObservationType
 
 _LOGGER = logging.getLogger(__name__)
@@ -30,6 +32,26 @@ TOKEN_URL       = "https://api.netatmo.com/oauth2/token"
 PUBLIC_DATA_URL = "https://api.netatmo.com/api/getpublicdata"
 NETATMO_TIMEOUT = 15
 RAIN_THRESHOLD  = 0.1
+LOCAL_QUERY_RADIUS_KM = 20.0
+LAST_GOOD_GRACE_SECONDS = 15 * 60
+NETATMO_TOKEN_MAX_RESPONSE_BYTES = 512 * 1024
+NETATMO_PUBLIC_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+_HTTP_CHUNK_BYTES = 64 * 1024
+
+
+async def _read_bounded_response(response, *, maximum_bytes: int) -> bytes:
+    headers = response.headers
+    encoding = headers.get("Content-Encoding")
+    if encoding and encoding.lower() != "identity":
+        raise ValueError(
+            "Netatmo-response gebruikt onverwachte transportcompressie"
+        )
+    return await iter_limited_async(
+        response.content.iter_chunked(_HTTP_CHUNK_BYTES),
+        maximum_bytes=maximum_bytes,
+        declared_bytes=headers.get("Content-Length"),
+        require_declared_match=headers.get("Content-Length") is not None,
+    )
 
 
 class NetatmoTokenManager:
@@ -63,16 +85,24 @@ class NetatmoTokenManager:
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=NETATMO_TIMEOUT)
             ) as session:
-                async with session.post(TOKEN_URL, data={
-                    "grant_type":    "refresh_token",
-                    "client_id":     self._client_id,
-                    "client_secret": self._client_secret,
-                    "refresh_token": self._refresh_token,
-                }) as resp:
+                async with session.post(
+                    TOKEN_URL,
+                    data={
+                        "grant_type":    "refresh_token",
+                        "client_id":     self._client_id,
+                        "client_secret": self._client_secret,
+                        "refresh_token": self._refresh_token,
+                    },
+                    headers={"Accept-Encoding": "identity"},
+                ) as resp:
                     if resp.status != 200:
                         _LOGGER.warning("Netatmo token refresh mislukt: %d", resp.status)
                         return
-                    result = await resp.json()
+                    raw = await _read_bounded_response(
+                        resp,
+                        maximum_bytes=NETATMO_TOKEN_MAX_RESPONSE_BYTES,
+                    )
+                    result = json.loads(raw.decode("utf-8"))
                     self._access_token  = result.get("access_token")
                     self._token_expires = time.time() + result.get("expires_in", 10800)
                     if "refresh_token" in result:
@@ -100,6 +130,9 @@ class NetatmoProvider:
         self._lon      = lon
         self._radius   = radius_km
         self._callback = None
+        self._last_good_observations: list[Observation] = []
+        self._last_good_at = 0.0
+        self._request_failed = False
 
     def set_callback(self, on_observation) -> None:
         self._callback = on_observation
@@ -113,11 +146,68 @@ class NetatmoProvider:
 
     async def fetch_observations(self) -> list[Observation]:
         try:
+            self._request_failed = False
             token = await self._token.get_access_token()
             if not token:
-                return []
+                self._request_failed = True
+                return self._last_good_or_empty()
 
-            deg = self._radius / 111.0
+            broad = await self._fetch_box(token, self._radius)
+            if self._radius <= LOCAL_QUERY_RADIUS_KM:
+                return self._finish_fetch(broad)
+
+            # De publieke API kan bij een grote bbox nabije stations overslaan.
+            # Vraag daarom daarnaast een klein lokaal vak op en voeg op
+            # station-ID samen. Dit houdt de brede regionale context intact.
+            local = await self._fetch_box(token, LOCAL_QUERY_RADIUS_KM)
+            merged = {
+                str(item.station_id or f"{item.lat:.5f},{item.lon:.5f}"): item
+                for item in broad
+            }
+            for item in local:
+                key = str(
+                    item.station_id or f"{item.lat:.5f},{item.lon:.5f}"
+                )
+                merged[key] = item
+            return self._finish_fetch(list(merged.values()))
+
+        except Exception:
+            _LOGGER.exception("NetatmoProvider: fout bij ophalen data")
+            self._request_failed = True
+            return self._last_good_or_empty()
+
+    def _finish_fetch(
+        self, observations: list[Observation]
+    ) -> list[Observation]:
+        """Bewaar alleen een volledig geslaagde poll als nieuwe cache."""
+        if self._request_failed:
+            return self._last_good_or_empty()
+        self._last_good_observations = list(observations)
+        self._last_good_at = time.time()
+        return observations
+
+    def _last_good_or_empty(self) -> list[Observation]:
+        """Overbrug een korte providerstoring zonder regenstatus te wissen."""
+        observations = list(
+            getattr(self, "_last_good_observations", []) or []
+        )
+        cached_at = float(getattr(self, "_last_good_at", 0.0) or 0.0)
+        if (
+            observations
+            and time.time() - cached_at <= LAST_GOOD_GRACE_SECONDS
+        ):
+            _LOGGER.warning(
+                "Netatmo gebruikt laatste geldige meting na tijdelijke fout"
+            )
+            return observations
+        return []
+
+    async def _fetch_box(
+        self, token: str, radius_km: float
+    ) -> list[Observation]:
+        """Haal één begrensd Netatmo-vak op."""
+        try:
+            deg = float(radius_km) / 111.0
             params = {
                 "lat_ne": self._lat + deg,
                 "lon_ne": self._lon + deg,
@@ -131,18 +221,30 @@ class NetatmoProvider:
             ) as session:
                 async with session.get(
                     PUBLIC_DATA_URL,
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={
+                        "Accept-Encoding": "identity",
+                        "Authorization": f"Bearer {token}",
+                    },
                     params=params,
                 ) as resp:
                     if resp.status != 200:
                         _LOGGER.warning("Netatmo data mislukt: %d", resp.status)
+                        self._request_failed = True
                         return []
-                    data = await resp.json()
+                    raw = await _read_bounded_response(
+                        resp,
+                        maximum_bytes=NETATMO_PUBLIC_MAX_RESPONSE_BYTES,
+                    )
+                    data = json.loads(raw.decode("utf-8"))
 
             return self._parse_observations(data)
 
         except Exception:
-            _LOGGER.exception("NetatmoProvider: fout bij ophalen data")
+            self._request_failed = True
+            _LOGGER.exception(
+                "NetatmoProvider: fout bij ophalen vak r=%.0fkm",
+                radius_km,
+            )
             return []
 
     def _parse_observations(self, data: dict) -> list[Observation]:
@@ -164,6 +266,8 @@ class NetatmoProvider:
                 station = {
                     "rain_live":     0.0,
                     "rain_5min":     0.0,
+                    "rain_60min":    0.0,
+                    "rain_capable":  False,
                     "pressure":      None,
                     "temperature":   None,
                     "humidity":      None,
@@ -175,12 +279,15 @@ class NetatmoProvider:
                 for module_data in item.get("measures", {}).values():
                     # Directe velden (regen, wind)
                     if "rain_live" in module_data:
+                        station["rain_capable"] = True
                         val = module_data.get("rain_live")
                         if val is not None:
                             station["rain_live"] = max(station["rain_live"], round(float(val), 2))
                     if "rain_60min" in module_data:
+                        station["rain_capable"] = True
                         val = module_data.get("rain_60min")
                         if val is not None:
+                            station["rain_60min"] = round(float(val), 2)
                             station["rain_5min"] = round(float(val) / 12, 2)
                     if "wind_strength" in module_data:
                         val = module_data.get("wind_strength")
@@ -231,6 +338,8 @@ class NetatmoProvider:
                     temperature   = station["temperature"],
                     humidity      = station["humidity"],
                     rain_5min     = station["rain_5min"],
+                    rain_60min    = station["rain_60min"],
+                    rain_capable  = station["rain_capable"],
                 ))
 
             except Exception:
@@ -249,7 +358,7 @@ class NetatmoProvider:
 class NetatmoProviderFactory:
     """Factory voor NetatmoProvider. Wereldwijd beschikbaar."""
 
-    def __init__(self, token_manager: NetatmoTokenManager, radius_km: float = 175.0) -> None:
+    def __init__(self, token_manager: NetatmoTokenManager, radius_km: float = 20.0) -> None:
         self._token     = token_manager
         self._radius_km = radius_km
 

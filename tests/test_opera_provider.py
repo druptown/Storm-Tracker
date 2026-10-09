@@ -146,10 +146,26 @@ def test_factory_create_returns_provider_when_supported(opera_module):
 
 # ── _download() ────────────────────────────────────────────────────────────
 
+class _FakeGetContent:
+    def __init__(self, chunks):
+        self._chunks = tuple(chunks)
+        self.iterated = 0
+
+    async def iter_chunked(self, maximum_chunk_bytes):
+        assert maximum_chunk_bytes == 64 * 1024
+        for chunk in self._chunks:
+            self.iterated += 1
+            yield chunk
+
+
 class _FakeGetResponse:
-    def __init__(self, status, body=b""):
+    def __init__(self, status, body=b"", *, headers=None, chunks=None):
         self.status = status
         self._body = body
+        self.headers = dict(headers or {})
+        self.content = _FakeGetContent(
+            (body,) if chunks is None else chunks
+        )
 
     async def __aenter__(self):
         return self
@@ -193,6 +209,40 @@ def test_download_exception_returns_none(opera_module):
     session = _FakeGetSession(raise_exc=ConnectionError("netwerk weg"))
     result = asyncio.run(p._download(session, "some/key.h5"))
     assert result is None
+
+
+def test_download_refuses_declared_oversize_before_read(opera_module):
+    provider = opera_module.OperaProvider(51.026, 4.478)
+    response = _FakeGetResponse(
+        200,
+        b"not-read",
+        headers={
+            "Content-Length": str(
+                opera_module.MAX_OPERA_DOWNLOAD_BYTES + 1
+            )
+        },
+    )
+    session = _FakeGetSession(response=response)
+
+    result = asyncio.run(provider._download(session, "some/key.h5"))
+
+    assert result is None
+    assert response.content.iterated == 0
+
+
+def test_download_refuses_lying_content_length(opera_module):
+    provider = opera_module.OperaProvider(51.026, 4.478)
+    response = _FakeGetResponse(
+        200,
+        headers={"Content-Length": "3"},
+        chunks=(b"12", b"34"),
+    )
+    session = _FakeGetSession(response=response)
+
+    result = asyncio.run(provider._download(session, "some/key.h5"))
+
+    assert result is None
+    assert response.content.iterated == 2
 
 
 # ── Gedeelde module-level downloadcache ───────────────────────────────────
@@ -337,14 +387,24 @@ def _make_cell(opera_module, max_dbz, area_km2=10.0):
 
 def test_cells_preserve_parent_and_child_identity(opera_module):
     provider = opera_module.OperaProvider(51.0, 4.5)
+    child_polygons = (((
+        (48.7, -3.3), (48.7, -3.1), (48.9, -3.1),
+        (48.9, -3.3), (48.7, -3.3),
+    ),),)
+    parent_polygons = (((
+        (48.4, -4.5), (48.4, -1.4), (49.0, -1.4),
+        (49.0, -4.5), (48.4, -4.5),
+    ),),)
     cells = [
         opera_module.OperaCell(
             centroid_lat=48.8, centroid_lon=-3.2, area_km2=300.0,
             max_dbz=45.0, mean_dbz=30.0, mean_quality=0.4,
             pixelcount=300, footprint_points=((48.8, -3.2),),
+            footprint_polygons=child_polygons,
             parent_component=2, child_component=1,
             parent_area_km2=46_627.0,
             parent_footprint_points=((48.4, -4.5), (48.8, -1.4)),
+            parent_footprint_polygons=parent_polygons,
         )
     ]
 
@@ -356,6 +416,11 @@ def test_cells_preserve_parent_and_child_identity(opera_module):
     assert observations[0].parent_system_id.endswith(":p2")
     assert observations[0].parent_area_km2 == 46_627.0
     assert len(observations[0].parent_footprint_points) == 2
+    assert observations[0].footprint_polygons == child_polygons
+    assert (
+        observations[0].parent_footprint_polygons
+        == parent_polygons
+    )
     assert observations[0].max_dbz == 45.0
     assert observations[0].mean_dbz == 30.0
 

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import math
 import time
 from typing import Iterable, Sequence
+from itertools import combinations
 
 
 GRID_DEG = 0.10
@@ -19,6 +20,42 @@ FRAME_HISTORY_MINUTES = 180
 MIN_SHARED_COVERAGE_FRACTION = 0.60
 
 CoverageBounds = tuple[float, float, float, float]
+
+
+def compare_collected_frames(frames: Sequence[Sequence]) -> tuple[tuple, ...]:
+    """Begrensde noodfallback voor workeruitval; normaal nooit actief."""
+    grouped: dict[tuple[str, int], list[Sequence]] = {}
+    for frame in frames:
+        if len(frame) >= 14:
+            grouped.setdefault((str(frame[0]), int(frame[2])), []).append(frame)
+    results = []
+    for available in grouped.values():
+        for first, second in combinations(
+            sorted(available, key=lambda item: str(item[1])), 2
+        ):
+            shared_fraction = min(float(first[12]), float(second[12]))
+            if shared_fraction < MIN_SHARED_COVERAGE_FRACTION:
+                continue
+            primary = {(int(p[0]), int(p[1])) for p in first[13]}
+            reference = {(int(p[0]), int(p[1])) for p in second[13]}
+            overlap = primary & reference
+            precision = len(overlap) / len(primary) if primary else None
+            recall = len(overlap) / len(reference) if reference else None
+            f1 = (
+                2 * precision * recall / (precision + recall)
+                if precision is not None and recall is not None
+                and precision + recall else None
+            )
+            results.append((
+                first[0], first[1], second[1], first[2], time.time(),
+                len(primary), len(reference), len(overlap),
+                len(primary - reference), len(reference - primary),
+                round(precision, 3) if precision is not None else None,
+                round(recall, 3) if recall is not None else None,
+                round(f1, 3) if f1 is not None else None,
+                round(shared_fraction, 3),
+            ))
+    return tuple(results)
 
 
 def _evaluation_bbox(
@@ -186,12 +223,14 @@ class RadarCalibrationObserver:
         history_size: int = HISTORY_SIZE,
         evaluation_center: tuple[float, float] | None = None,
         evaluation_radius_km: float | None = None,
+        compare_locally: bool = True,
     ) -> None:
         self.grid_deg = float(grid_deg)
         self.max_reference_age_s = float(max_reference_age_s)
         self._history: deque[CalibrationSnapshot] = deque(maxlen=history_size)
         self.evaluation_center = evaluation_center
         self.evaluation_radius_km = evaluation_radius_km
+        self.compare_locally = bool(compare_locally)
         self._frames: dict[str, dict[str, dict[int, _CalibrationFrame]]] = {}
         self._matched: set[tuple[str, str, str, int]] = set()
         self._collection_frames: dict[tuple[str, str, int], tuple] = {}
@@ -291,9 +330,37 @@ class RadarCalibrationObserver:
             coverage_bbox=effective_coverage,
             evaluation_bbox=evaluation_bbox,
         )
-        matched = self._match_minute(str(region_id), minute, str(source))
+        matched = (
+            self._match_minute(str(region_id), minute, str(source))
+            if self.compare_locally else 0
+        )
         self._prune_frames(minute)
         return matched
+
+    def ingest_worker_comparisons(self, comparisons: Sequence[Sequence]) -> int:
+        """Werk de compacte diagnose bij zonder opnieuw te vergelijken."""
+        ingested = 0
+        for value in comparisons:
+            if len(value) != 14:
+                continue
+            self._history.append(CalibrationSnapshot(
+                timestamp=float(value[4]),
+                region_id=str(value[0]),
+                source_a=str(value[1]),
+                source_b=str(value[2]),
+                reference_source=str(value[2]),
+                primary_cells=int(value[5]),
+                reference_cells=int(value[6]),
+                overlap_cells=int(value[7]),
+                false_positive_cells=int(value[8]),
+                missed_cells=int(value[9]),
+                precision=float(value[10]) if value[10] is not None else None,
+                recall=float(value[11]) if value[11] is not None else None,
+                f1_score=float(value[12]) if value[12] is not None else None,
+                shared_coverage_fraction=float(value[13]),
+            ))
+            ingested += 1
+        return ingested
 
     def _match_minute(self, region_id: str, minute: int, source: str) -> int:
         region_frames = self._frames.get(region_id, {})

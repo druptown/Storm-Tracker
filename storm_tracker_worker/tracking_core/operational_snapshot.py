@@ -189,7 +189,11 @@ _UI_STORM_STATES = frozenset({
 })
 _CURRENT_PRECIPITATION_STATES = frozenset({"unknown", "dry", "raining"})
 _NEXT_THREAT_STATES = frozenset({"unknown", "none", "available"})
-_PASSAGE_STATES = frozenset({"unknown", "none", "possible", "expected"})
+_PASSAGE_STATES = frozenset({
+    "unknown", "none", "possible", "expected",
+    "candidate", "confirmed", "coasting", "current", "ended",
+    "cancelled", "indeterminate",
+})
 _GROUND_STATES = frozenset({"unknown", "dry", "wet", "mixed"})
 _RADAR_FUSION_STATES = frozenset({
     "current", "degraded", "onvoldoende_data",
@@ -803,7 +807,7 @@ def _validate_next_threat(value: Any, path: str) -> None:
             raise SnapshotValidationError(
                 f"{path}.available vereist een track_id"
             )
-        if passage not in {"unknown", "possible", "expected"}:
+        if passage not in (_PASSAGE_STATES - {"none"}):
             raise SnapshotValidationError(
                 f"{path}.available heeft ongeldige passage_status"
             )
@@ -1518,7 +1522,7 @@ def _degraded_state(state: _CacheState, *, reason: str, worker_state: str) -> _C
     for provider_id, frozen in state.providers.items():
         provider = _copy_record(frozen)
         provider.update({
-            "state": "offline" if worker_state == "offline" else "unknown",
+            "state": "offline" if worker_state == "offline" else "stale",
             "freshness": "stale",
             "error": reason,
         })

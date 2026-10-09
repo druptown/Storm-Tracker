@@ -82,10 +82,21 @@ def build_fixture(path: str) -> dict:
         "too_small":      dict(window=(20, 22, 80, 82), dbz=35.0, quality=0.9),
         # Cel die precies op de rand van de (kleinere) test-cropbbox ligt
         "edge_storm":     dict(window=(0, 5, 0, 5),     dbz=40.0, quality=0.95),
+        # 7x7 buitenring met een droge 3x3 binnenring.
+        "donut_storm":     dict(
+            window=(78, 85, 10, 17),
+            hole_window=(80, 83, 12, 15),
+            dbz=32.0,
+            quality=0.85,
+        ),
     }
     for cell in cells.values():
         r0, r1, c0, c1 = cell["window"]
         _fill(r0, r1, c0, c1, cell["dbz"], cell["quality"])
+
+    hole = cells["donut_storm"]["hole_window"]
+    radar[hole[0]:hole[1], hole[2]:hole[3]] = NODATA_RAW
+    quality[hole[0]:hole[1], hole[2]:hole[3]] = 0.0
 
     # Undetect-patch: expliciete undetect-sentinelwaarde, geldige quality
     radar[90:93, 90:93]   = UNDETECT_RAW

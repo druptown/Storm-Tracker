@@ -5,7 +5,7 @@ Unit tests voor het plugincontract (providers/base.py).
 Test coverage:
   - CoverageArea.contains()
   - CoverageResult.score
-  - compute_observation_horizon()
+  - expliciete caller-horizon zonder snelheidsdefault
   - ProviderRegistry strategie per capability
   - ProviderPlugin Protocol check
 
@@ -19,16 +19,16 @@ from __future__ import annotations
 import pytest
 
 
-def test_compute_observation_horizon(base_module):
-    horizon = base_module.compute_observation_horizon(
-        forecast_time_h=2.0, max_storm_speed_kmh=100.0
+def test_observation_horizon_is_an_explicit_caller_contract(base_module):
+    area = base_module.CoverageArea(
+        center_lat=51.026,
+        center_lon=4.478,
+        horizon_km=275.0,
     )
-    assert horizon == 200.0
 
-    horizon_fast = base_module.compute_observation_horizon(
-        forecast_time_h=2.0, max_storm_speed_kmh=150.0
-    )
-    assert horizon_fast == 300.0
+    assert area.horizon_km == 275.0
+    assert not hasattr(base_module, "DEFAULT_MAX_STORM_SPEED_KMH")
+    assert not hasattr(base_module, "compute_observation_horizon")
 
 
 def test_coverage_area_contains(base_module):

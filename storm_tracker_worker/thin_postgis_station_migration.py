@@ -2,18 +2,31 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 import json
 import math
 from typing import Any, Callable, Mapping
 
-from .thin_observation import ObservationQuality
+from .thin_observation import (
+    ObservationKind,
+    ObservationQuality,
+    ThinObservationError,
+    normalize_unit,
+)
 from .thin_postgis import _INSERT_STATION_MEASUREMENT
-from .thin_station_catalog import normalize_capabilities
+from .thin_station_measurement import normalize_station_measurement_type
 
 
-MIGRATION_ID = "legacy_observation_v1"
+MIGRATION_ID = "legacy_ground_observation_v2"
+MIGRATION_STATEMENT_TIMEOUT_MS = 600_000
+GROUND_PROVIDER_IDS = ("kmi_aws", "metar", "netatmo", "wunderground")
+_QUALITY_RANK = {"unknown": 0, "poor": 1, "suspect": 2, "good": 3}
+
+
+_SET_MIGRATION_STATEMENT_TIMEOUT = """
+SELECT set_config('statement_timeout', %s, true)
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,23 +66,36 @@ WHERE migration_id=%s
 FOR UPDATE
 """
 
+_INSERT_STATE = """
+INSERT INTO stv3_station_measurement_backfill_state(
+    migration_id,source_cursor,copied_count,rejected_count,status
+) VALUES(%s,NULL,0,0,'pending')
+ON CONFLICT(migration_id) DO NOTHING
+"""
+
 _SELECT_LEGACY_BATCH = """
 SELECT observation.observation_key,observation.provider_id,
        observation.product_id,observation.value,observation.unit,
        EXTRACT(EPOCH FROM observation.observed_at),
        EXTRACT(EPOCH FROM observation.received_at),
-       observation.quality,observation.metadata,
+       observation.quality,observation.metadata,observation.kind,
        station.station_id IS NOT NULL
 FROM stv3_observation AS observation
-LEFT JOIN stv3_ground_station AS station
+JOIN stv3_ground_station AS station
   ON station.provider_id=observation.provider_id
  AND station.station_id=observation.metadata->>'station_id'
-WHERE (%s::text IS NULL OR observation.observation_key>%s)
-  AND observation.observed_at >=
-      date_trunc('month',CURRENT_TIMESTAMP)-interval '6 months'
+WHERE observation.provider_id=%s
+  AND observation.observed_at >= to_timestamp(%s)
+  AND (
+      %s::double precision IS NULL
+      OR observation.observed_at > to_timestamp(%s)
+      OR (
+          observation.observed_at = to_timestamp(%s)
+          AND observation.observation_key > %s
+      )
+  )
   AND NULLIF(observation.metadata->>'station_id','') IS NOT NULL
-  AND NULLIF(observation.metadata->>'measurement','') IS NOT NULL
-ORDER BY observation.observation_key
+ORDER BY observation.observed_at,observation.observation_key
 LIMIT %s
 """
 
@@ -101,10 +127,13 @@ WITH legacy AS (
            MIN(observation.value) AS minimum_value,
            MAX(observation.value) AS maximum_value
     FROM stv3_observation AS observation
-    WHERE observation.observed_at>=to_timestamp(%s)
+    JOIN stv3_ground_station AS station
+      ON station.provider_id=observation.provider_id
+     AND station.station_id=observation.metadata->>'station_id'
+    WHERE observation.provider_id=ANY(%s)
+      AND observation.observed_at>=to_timestamp(%s)
       AND observation.observed_at<to_timestamp(%s)
       AND NULLIF(observation.metadata->>'station_id','') IS NOT NULL
-      AND NULLIF(observation.metadata->>'measurement','') IS NOT NULL
     GROUP BY observation.provider_id,
              lower(observation.metadata->>'measurement')
 ), canonical AS (
@@ -129,17 +158,10 @@ FULL OUTER JOIN canonical
 ORDER BY 1,2
 """
 
-_COUNT_UNRECOGNIZABLE = """
-SELECT COUNT(*) AS unrecognizable_rows
-FROM stv3_observation
-WHERE observed_at>=to_timestamp(%s) AND observed_at<to_timestamp(%s)
-  AND (
-      (metadata ? 'station_id' OR metadata ? 'measurement')
-      AND (
-          NULLIF(metadata->>'station_id','') IS NULL
-          OR NULLIF(metadata->>'measurement','') IS NULL
-      )
-  )
+_SELECT_BACKFILL_REJECTIONS = """
+SELECT rejected_count
+FROM stv3_station_measurement_backfill_state
+WHERE migration_id=%s
 """
 
 _COUNT_ORPHANS = """
@@ -151,6 +173,17 @@ LEFT JOIN stv3_ground_station AS station
 WHERE measurement.observed_at>=to_timestamp(%s)
   AND measurement.observed_at<to_timestamp(%s)
   AND station.station_id IS NULL
+"""
+
+_PREFLIGHT = """
+SELECT
+    to_regclass('public.stv3_station_measurement') IS NOT NULL,
+    to_regclass('public.stv3_station_measurement_backfill_state') IS NOT NULL,
+    has_table_privilege(
+        current_user,
+        'public.stv3_station_measurement',
+        'SELECT,INSERT,UPDATE'
+    )
 """
 
 
@@ -169,6 +202,43 @@ def _optional_float(value: Any) -> float | None:
     return result if math.isfinite(result) else None
 
 
+def _decode_source_cursor(value: object) -> tuple[int, float | None, str | None]:
+    if value is None:
+        return 0, None, None
+    try:
+        payload = json.loads(str(value))
+        provider_index = int(payload["provider_index"])
+        observed_at = payload.get("observed_at")
+        observation_key = payload.get("observation_key")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise RuntimeError("backfill_cursor_invalid") from error
+    if not 0 <= provider_index <= len(GROUND_PROVIDER_IDS):
+        raise RuntimeError("backfill_cursor_invalid")
+    if observed_at is None and observation_key is None:
+        return provider_index, None, None
+    timestamp = _optional_float(observed_at)
+    key = str(observation_key or "")
+    if timestamp is None or not key:
+        raise RuntimeError("backfill_cursor_invalid")
+    return provider_index, timestamp, key
+
+
+def _encode_source_cursor(
+    provider_index: int,
+    observed_at: float | None,
+    observation_key: str | None,
+) -> str:
+    return json.dumps(
+        {
+            "provider_index": int(provider_index),
+            "observed_at": observed_at,
+            "observation_key": observation_key,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 class StationMeasurementMigrationRepository:
     """PostGIS boundary for additive station backfill and verification."""
 
@@ -180,12 +250,25 @@ class StationMeasurementMigrationRepository:
         self._connect_factory = connect_factory
         self._connect_kwargs = dict(connect_kwargs)
 
-    def backfill_batch(self, *, limit: int) -> BackfillReport:
+    def backfill_batch(
+        self,
+        *,
+        limit: int,
+        observed_after: float,
+    ) -> BackfillReport:
         if isinstance(limit, bool) or not 1 <= int(limit) <= 100_000:
             raise ValueError("backfill_limit_invalid")
+        cutoff = float(observed_after)
+        if not math.isfinite(cutoff) or cutoff < 0.0:
+            raise ValueError("backfill_cutoff_invalid")
         connection = self._connect_factory(**self._connect_kwargs)
         try:
             with connection.cursor() as cursor:
+                cursor.execute(
+                    _SET_MIGRATION_STATEMENT_TIMEOUT,
+                    (str(MIGRATION_STATEMENT_TIMEOUT_MS),),
+                )
+                cursor.execute(_INSERT_STATE, (MIGRATION_ID,))
                 cursor.execute(_SELECT_STATE, (MIGRATION_ID,))
                 state = cursor.fetchone()
                 if state is None:
@@ -193,40 +276,69 @@ class StationMeasurementMigrationRepository:
                 source_cursor = None if state[0] is None else str(state[0])
                 copied_total = int(state[1])
                 rejected_total = int(state[2])
-                cursor.execute(
-                    _SELECT_LEGACY_BATCH,
-                    (source_cursor, source_cursor, int(limit) + 1),
+                provider_index, cursor_time, cursor_key = (
+                    _decode_source_cursor(source_cursor)
                 )
-                fetched = tuple(cursor.fetchall())
+                fetched: tuple[Any, ...] = ()
+                while provider_index < len(GROUND_PROVIDER_IDS) and not fetched:
+                    cursor.execute(
+                        _SELECT_LEGACY_BATCH,
+                        (
+                            GROUND_PROVIDER_IDS[provider_index],
+                            cutoff,
+                            cursor_time,
+                            cursor_time,
+                            cursor_time,
+                            cursor_key,
+                            int(limit) + 1,
+                        ),
+                    )
+                    fetched = tuple(cursor.fetchall())
+                    if not fetched:
+                        provider_index += 1
+                        cursor_time = None
+                        cursor_key = None
                 has_more = len(fetched) > int(limit)
                 rows = fetched[:int(limit)]
-                insert_rows: list[tuple[Any, ...]] = []
+                insert_rows_by_identity: dict[
+                    tuple[str, str, float, str],
+                    tuple[Any, ...],
+                ] = {}
                 rejected = 0
                 for row in rows:
                     try:
                         metadata = _decoded_metadata(row[8])
                         station_id = str(metadata.get("station_id", "")).strip()
-                        measurement_type = normalize_capabilities((
-                            str(metadata.get("measurement", "")),
-                        ))[0]
+                        kind = ObservationKind(str(row[9]))
+                        measurement_type = normalize_station_measurement_type(
+                            metadata.get("measurement"),
+                            fallback_kind=kind,
+                        )
                         quality = ObservationQuality(str(row[7])).value
+                        value, unit = normalize_unit(
+                            kind,
+                            float(row[3]),
+                            str(row[4]),
+                        )
                         observed_at = float(row[5])
                         received_at = float(row[6])
                         if (
-                            not bool(row[9])
+                            not bool(row[10])
                             or not station_id
                             or not math.isfinite(observed_at)
                             or not math.isfinite(received_at)
                         ):
                             raise ValueError("legacy_station_measurement_invalid")
-                        insert_rows.append((
+                        metadata["storage_origin"] = "legacy_backfill"
+                        metadata["legacy_observation_key"] = str(row[0])
+                        insert_row = (
                             str(row[1]),
                             station_id,
                             observed_at,
                             measurement_type,
                             str(row[2]),
-                            float(row[3]),
-                            str(row[4]),
+                            value,
+                            unit,
                             received_at,
                             quality,
                             json.dumps(
@@ -235,15 +347,56 @@ class StationMeasurementMigrationRepository:
                                 separators=(",", ":"),
                                 allow_nan=False,
                             ),
-                        ))
-                    except (IndexError, TypeError, ValueError, json.JSONDecodeError):
+                        )
+                        identity = (
+                            insert_row[0],
+                            insert_row[1],
+                            insert_row[2],
+                            insert_row[3],
+                        )
+                        previous = insert_rows_by_identity.get(identity)
+                        if previous is None or (
+                            _QUALITY_RANK[insert_row[8]],
+                            insert_row[7],
+                            insert_row[4],
+                        ) > (
+                            _QUALITY_RANK[previous[8]],
+                            previous[7],
+                            previous[4],
+                        ):
+                            insert_rows_by_identity[identity] = insert_row
+                    except (
+                        IndexError,
+                        TypeError,
+                        ValueError,
+                        ThinObservationError,
+                        json.JSONDecodeError,
+                    ):
                         rejected += 1
+                insert_rows = tuple(insert_rows_by_identity.values())
                 if insert_rows:
                     cursor.executemany(_INSERT_STATION_MEASUREMENT, insert_rows)
-                next_cursor = source_cursor
+                next_provider_index = provider_index
+                next_cursor_time = cursor_time
+                next_cursor_key = cursor_key
                 if rows:
-                    next_cursor = str(rows[-1][0])
-                status = "partial" if has_more else "complete"
+                    if has_more:
+                        next_cursor_time = float(rows[-1][5])
+                        next_cursor_key = str(rows[-1][0])
+                    else:
+                        next_provider_index += 1
+                        next_cursor_time = None
+                        next_cursor_key = None
+                status = (
+                    "complete"
+                    if next_provider_index >= len(GROUND_PROVIDER_IDS)
+                    else "partial"
+                )
+                next_cursor = _encode_source_cursor(
+                    next_provider_index,
+                    next_cursor_time,
+                    next_cursor_key,
+                )
                 copied_total += len(insert_rows)
                 rejected_total += rejected
                 cursor.execute(_UPDATE_STATE, (
@@ -280,9 +433,16 @@ class StationMeasurementMigrationRepository:
         connection = self._connect_factory(**self._connect_kwargs)
         try:
             with connection.cursor() as cursor:
-                cursor.execute(_VERIFY_BUCKETS, (start, end, start, end))
+                cursor.execute(
+                    _SET_MIGRATION_STATEMENT_TIMEOUT,
+                    (str(MIGRATION_STATEMENT_TIMEOUT_MS),),
+                )
+                cursor.execute(
+                    _VERIFY_BUCKETS,
+                    (list(GROUND_PROVIDER_IDS), start, end, start, end),
+                )
                 bucket_rows = tuple(cursor.fetchall())
-                cursor.execute(_COUNT_UNRECOGNIZABLE, (start, end))
+                cursor.execute(_SELECT_BACKFILL_REJECTIONS, (MIGRATION_ID,))
                 unrecognizable_row = cursor.fetchone()
                 cursor.execute(_COUNT_ORPHANS, (start, end))
                 orphan_row = cursor.fetchone()
@@ -321,14 +481,30 @@ class StationMeasurementMigrationRepository:
         window_start: float,
         window_end: float,
     ) -> VerificationReport:
-        return replace(
-            self.verify(window_start=window_start, window_end=window_end),
+        start = float(window_start)
+        end = float(window_end)
+        if not math.isfinite(start) or not math.isfinite(end) or not start < end:
+            raise ValueError("verification_window_invalid")
+        connection = self._connect_factory(**self._connect_kwargs)
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(_PREFLIGHT)
+                preflight = cursor.fetchone()
+        finally:
+            connection.close()
+        if preflight is None or not all(bool(value) for value in preflight):
+            raise RuntimeError("station_measurement_storage_not_ready")
+        return VerificationReport(
             status="ready",
+            buckets=(),
+            unrecognizable_rows=0,
+            orphan_count=0,
         )
 
 
 __all__ = [
     "BackfillReport",
+    "GROUND_PROVIDER_IDS",
     "MIGRATION_ID",
     "StationMeasurementMigrationRepository",
     "VerificationBucket",

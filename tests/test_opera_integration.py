@@ -53,6 +53,40 @@ _SKIP_REASON = (
 
 
 @pytest.mark.skipif(not (_FORCED or _s3_reachable()), reason=_SKIP_REASON)
+def test_real_opera_belgium_slice_respects_topology_bounds(opera_module):
+    import aiohttp
+
+    async def fetch():
+        async with aiohttp.ClientSession() as session:
+            key = await opera_module._find_latest_valid_key(session)
+            assert key is not None
+            async with session.get(
+                opera_module._s3_path_from_key(key)
+            ) as response:
+                assert response.status == 200
+                return await response.read()
+
+    raw = asyncio.run(fetch())
+    cells, _ = opera_module._parse_hdf5_slice(
+        raw,
+        (3.0, 50.0, 6.0, 52.0),
+    )
+    rings, points = opera_module._raw_topology_stats([
+        opera_module._serialized_cell(cell) for cell in cells
+    ])
+    assert points <= opera_module.MAX_OPERA_TOPOLOGY_POINTS_PER_ARTIFACT
+    assert rings >= 0
+    for cell in cells:
+        assert isinstance(cell.footprint_polygons, tuple)
+        assert isinstance(cell.parent_footprint_polygons, tuple)
+        for polygon in (
+            *cell.footprint_polygons,
+            *cell.parent_footprint_polygons,
+        ):
+            assert all(ring[0] == ring[-1] for ring in polygon)
+
+
+@pytest.mark.skipif(not (_FORCED or _s3_reachable()), reason=_SKIP_REASON)
 def test_real_opera_file_has_expected_structure(opera_module):
     """
     Downloadt het nieuwste echte OPERA-bestand en controleert alleen de

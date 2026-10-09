@@ -15,10 +15,21 @@ ProjectionTargets -> StormManager -> dynamische RegionEngine(s)
 ```
 
 De huidige providers omvatten onder andere Blitzortung, OPERA/EUMETNET,
-KMI, KNMI, RainViewer, H SAF H40B, NOAA GOES-18/19 RRQPE en Netatmo.
+KMI, KNMI, RainViewer, H SAF H40B, NOAA GOES-18/19 RRQPE, Netatmo en
+Synoptic.
 Open-Meteo is optionele modelbegeleiding en staat standaard uit. OPERA-cellen met lage
 bronkwaliteit worden alleen operationeel gebruikt wanneer KMI, KNMI of
 RainViewer ze geografisch en temporeel bevestigt.
+
+Naast de vaste gronddekking van 20 km per regio kan één gedeelde virtuele
+regenverkenner een voorspelde buibaan in eender welke regio controleren. Deze
+passieve controle voedt alleen de kalibratiedatabase en beïnvloedt geen
+waarschuwingen of operationele ETA's.
+
+In Noord-Amerika gebruikt de worker Synoptic: 20 km rond een tracker voor
+lokale bevestiging en maximaal 50 km rond een voorspelde passage om een
+geschikt verkennerstation te vinden. In Europa blijft Netatmo de primaire
+grondbron.
 
 Brede OPERA-systemen behouden hun lokale RadarCells. De integratie markeert
 een systeem eerst als MCS-kandidaat wanneer de radarstructuur aan de
@@ -95,4 +106,7 @@ release notes.
 
 ## Versie
 
-De huidige integratieversie is **0.4.98**.
+De huidige integratieversie is **1.14.0** en de compatibele workerversie is
+**1.17.0**. In `worker_only` verwerkt de worker alle 29 catalogusbronnen,
+publiceert hij bronstatus en gecertificeerde positieve regenmetingen en blijft
+Home Assistant beperkt tot gewenste locaties, bediening en weergave.

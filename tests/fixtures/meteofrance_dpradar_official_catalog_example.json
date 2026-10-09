@@ -1,0 +1,21 @@
+{
+  "title": "Données mosaïque radar de LAME_D_EAU pour la zone METROPOLE",
+  "description": "Exemple contractuel dérivé de la documentation officielle de l'API Ciblée Radar",
+  "attribution": "Source : Météo-France",
+  "links": [
+    {
+      "href": "https://public-api.meteofrance.fr/public/DPRadar/mosaiques/METROPOLE/observations/LAME_D_EAU/produit?maille=1000",
+      "rel": "http://www.opengis.net/def/rel/ogc/1.0/data",
+      "type": "application/octet-stream+gzip",
+      "title": "Mosaïque radar de LAME_D_EAU pour la zone METROPOLE et à la maille 1000 du 2024-06-18T19:45:00Z",
+      "validity_time": "2024-06-18T19:45:00Z"
+    },
+    {
+      "href": "https://public-api.meteofrance.fr/public/DPRadar/mosaiques/METROPOLE/observations/LAME_D_EAU/produit?maille=500",
+      "rel": "http://www.opengis.net/def/rel/ogc/1.0/data",
+      "type": "application/x-hdf",
+      "title": "Mosaïque radar de LAME_D_EAU pour la zone METROPOLE et à la maille 500 du 2024-06-18T19:45:00Z",
+      "validity_time": "2024-06-18T19:45:00Z"
+    }
+  ]
+}

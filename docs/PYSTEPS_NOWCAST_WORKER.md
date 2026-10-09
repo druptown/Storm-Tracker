@@ -1,6 +1,6 @@
 # pySTEPS-nowcastworker voor Storm Tracker V3
 
-Status: Fase A-invoercontract en Fase-B-preflight aanwezig sinds 0.4.97; nog niet operationeel.
+Status: deterministische workerfase operationeel sinds 0.4.159.
 
 ## Doel
 
@@ -62,11 +62,13 @@ Daarom wordt pySTEPS later verpakt als een zelfstandige Home Assistant App
 
 ### Fase A — invoercontract
 
-Het observerende invoercontract is aanwezig: de gekozen radaroverlay wordt per
+Het begrensde invoercontract is aanwezig: de gekozen radaroverlay wordt per
 RegionEngine naar een vast, regelmatig raster genormaliseerd, exact per
 nominale minuut uitgelijnd en tot maximaal zes frames begrensd. Ongeldige
-overlays maken geen kunstmatig droog frame. Deze buffer voedt nog geen OFE,
-StormEngine of waarschuwingen; alleen compacte diagnostiek is beschikbaar.
+overlays maken geen kunstmatig droog frame. Vanaf twee frames levert de buffer
+een voorlopige vector en ETA met betrouwbaarheidsscore. Vanaf drie
+gevalideerde frames mag ze als fallback de operationele ETA en waarschuwingen
+voeden wanneer de klassieke centroidvector nog niet rijp is.
 
 - bronrasters naar één projectie en resolutie omzetten;
 - tijdstappen op exact dezelfde nominale minuten uitlijnen;
@@ -76,12 +78,21 @@ StormEngine of waarschuwingen; alleen compacte diagnostiek is beschikbaar.
 ### Fase B — deterministische worker
 
 - [x] Observerende preflight: meet een eenvoudige rastertranslatie en vergelijkt
-  die met het volgende werkelijke frame; publiceert alleen snelheid, richting en
-  overlapscore als experimentele diagnose.
-- Lucas–Kanade of een andere gevalideerde optische-stroommethode;
-- 0–90 minuten extrapolatie;
+  die met het volgende werkelijke frame; publiceert snelheid, richting en
+  overlapscore als experimentele diagnose en bewaart elke evaluatie in de
+  secundaire kalibratiedatabase.
+- [x] Begrensde rastermatching naast de centroidbaseline, inclusief
+  vectorconsistentie, groei/krimp en confidence. Alleen twee opeenvolgende
+  consistente vectoren krijgen de status `ready`.
+- [x] Herstel maximaal zes recente, exact compatibele sparse rasters uit
+  databaseschema 8, zodat een deploy niet opnieuw met een lege frameketen
+  begint.
+- [x] Gevalideerde begrensde rastertranslatie als deterministisch
+  bewegingsveld, volledig buiten HA Core;
+- [x] 0–60 minuten extrapolatie in stappen van vijf minuten;
+- [x] Compacte projectie per target zonder grote rasterpayload via MQTT;
 - vergelijken met de eerstvolgende werkelijke radarframes;
-- nog geen productie-waarschuwingen.
+- productie-waarschuwingen uitsluitend na verificatie op het derde frame.
 
 ### Fase C — operationele probabilistische nowcast
 
@@ -90,6 +101,20 @@ StormEngine of waarschuwingen; alleen compacte diagnostiek is beschikbaar.
 - passagekans en onzekerheid per target;
 - alleen activeren nadat de verificatiescores aantoonbaar beter zijn dan de
   huidige trajectlogica.
+
+### TODO na worker-first bewegingsanalyse
+
+- Moeilijk voorspelbare bewegingen met de volledige radarecho analyseren, niet
+  uitsluitend met het zwaartepunt van een stormobject.
+- Vervorming, groei, krimp, splitsing en samenvoeging expliciet herkennen.
+- Veranderende of gebogen banen en meerdere plausibele trajecten berekenen.
+- Per target een passagekans en begrijpelijke onzekerheidscorridor publiceren.
+- Nieuwe methodes via hindcast automatisch vergelijken met de bestaande
+  rastertranslatie en alleen operationeel toelaten wanneer ze aantoonbaar beter
+  presteren.
+- CPU, geheugen, rekentijd en wachtrij hard begrenzen; bij overschrijding of
+  fouten altijd terugvallen op de eenvoudige bewezen voorspelling zonder Home
+  Assistant te belasten.
 
 ### Fase D — modelblending
 

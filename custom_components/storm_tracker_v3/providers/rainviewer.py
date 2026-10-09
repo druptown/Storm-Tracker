@@ -25,12 +25,15 @@ from __future__ import annotations
 
 import logging
 import math
+import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Optional
 
 import aiohttp
 
+from ..engine.bounded_payload import iter_limited_async
 from ..engine.observation import Observation, ObservationType
 from .raster_components import extract_components, extract_intensity_runs
 
@@ -39,10 +42,30 @@ _LOGGER = logging.getLogger(__name__)
 RAINVIEWER_API_URL = "https://api.rainviewer.com/public/weather-maps.json"
 RAINVIEWER_TIMEOUT = 15
 RAINVIEWER_MAX_FRAME_AGE_S = 20 * 60
+RAINVIEWER_MANIFEST_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+RAINVIEWER_TILE_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+_HTTP_CHUNK_BYTES = 64 * 1024
 TILE_ZOOM          = 5   # zoom-level 5 = ~300km per tile
 TILE_GRID          = 2   # 2x2 grid = ~600km x ~600km rond het centrum
 TILE_SIZE          = 256
 RAINVIEWER_MIN_DBZ_ALPHA = 130  # Universal Blue: circa 8 dBZ
+RAINVIEWER_SYSTEM_GAP_KM = 8.0
+_TILE_ID_PATTERN = re.compile(r":t(-?\d+)_(-?\d+):")
+
+
+async def _read_bounded_response(response, *, maximum_bytes: int) -> bytes:
+    """Lees één ongecomprimeerde HTTP-body onder een expliciet bytecontract."""
+    encoding = response.headers.get("Content-Encoding")
+    if encoding and encoding.lower() != "identity":
+        raise ValueError(
+            "RainViewer-response gebruikt onverwachte transportcompressie"
+        )
+    return await iter_limited_async(
+        response.content.iter_chunked(_HTTP_CHUNK_BYTES),
+        maximum_bytes=maximum_bytes,
+        declared_bytes=response.headers.get("Content-Length"),
+        require_declared_match=True,
+    )
 
 
 def _tile_url(path: str, tx: int, ty: int) -> str:
@@ -106,6 +129,189 @@ def _pixel_to_latlon_tile(
     return lat, lon
 
 
+def _haversine_km(
+    lat1: float, lon1: float, lat2: float, lon2: float
+) -> float:
+    """Great-circle distance used to join components across tile seams."""
+    radius_km = 6371.0088
+    lat1_r, lat2_r = math.radians(lat1), math.radians(lat2)
+    dlat = lat2_r - lat1_r
+    dlon = math.radians(lon2 - lon1)
+    value = (
+        math.sin(dlat / 2.0) ** 2
+        + math.cos(lat1_r) * math.cos(lat2_r) * math.sin(dlon / 2.0) ** 2
+    )
+    return 2.0 * radius_km * math.asin(min(1.0, math.sqrt(value)))
+
+
+def _observation_points(observation: Observation) -> tuple[tuple[float, float], ...]:
+    """Return occupied footprint points with a centroid fallback."""
+    polygons = tuple(
+        getattr(observation, "footprint_polygons", ()) or ()
+    )
+    points = (
+        tuple(
+            point
+            for polygon in polygons
+            for ring in polygon
+            for point in ring
+        )
+        if polygons
+        else tuple(observation.footprint_points or ())
+    )
+    return points or ((float(observation.lat), float(observation.lon)),)
+
+
+def _footprint_gap_km(first: Observation, second: Observation) -> float:
+    """Approximate the minimum physical gap between two compact footprints."""
+    return min(
+        _haversine_km(first_lat, first_lon, second_lat, second_lon)
+        for first_lat, first_lon in _observation_points(first)
+        for second_lat, second_lon in _observation_points(second)
+    )
+
+
+def _tile_key(observation: Observation) -> Optional[tuple[int, int]]:
+    match = _TILE_ID_PATTERN.search(str(observation.radar_cell_id or ""))
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def group_frame_systems(
+    observations: list[Observation],
+    frame_timestamp: float,
+    *,
+    max_gap_km: float = RAINVIEWER_SYSTEM_GAP_KM,
+) -> list[Observation]:
+    """Group spatially connected RainViewer cells into frame-wide systems.
+
+    RainViewer tiles are segmented independently. A precipitation object that
+    crosses a tile boundary therefore arrives as two components. This graph
+    pass joins touching/near-touching footprints while retaining every
+    component as a child cell.
+    """
+    if not observations:
+        return []
+
+    ordered = sorted(
+        observations,
+        key=lambda item: (
+            str(item.radar_cell_id or ""),
+            round(float(item.lat), 6),
+            round(float(item.lon), 6),
+        ),
+    )
+    neighbours: list[set[int]] = [set() for _ in ordered]
+    for first_index, first in enumerate(ordered):
+        for second_index in range(first_index + 1, len(ordered)):
+            second = ordered[second_index]
+            first_tile = _tile_key(first)
+            second_tile = _tile_key(second)
+            if (
+                first_tile is not None
+                and second_tile is not None
+                and first_tile != second_tile
+                and _footprint_gap_km(first, second) <= max_gap_km
+            ):
+                neighbours[first_index].add(second_index)
+                neighbours[second_index].add(first_index)
+
+    groups: list[list[int]] = []
+    remaining = set(range(len(ordered)))
+    while remaining:
+        seed = min(remaining)
+        remaining.remove(seed)
+        stack = [seed]
+        group = []
+        while stack:
+            current = stack.pop()
+            group.append(current)
+            connected = sorted(neighbours[current] & remaining, reverse=True)
+            for index in connected:
+                remaining.remove(index)
+                stack.append(index)
+        groups.append(sorted(group))
+
+    groups.sort(
+        key=lambda group: tuple(
+            str(ordered[index].radar_cell_id or "") for index in group
+        )
+    )
+    for parent_index, group in enumerate(groups):
+        members = [ordered[index] for index in group]
+        parent_id = f"rainviewer:{frame_timestamp:.0f}:p{parent_index}"
+        parent_area = sum(float(item.area_km2 or 0.0) for item in members)
+        parent_points = tuple(
+            dict.fromkeys(
+                point
+                for item in members
+                for point in _observation_points(item)
+            )
+        )
+        parent_polygons = tuple(
+            polygon
+            for item in members
+            for polygon in (
+                getattr(item, "footprint_polygons", ()) or ()
+            )
+        )
+        for item in members:
+            item.parent_system_id = parent_id
+            item.parent_area_km2 = parent_area
+            item.parent_footprint_points = parent_points
+            item.parent_footprint_polygons = parent_polygons
+    return ordered
+
+
+def merge_frame_systems(
+    observations: list[Observation],
+    frame_timestamp: float,
+    *,
+    max_gap_km: float = RAINVIEWER_SYSTEM_GAP_KM,
+) -> list[Observation]:
+    """Return one area-weighted observation for each grouped weather system."""
+    grouped = group_frame_systems(
+        observations, frame_timestamp, max_gap_km=max_gap_km
+    )
+    by_parent: dict[str, list[Observation]] = {}
+    for item in grouped:
+        by_parent.setdefault(str(item.parent_system_id), []).append(item)
+
+    merged = []
+    for parent_id, members in sorted(by_parent.items()):
+        weights = [max(0.001, float(item.area_km2 or 0.0)) for item in members]
+        total_weight = sum(weights)
+        parent_area = sum(float(item.area_km2 or 0.0) for item in members)
+        parent_points = members[0].parent_footprint_points
+        parent_polygons = members[0].parent_footprint_polygons
+        merged.append(Observation(
+            obs_type=ObservationType.RADAR,
+            lat=sum(item.lat * weight for item, weight in zip(members, weights))
+                / total_weight,
+            lon=sum(item.lon * weight for item, weight in zip(members, weights))
+                / total_weight,
+            timestamp=frame_timestamp,
+            intensity=max(int(item.intensity or 0) for item in members),
+            max_dbz=max(
+                (float(item.max_dbz) for item in members if item.max_dbz is not None),
+                default=None,
+            ),
+            area_km2=parent_area,
+            quality=sum(
+                float(item.quality or 0.0) * weight
+                for item, weight in zip(members, weights)
+            ) / total_weight,
+            footprint_points=parent_points,
+            footprint_polygons=parent_polygons,
+            radar_cell_id=parent_id,
+            parent_system_id=parent_id,
+            parent_area_km2=parent_area,
+            parent_footprint_points=parent_points,
+            parent_footprint_polygons=parent_polygons,
+            source="rainviewer",
+        ))
+    return merged
+
+
 class RainViewerProvider:
     """
     Haalt RainViewer-radarafbeeldingen op en converteert natte pixels
@@ -115,7 +321,7 @@ class RainViewerProvider:
     geen pollingsinterval.
     """
 
-    def __init__(self, center_lat: float, center_lon: float) -> None:
+    def __init__(self, center_lat: float, center_lon: float, hass=None) -> None:
         """
         Args:
             center_lat/center_lon: centrum van de regio — bepaalt welke
@@ -123,6 +329,7 @@ class RainViewerProvider:
         """
         self._center_lat  = center_lat
         self._center_lon  = center_lon
+        self._hass = hass
         self._last_path:  Optional[str] = None   # om dubbele frames te skippen
         self._last_observations: list[Observation] = []
         self._last_poll_ts: Optional[float] = None
@@ -181,6 +388,36 @@ class RainViewerProvider:
         """
         now = time.time()
         self._last_poll_ts = now
+        if self._hass is not None:
+            try:
+                from ..worker_radar_client import async_fetch_worker_radar
+
+                observations, overlay, diagnostics, artifact = await async_fetch_worker_radar(
+                    self._hass,
+                    "rainviewer_fetch",
+                    {"regions": [{
+                        "center_lat": self._center_lat,
+                        "center_lon": self._center_lon,
+                        "horizon_km": 350.0,
+                    }]},
+                    provider="rainviewer",
+                    timeout=90,
+                    max_age_seconds=RAINVIEWER_MAX_FRAME_AGE_S,
+                )
+                self.overlay = overlay
+                self.last_worker_artifact = artifact
+                self._last_observations = list(observations)
+                self._last_frame_ts = float(overlay["timestamp"])
+                self._last_path = str(diagnostics.get("path") or self._last_frame_ts)
+                self._mark_healthy(now)
+                return observations
+            except Exception as err:
+                self._mark_unhealthy(f"workerfout: {type(err).__name__}")
+                _LOGGER.warning(
+                    "RainViewer-worker niet beschikbaar; lokale decode is bewust uitgeschakeld: %s",
+                    err,
+                )
+                return list(self._last_observations)
         try:
             frame = await self._fetch_latest_frame()
             if frame is None:
@@ -220,11 +457,18 @@ class RainViewerProvider:
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=RAINVIEWER_TIMEOUT)
             ) as session:
-                async with session.get(RAINVIEWER_API_URL) as resp:
+                async with session.get(
+                    RAINVIEWER_API_URL,
+                    headers={"Accept-Encoding": "identity"},
+                ) as resp:
                     if resp.status != 200:
                         self._mark_unhealthy(f"manifest gaf HTTP {resp.status}")
                         return None
-                    data = await resp.json(content_type=None)
+                    raw = await _read_bounded_response(
+                        resp,
+                        maximum_bytes=RAINVIEWER_MANIFEST_MAX_RESPONSE_BYTES,
+                    )
+                    data = json.loads(raw.decode("utf-8"))
                     radar = data.get("radar", {}).get("past", [])
                     if not radar:
                         self._mark_unhealthy("manifest bevat geen radarframes")
@@ -257,19 +501,31 @@ class RainViewerProvider:
                     tx, ty = cx + dx, cy + dy
                     url    = _tile_url(path, tx, ty)
                     try:
-                        async with session.get(url) as resp:
+                        async with session.get(
+                            url,
+                            headers={"Accept-Encoding": "identity"},
+                        ) as resp:
                             if resp.status != 200:
                                 continue
-                            image_data = await resp.read()
+                            image_data = await _read_bounded_response(
+                                resp,
+                                maximum_bytes=RAINVIEWER_TILE_MAX_RESPONSE_BYTES,
+                            )
                         obs.extend(self._extract_observations(
                             image_data, tx, ty, frame_timestamp
                         ))
                     except Exception:
                         continue
 
-        _LOGGER.debug("RainViewerProvider: %d observaties over %dx%d tiles",
-                      len(obs), TILE_GRID + 1, TILE_GRID + 1)
-        return obs
+        grouped = merge_frame_systems(obs, frame_timestamp)
+        parent_count = len({
+            item.parent_system_id for item in grouped if item.parent_system_id
+        })
+        _LOGGER.debug(
+            "RainViewerProvider: %d cellen in %d systemen over %dx%d tiles",
+            len(grouped), parent_count, TILE_GRID + 1, TILE_GRID + 1,
+        )
+        return grouped
 
     def _extract_observations(
         self, image_data: bytes, tx: int, ty: int,
@@ -330,10 +586,12 @@ class RainViewerProvider:
                     intensity=component.max_intensity,
                     area_km2=area_km2, quality=0.70,
                     footprint_points=component.boundary,
+                    footprint_polygons=component.polygons,
                     radar_cell_id=component_id,
                     parent_system_id=component_id,
                     parent_area_km2=area_km2,
                     parent_footprint_points=component.boundary,
+                    parent_footprint_polygons=component.polygons,
                     source="rainviewer",
                 ))
 

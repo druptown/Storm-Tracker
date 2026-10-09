@@ -1,0 +1,42 @@
+{
+  "schema": "stv3-dpc-sri-v2-live-identity-profile-v1",
+  "observed_read_only_utc": "2026-08-02T05:39Z",
+  "official_authorities": {
+    "platform": "https://mappe.protezionecivile.gov.it/it/mappe-e-dashboard-rischi/piattaforma-radar/",
+    "api_documentation": "https://dpc-radar.readthedocs.io/it/latest/api.html",
+    "product_documentation": "https://dpc-radar.readthedocs.io/it/latest/clientwss.html"
+  },
+  "catalog": {
+    "endpoint": "https://radar-api.protezionecivile.it/findLastProductByType?type=SRI",
+    "exact_body": "{\"total\":1,\"lastProducts\":[{\"productType\":\"SRI\",\"time\":1785648600000,\"period\":\"PT5M\"}]}",
+    "sha256": "e2deb1ffadf8f2afe26f50040bb92291af1656201f8e7976b5ad55da37f01d58",
+    "product_time_ms": 1785648600000,
+    "period": "PT5M"
+  },
+  "download_identity": {
+    "bucket": "s3-prod-dpc-radar",
+    "object_host": "s3-prod-dpc-radar.s3.eu-south-1.amazonaws.com",
+    "expires_seconds_observed": 300,
+    "credential_query_persisted": false
+  },
+  "object": {
+    "key": "SRI/02-08-2026-05-30.tif",
+    "content_type": "binary/octet-stream",
+    "size_bytes": 385126,
+    "etag": "23300b18b47a941478a64eed513a3998",
+    "sha256": "02b4cafe0c2a689a41ff36b0f6c444bb6171983d76db07688ea17889e1590e7a",
+    "first_16_bytes_hex": "49492a0040b2050080000781c6340a09",
+    "ifd_offset": 373312,
+    "ifd_entries": 24,
+    "tiff_profile": {
+      "width": 1200,
+      "height": 1400,
+      "bits_per_sample": 32,
+      "compression": 5,
+      "samples_per_pixel": 1,
+      "sample_format": 3
+    },
+    "georeference_tags": [33550, 33922, 34735]
+  },
+  "large_object_committed_to_repository": false
+}

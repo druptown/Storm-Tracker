@@ -1,0 +1,13 @@
+retry_quarantined_observations:
+  name: Opgeslagen observaties opnieuw verwerken
+  description: >-
+    Biedt alle in het geheugen geïsoleerde observatiebatches opnieuw aan.
+    Laat RegionEngine leeg om alle actieve regio's te verwerken.
+  fields:
+    region_engine:
+      name: RegionEngine
+      description: Optionele exacte ID van één actieve RegionEngine.
+      required: false
+      example: region_50.85_4.35
+      selector:
+        text:

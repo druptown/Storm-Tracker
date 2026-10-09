@@ -31,8 +31,15 @@ class McsHistoryStore:
         snapshots = storm_engine.export_mcs_history()
         if snapshots:
             self._data[engine_key] = snapshots
-        else:
-            self._data.pop(engine_key, None)
+        # Een lege runtimebatch kan vlak vóór of tijdens een herstart
+        # voorkomen terwijl de recente radarframecache nog geldig is.  Wis
+        # dan niet de laatste geometrie en storm-ID: restore_mcs_history()
+        # past bij het teruglezen zelf de strikte leeftijdsgrenzen toe en de
+        # eerste nieuwe contour kan daardoor veilig op tijd, positie,
+        # footprint en beweging tegen het oude object worden gematcht.
+        #
+        # Een regio die werkelijk verdwijnt wordt via async_remove_engine()
+        # expliciet verwijderd; dit bewaren veroorzaakt dus geen weesregio's.
         await self._store.async_save({"engines": self._data})
 
     async def async_remove_engine(self, engine_key: str) -> None:

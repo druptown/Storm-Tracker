@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import json
 from types import MappingProxyType
 
@@ -21,13 +22,40 @@ from storm_tracker_worker.thin_observation import (
     ObservationQuality,
 )
 from storm_tracker_worker.thin_provider_runtime import ProviderResult
-from storm_tracker_worker.thin_provider_adapters import ThinRadarField
+from storm_tracker_worker.thin_provider_adapters import ThinRadarField, ThinVisualRadarField
 from storm_tracker_worker.thin_radar_tracking import RadarTrack
 from storm_tracker_worker.thin_regional_radar_fusion import (
     FusedRegionalRadarField,
     RegionalFusionSummary,
 )
 from storm_tracker_worker.tracking_core.operational_snapshot import validate_snapshot
+
+
+@pytest.mark.parametrize("latitude,checked_at,expected", [
+    (50.85, 100.0, "inside"), (51.0, 100.0, "unknown"),
+    (50.85, -90000.0, "unknown"),
+])
+def test_nominal_coverage_is_bound_to_actual_target_position(latitude, checked_at, expected):
+    from storm_tracker_worker.thin_provider_adapters import RainViewerNominalCoverage
+    runtime = ThinOperationalRuntime(provider_runtime=EmptyProviders(), clock=lambda: 100.0)
+    runtime.apply_desired_state(_state())
+    field = ThinVisualRadarField(
+        "rainviewer", "visual", 100.0, 4.0, 51.0, .01, .01,
+        np.zeros((30, 50), dtype=np.uint8),
+        nominal_coverage=(RainViewerNominalCoverage("home", latitude, 4.35, "inside", checked_at),),
+    )
+    runtime._latest_provider_results["rainviewer"] = ProviderResult(
+        "rainviewer", True, "empty", "no_observations", (), 100.0, 100.0,
+        visual_radar_fields=(field,),
+    )
+    collection = runtime._build_geojson(
+        type("Fusion", (), {"observations": (), "evaluated_at": 100.0})(),
+        type("Nowcast", (), {"storm_cells": ()})(),
+    )
+    target = next(f for f in collection["features"] if f["properties"]["layer"] == "target")
+    coverage = target["properties"]["rainviewer_nominal_coverage"]
+    assert coverage["state"] == expected
+    assert coverage["live_operation_confirmed"] is False
 
 
 def _state(
@@ -155,6 +183,153 @@ class EmptyProviders:
 
 class ReadyAemetProviders(EmptyProviders):
     ready_provider_ids = frozenset({"aemet_radar"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("observed_at,expected", [(100.0, True), (-3000.0, False)])
+async def test_spanish_visual_echo_is_not_lost_when_home_has_quantitative_cells(observed_at, expected):
+    document = _home_state()
+    document["targets"].append({
+        **document["targets"][0], "target_id": "test_tracker", "kind": "test",
+        "display_name": "Valencia", "country_code": "ES",
+        "latitude": 39.4699, "longitude": -0.3763,
+    })
+    levels = np.zeros((100, 100), dtype=np.uint8)
+    # Pixel centre -0.745, 39.335: the missing echo ~35 km SW of Valencia.
+    levels[66, 25] = 4
+    visual = ThinVisualRadarField(
+        "aemet_radar", "radar_composite", observed_at,
+        -1.0, 40.0, 0.01, 0.01, levels,
+    )
+
+    class Providers(_NativeRadarProviders):
+        async def fetch(self, requests):
+            results = await super().fetch(requests)
+            results["aemet_radar"] = ProviderResult(
+                "aemet_radar", True, "empty", "no_observations", (),
+                100.0, 100.0, visual_radar_fields=(visual,),
+            )
+            return results
+
+    runtime = ThinOperationalRuntime(provider_runtime=Providers(), clock=lambda: 100.0)
+    activated = runtime.apply_desired_state(document)
+    result = await runtime.run_cycle()
+    collection = runtime.geojson_collection()
+    assert result.nowcast.storm_cells  # The home region is already tracking.
+    target = next(f for f in collection["features"]
+                  if f["properties"].get("target_id") == "test_tracker")
+    overlay = collection["radar_overlays"].get(target["properties"]["region_engine"])
+    if not expected:
+        assert overlay is None
+        return
+    assert overlay is not None
+    assert overlay["provider_id"] == "aemet_radar"
+    assert overlay["quantity"] == "visual_class"
+    assert "threshold_mm_h" not in overlay
+    assert len(overlay["runs"]) == 1
+    assert overlay["runs"][0]["intensity"] == 4
+    assert overlay["runs"][0]["ring"][0] == [39.34, -0.75]
+    # A colour class must never fabricate a quantitative radar contributor.
+    assert "aemet_radar" not in result.nowcast.target_results["test_tracker"].contributors
+    assert all(cell.region_id == "region:home" for cell in result.nowcast.storm_cells)
+    home_result = result.nowcast.target_results["home"]
+    original_region = target["properties"]["region_engine"]
+    # Moving the fictive target back home removes the external display layer;
+    # its Spanish pixels must not bleed into the shared Belgian region.
+    document["generation"] += 1
+    document["previous_state_sha256"] = activated["state_sha256"]
+    document["targets"][-1].update(
+        latitude=51.05, longitude=4.42, country_code="BE",
+    )
+    runtime.apply_desired_state(document)
+    moved = await runtime.run_cycle()
+    assert original_region not in runtime.geojson_collection()["radar_overlays"]
+    assert all(overlay["provider_id"] != "aemet_radar"
+               for overlay in runtime.geojson_collection()["radar_overlays"].values())
+    assert moved.nowcast.target_results["home"].current_state == home_result.current_state
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_id,latitude,longitude,country", [
+    ("rainviewer", 25.7617, -80.1918, "US"),
+    ("aemet_radar", 39.4699, -0.3763, "ES"),
+])
+async def test_visual_map_selects_intersecting_field_not_another_regions_first_field(
+    provider_id, latitude, longitude, country,
+):
+    document = _home_state()
+    document["targets"].append({
+        **document["targets"][0], "target_id": "test_tracker", "kind": "test",
+        "country_code": country, "latitude": latitude, "longitude": longitude,
+    })
+    levels = np.zeros((100, 100), dtype=np.uint8)
+    levels[50, 50] = 4
+    foreign = ThinVisualRadarField(provider_id, "visual", 100., 4., 52., .01, .01, levels)
+    local = ThinVisualRadarField(provider_id, "visual", 100., longitude-.5, latitude+.5, .01, .01, levels)
+
+    class Providers(_NativeRadarProviders):
+        async def fetch(self, requests):
+            results = await super().fetch(requests)
+            results[provider_id] = ProviderResult(
+                provider_id, True, "empty", "no_observations", (), 100., 100.,
+                visual_radar_fields=(foreign, local),
+            )
+            return results
+
+    runtime = ThinOperationalRuntime(provider_runtime=Providers(), clock=lambda: 100.)
+    runtime.apply_desired_state(document)
+    result = await runtime.run_cycle()
+    collection = runtime.geojson_collection()
+    target = next(f for f in collection["features"] if f["properties"].get("target_id") == "test_tracker")
+    overlay = collection["radar_overlays"].get(target["properties"]["region_engine"])
+    assert result.nowcast.storm_cells
+    assert overlay is not None
+    assert overlay["provider_id"] == provider_id
+    assert overlay["runs"][0]["intensity"] == 4
+    assert abs(overlay["runs"][0]["ring"][0][1] - longitude) < .1
+    assert provider_id not in result.nowcast.target_results["test_tracker"].contributors
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_id,country,latitude,longitude", [
+    ("opera_radar", "PL", 52.23, 21.01),
+    ("rainviewer", "US", 25.76, -80.19),
+])
+async def test_polygon_only_radar_remains_visible_beside_another_regions_native_cells(
+    provider_id, country, latitude, longitude,
+):
+    document = _home_state()
+    document["targets"].append({
+        **document["targets"][0], "target_id": "test_tracker", "kind": "test",
+        "country_code": country, "latitude": latitude, "longitude": longitude,
+    })
+    polygon = {"type": "Polygon", "coordinates": [[
+        [longitude, latitude], [longitude+.1, latitude],
+        [longitude+.1, latitude+.1], [longitude, latitude+.1], [longitude, latitude],
+    ]]}
+    observation = NormalizedObservation.create(
+        provider_id=provider_id, product_id="visual", target_id=None,
+        kind=ObservationKind.RADAR_LEVEL, value=4., unit="level",
+        observed_at=100., received_at=100., latitude=latitude, longitude=longitude,
+        quality=ObservationQuality.SUSPECT, geometry=polygon,
+        metadata={"spatial_cell": True, "quantitative_semantics_eligible": False},
+    )
+    class Providers(_NativeRadarProviders):
+        async def fetch(self, requests):
+            results = await super().fetch(requests)
+            results[provider_id] = ProviderResult(provider_id, True, "operational", None, (observation,), 100., 100.)
+            return results
+    runtime = ThinOperationalRuntime(provider_runtime=Providers(), clock=lambda: 100.)
+    runtime.apply_desired_state(document)
+    await runtime.run_cycle()
+    collection = runtime.geojson_collection()
+    target = next(f for f in collection["features"] if f["properties"].get("target_id") == "test_tracker")
+    displayed = [f for f in collection["features"] if f["properties"].get("provider_id") == provider_id
+                 and f["properties"].get("layer") == "radar_cell"]
+    assert len(displayed) == 1
+    assert displayed[0]["properties"]["engine_id"] == target["properties"]["region_engine"]
+    assert displayed[0]["geometry"] == polygon
+    assert displayed[0]["properties"]["intensity"] is None
 
 
 class ReadyMeteoFranceProviders(EmptyProviders):
@@ -452,7 +627,11 @@ async def test_native_tracks_survive_cycles_without_a_new_provider_result():
                 "dwd_radolan", True, "operational", None, (observation,), clock[0], clock[0], (field,),
             )}
 
-    runtime = ThinOperationalRuntime(provider_runtime=RadarProviders(), clock=lambda: clock[0])
+    runtime = ThinOperationalRuntime(
+        provider_runtime=RadarProviders(),
+        regional_radar_coordinator=_RegionalCoordinator({}),
+        clock=lambda: clock[0],
+    )
     runtime.apply_desired_state(_state())
     await runtime.run_cycle()
     clock[0] = 400.0
@@ -545,6 +724,7 @@ class _RecordingRadarTracker:
             rain_rate_mm_h=5.0,
             velocity_east_kmh=10.0,
             velocity_north_kmh=0.0,
+            motion_ready=True,
             geometry={
                 "type": "MultiPolygon",
                 "coordinates": [[[[4.41, 51.04], [4.43, 51.04],
@@ -576,6 +756,60 @@ class _NativeRadarProviders:
                 "dwd_radolan", True, "operational", None, (observation,),
                 100.0, 100.0, (field,),
             ),
+        }
+
+
+class _MixedBelgianRadarProviders:
+    async def fetch(self, requests):
+        fields = tuple(
+            _runtime_radar_field(provider_id)
+            for provider_id in (
+                "opera_radar",
+                "knmi_radar",
+                "dwd_radolan",
+                "rainviewer",
+                "kmi_appv4",
+            )
+        )
+        observations = tuple(
+            NormalizedObservation.create(
+                provider_id=field.provider_id,
+                product_id="rain-rate",
+                target_id=None,
+                kind=ObservationKind.RAIN_RATE,
+                value=5.0,
+                unit="mm/h",
+                observed_at=100.0,
+                received_at=100.0,
+                latitude=51.05,
+                longitude=4.42,
+                quality=ObservationQuality.GOOD,
+                geometry={
+                    "type": "Polygon",
+                    "coordinates": [[
+                        [4.41, 51.04], [4.43, 51.04],
+                        [4.43, 51.06], [4.41, 51.06],
+                        [4.41, 51.04],
+                    ]],
+                },
+            )
+            for field in fields
+        )
+        return {
+            field.provider_id: ProviderResult(
+                field.provider_id,
+                True,
+                "operational",
+                None,
+                tuple(
+                    item for item in observations
+                    if item.provider_id == field.provider_id
+                ),
+                100.0,
+                100.0,
+                (field,),
+            )
+            for field in fields
         }
 
 
@@ -617,6 +851,67 @@ class _DryPointWithWetNativeRadarProviders:
         }
 
 
+class _WetPointWithDryPreferredNativeRadarProviders:
+    async def fetch(self, requests):
+        target = next(
+            target
+            for request in requests
+            for target in request.targets
+            if target.target_id == "home"
+        )
+        field = _runtime_radar_field("kmi_appv4")
+        field.rain_rate_mm_h[:] = 0.0
+        radar_point = NormalizedObservation.create(
+            provider_id="knmi_radar",
+            product_id="rain-rate",
+            target_id=target.target_id,
+            kind=ObservationKind.RAIN_RATE,
+            value=1.2,
+            unit="mm/h",
+            observed_at=100.0,
+            received_at=100.0,
+            latitude=target.latitude,
+            longitude=target.longitude,
+            quality=ObservationQuality.GOOD,
+            geometry={
+                "type": "Point",
+                "coordinates": [target.longitude, target.latitude],
+            },
+        )
+        dry_station = NormalizedObservation.create(
+            provider_id="kmi_aws",
+            product_id="ground-observation",
+            target_id=target.target_id,
+            kind=ObservationKind.RAIN_RATE,
+            value=0.0,
+            unit="mm/h",
+            observed_at=100.0,
+            received_at=100.0,
+            latitude=target.latitude,
+            longitude=target.longitude,
+            quality=ObservationQuality.GOOD,
+            geometry={
+                "type": "Point",
+                "coordinates": [target.longitude, target.latitude],
+            },
+            metadata={"station_id": "06451"},
+        )
+        return {
+            "kmi_appv4": ProviderResult(
+                "kmi_appv4", True, "operational", None, (),
+                100.0, 100.0, (field,),
+            ),
+            "knmi_radar": ProviderResult(
+                "knmi_radar", True, "operational", None, (radar_point,),
+                100.0, 100.0,
+            ),
+            "kmi_aws": ProviderResult(
+                "kmi_aws", True, "operational", None, (dry_station,),
+                100.0, 100.0,
+            ),
+        }
+
+
 @pytest.mark.asyncio
 async def test_completed_fusion_is_primary_tracking_source():
     fused = _runtime_radar_field("fusion:region:home")
@@ -641,6 +936,27 @@ async def test_completed_fusion_is_primary_tracking_source():
     assert radar_metadata[0]["region_id"] == "region:home"
     assert "rain_rate_mm_h" not in json.dumps(radar_metadata)
     assert "valid_mask" not in json.dumps(radar_metadata)
+
+
+@pytest.mark.asyncio
+async def test_completed_fusion_tracks_once_per_shared_region_not_per_target():
+    fused = _runtime_radar_field("fusion:region:home")
+    coordinator = _RegionalCoordinator({"region:home": _regional_result(fused)})
+    runtime = ThinOperationalRuntime(
+        provider_runtime=_NativeRadarProviders(),
+        regional_radar_coordinator=coordinator,
+        clock=lambda: 100.0,
+    )
+    runtime._radar_tracker = _RecordingRadarTracker()
+    runtime.apply_desired_state(_shared_home_state())
+
+    result = await runtime.run_cycle()
+
+    assert len(runtime._radar_tracker.fields) == 1
+    assert len(result.nowcast.storm_cells) == 1
+    assert result.nowcast.storm_cells[0].cell_id.startswith(
+        "fusion:region:home:region:home:"
+    )
 
 
 @pytest.mark.asyncio
@@ -694,7 +1010,7 @@ async def test_light_rain_is_mapped_without_becoming_a_tracked_cell():
 
 
 @pytest.mark.asyncio
-async def test_pending_fusion_uses_marked_per_provider_fallback():
+async def test_pending_fusion_uses_single_native_cell_tracking():
     coordinator = _RegionalCoordinator(pending=True)
     runtime = ThinOperationalRuntime(
         provider_runtime=_NativeRadarProviders(),
@@ -706,12 +1022,34 @@ async def test_pending_fusion_uses_marked_per_provider_fallback():
 
     result = await runtime.run_cycle()
 
-    assert any(
-        cell.provider_id == "dwd_radolan"
-        for cell in result.nowcast.storm_cells
-    )
+    assert len(result.nowcast.storm_cells) == 1
+    assert {cell.provider_id for cell in result.nowcast.storm_cells} == {
+        "dwd_radolan",
+    }
+    assert tuple(runtime._radar_tracker.fields) == ("region:home",)
     assert result.regional_radar[0].mode == "fallback"
     assert result.regional_radar[0].reason_codes == ("fusion_pending",)
+
+
+@pytest.mark.asyncio
+async def test_pending_fusion_uses_one_geographic_fallback_not_all_raw_layers():
+    coordinator = _RegionalCoordinator(pending=True)
+    runtime = ThinOperationalRuntime(
+        provider_runtime=_MixedBelgianRadarProviders(),
+        regional_radar_coordinator=coordinator,
+        clock=lambda: 100.0,
+    )
+    runtime._radar_tracker = _RecordingRadarTracker()
+    runtime.apply_desired_state(_home_state())
+
+    result = await runtime.run_cycle()
+
+    assert tuple(runtime._radar_tracker.fields) == ("region:home",)
+    assert runtime._radar_tracker.fields["region:home"].provider_id == "kmi_appv4"
+    assert len(result.nowcast.storm_cells) == 1
+    assert {cell.provider_id for cell in result.nowcast.storm_cells} == {
+        "kmi_appv4",
+    }
 
 
 @pytest.mark.asyncio
@@ -733,6 +1071,28 @@ async def test_pending_fusion_uses_wet_native_radar_for_target_status():
     assert [item.provider_id for item in result.fusion.observations] == [
         "open_meteo",
     ]
+
+
+@pytest.mark.asyncio
+async def test_dry_preferred_map_layer_rejects_conflicting_radar_point_rain():
+    coordinator = _RegionalCoordinator(pending=True)
+    runtime = ThinOperationalRuntime(
+        provider_runtime=_WetPointWithDryPreferredNativeRadarProviders(),
+        regional_radar_coordinator=coordinator,
+        clock=lambda: 100.0,
+    )
+    runtime.apply_desired_state(_home_state())
+
+    result = await runtime.run_cycle()
+
+    target = result.nowcast.target_results["home"]
+    assert target.current_state == "droog"
+    assert target.precipitation_rate_mm_h == 0.0
+    ground = result.snapshot["targets"]["items"][0][
+        "current_precipitation"
+    ]["ground_evidence"]
+    assert ground["status"] == "dry"
+    assert ground["wet_site_count"] == 0
 
 
 class BrokenPostGIS:
@@ -1018,10 +1378,23 @@ async def test_snapshot_ttl_starts_when_slow_postgis_cycle_is_published():
     snapshot = (await runtime.run_cycle()).snapshot
 
     assert snapshot["evaluated_at"] == 400.0
-    assert snapshot["valid_until"] == 520.0
+    assert snapshot["valid_until"] == 700.0
     assert snapshot["product_valid_at"] == 100.0
     assert snapshot["received_at"] == 100.0
     validate_snapshot(snapshot)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_remains_current_during_worst_case_provider_cycle():
+    runtime = ThinOperationalRuntime(
+        provider_runtime=ZeroRainProviders(),
+        clock=lambda: 100.0,
+    )
+    runtime.apply_desired_state(_state())
+
+    snapshot = (await runtime.run_cycle()).snapshot
+
+    assert snapshot["valid_until"] - snapshot["evaluated_at"] >= 300.0
 
 
 @pytest.mark.asyncio
@@ -1113,6 +1486,43 @@ async def test_runtime_keeps_last_life360_region_during_grace_then_expires_it():
     assert [
         item["target_id"] for item in expired["targets"]["items"]
     ] == ["home"]
+
+
+@pytest.mark.asyncio
+async def test_moved_target_drops_cached_ground_station_without_disturbing_home():
+    document = _home_state()
+    document["targets"].append({
+        **document["targets"][0], "target_id": "test_tracker", "kind": "test",
+        "latitude": 51.5074, "longitude": -0.1278, "country_code": "GB",
+    })
+
+    class Providers:
+        called = False
+
+        async def fetch(self, requests):
+            if self.called:
+                return {}
+            self.called = True
+            observations = tuple(NormalizedObservation.create(
+                provider_id="metar", product_id="ground_observation",
+                target_id=target["target_id"], kind=ObservationKind.PRESSURE,
+                value=1010.0, unit="hPa", observed_at=100.0, received_at=100.0,
+                quality=ObservationQuality.GOOD,
+                latitude=target["latitude"], longitude=target["longitude"],
+                metadata={"station_id": target["target_id"]},
+            ) for target in document["targets"])
+            return {"metar": ProviderResult("metar", True, "operational", None,
+                                            observations, 100.0, 100.0)}
+
+    runtime = ThinOperationalRuntime(provider_runtime=Providers(), clock=lambda: 100.0)
+    accepted = runtime.apply_desired_state(document)
+    assert len((await runtime.run_cycle()).fusion.observations) == 2
+    document["generation"] += 1
+    document["previous_state_sha256"] = accepted["state_sha256"]
+    document["targets"][-1].update(latitude=35.6762, longitude=139.6503, country_code="JP")
+    runtime.apply_desired_state(document)
+    moved = await runtime.run_cycle()
+    assert {o.target_id for o in moved.fusion.observations} == {"home"}
 
 
 @pytest.mark.asyncio
@@ -1226,7 +1636,7 @@ async def test_wet_physical_station_is_published_as_current_ground_confirmation(
 
 
 @pytest.mark.asyncio
-async def test_moving_threat_does_not_publish_uncalibrated_probability():
+async def test_polygon_only_motion_does_not_publish_threat_probability():
     now = [100.0]
     runtime = ThinOperationalRuntime(
         provider_runtime=MovingRadarProviders(),
@@ -1240,7 +1650,7 @@ async def test_moving_threat_does_not_publish_uncalibrated_probability():
     snapshot = (await runtime.run_cycle()).snapshot
     threat = snapshot["targets"]["items"][0]["next_threat"]
 
-    assert threat["state"] == "available"
+    assert threat["state"] == "none"
     assert threat["calibrated_probability_percent"] is None
     assert threat["probability_calibration_id"] is None
     validate_snapshot(snapshot)
@@ -1308,7 +1718,136 @@ def _storm_cell(index: int, *, coordinates_per_ring: int = 0) -> StormCell:
         velocity_north_kmh=0.0,
         speed_kmh=0.0,
         heading_deg=None,
+        motion_ready=False,
     )
+
+
+def test_geojson_publishes_motion_only_for_motion_ready_cells():
+    runtime = ThinOperationalRuntime(
+        provider_runtime=EmptyProviders(),
+        clock=lambda: 100.0,
+    )
+    runtime.apply_desired_state(_state())
+    fusion = type("Fusion", (), {"observations": (), "evaluated_at": 100.0})()
+    provisional = replace(
+        _storm_cell(1),
+        velocity_east_kmh=120.0,
+        speed_kmh=120.0,
+        heading_deg=90.0,
+        motion_ready=False,
+    )
+    ready = replace(provisional, cell_id="cell-ready", motion_ready=True)
+
+    provisional_collection = runtime._build_geojson(
+        fusion,
+        type("Nowcast", (), {"storm_cells": (provisional,)})(),
+    )
+    ready_collection = runtime._build_geojson(
+        fusion,
+        type("Nowcast", (), {"storm_cells": (ready,)})(),
+    )
+
+    assert not [
+        feature for feature in provisional_collection["features"]
+        if feature["properties"]["layer"] == "motion"
+    ]
+    assert len([
+        feature for feature in ready_collection["features"]
+        if feature["properties"]["layer"] == "motion"
+    ]) == 1
+
+
+def test_geojson_keeps_each_cell_in_its_producing_region():
+    runtime = ThinOperationalRuntime(
+        provider_runtime=EmptyProviders(),
+        clock=lambda: 100.0,
+    )
+    runtime.apply_desired_state(_state())
+    fusion = type("Fusion", (), {"observations": (), "evaluated_at": 100.0})()
+    cell = replace(_storm_cell(1), region_id="region:cell-source")
+
+    collection = runtime._build_geojson(
+        fusion,
+        type("Nowcast", (), {"storm_cells": (cell,)})(),
+    )
+
+    radar_cell = next(
+        feature for feature in collection["features"]
+        if feature["properties"]["layer"] == "radar_cell"
+    )
+    assert radar_cell["properties"]["engine_id"] == "region:cell-source"
+
+
+def test_geojson_deduplicates_used_ground_station_across_targets():
+    """One physical station must remain one map marker with target links."""
+    runtime = ThinOperationalRuntime(
+        provider_runtime=EmptyProviders(),
+        clock=lambda: 100.0,
+    )
+    runtime.apply_desired_state(_shared_home_state())
+    shared = {
+        "provider_id": "netatmo",
+        "product_id": "public_station",
+        "observed_at": 95.0,
+        "received_at": 100.0,
+        "latitude": 51.06,
+        "longitude": 4.43,
+        "quality": ObservationQuality.GOOD,
+        "geometry": {"type": "Point", "coordinates": [4.43, 51.06]},
+        "metadata": {"station_id": "70:ee:50:29:59:56"},
+    }
+    observations = (
+        NormalizedObservation.create(
+            **shared,
+            target_id="home",
+            kind=ObservationKind.RAIN_RATE,
+            value=0.4,
+            unit="mm/h",
+        ),
+        NormalizedObservation.create(
+            **shared,
+            target_id="home",
+            kind=ObservationKind.PRESSURE,
+            value=1008.0,
+            unit="hPa",
+        ),
+        NormalizedObservation.create(
+            **shared,
+            target_id="person.family",
+            kind=ObservationKind.RAIN_RATE,
+            value=0.4,
+            unit="mm/h",
+        ),
+    )
+    fusion = type(
+        "Fusion",
+        (),
+        {"observations": observations, "evaluated_at": 100.0},
+    )()
+
+    collection = runtime._build_geojson(
+        fusion,
+        type("Nowcast", (), {"storm_cells": ()})(),
+    )
+
+    stations = [
+        feature for feature in collection["features"]
+        if feature["properties"]["layer"] == "ground_station"
+    ]
+    assert len(stations) == 1
+    station = stations[0]
+    assert station["geometry"] == {
+        "type": "Point",
+        "coordinates": [4.43, 51.06],
+    }
+    assert station["properties"]["provider_id"] == "netatmo"
+    assert station["properties"]["station_id"] == "70:ee:50:29:59:56"
+    assert station["properties"]["target_ids"] == ["home", "person.family"]
+    assert station["properties"]["measurements"] == ["pressure", "rain_rate"]
+    assert set(station["properties"]["target_distances_km"]) == {
+        "home",
+        "person.family",
+    }
 
 
 def test_geojson_includes_all_storm_cells_when_payload_fits_transport_budget():

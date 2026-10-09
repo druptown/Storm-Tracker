@@ -1,0 +1,1 @@
+{"body":[{"_id":"70:ee:50:29:59:56","place":{"location":[4.418,51.047]},"last_status_store":1722000001,"measures":{"02:00:00:aa:bb:cc":{"rain_timeutc":1722000000,"rain_live":0.1,"rain_60min":0.1,"res":{"1721999999":[0.0],"1722000000":[0.1]},"type":["rain"]}}}],"status":"ok","time_exec":0.0123,"time_server":1722000002}
