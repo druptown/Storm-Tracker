@@ -84,6 +84,18 @@ SUCCESS_STATUSES = frozenset({"completed_shadow_raw", "completion_replayed"})
 MAX_COUNTER = 1_000_000_000
 MAX_SNAPSHOT_SETTLE_TICKS = 16
 SNAPSHOT_MAINTENANCE_POLL_SECONDS = 10.0
+BLITZORTUNG_SOURCE_ID = "lightning.blitzortung.event_ingress"
+BLITZORTUNG_READINESS_REASONS = frozenset({
+    "desired_state_unconfigured",
+    "disabled_by_config",
+    "event_ingress_fault_latched",
+    "event_ingress_stopped",
+    "no_available_targets",
+    "regional_qos0_raw_capture_active",
+    "regional_qos0_raw_capture_not_connected",
+    "retention_authority_unavailable",
+    "satellite_test_selected",
+})
 
 _LOGGER = logging.getLogger(__name__)
 _SAFE_FAILURE_REASON_CODES = frozenset({
@@ -746,6 +758,37 @@ class WorkerOnlyServiceRuntime:
             )
         }
 
+    def _provider_status_overrides(self) -> dict[str, tuple[str, str]]:
+        """Project live push-ingress readiness without inventing weather data."""
+
+        raw = self._raw.diagnostics()
+        event_ingress = raw.get("event_ingress")
+        blitzortung = (
+            event_ingress.get("blitzortung")
+            if isinstance(event_ingress, Mapping)
+            else None
+        )
+        readiness = (
+            blitzortung.get("readiness")
+            if isinstance(blitzortung, Mapping)
+            else None
+        )
+        if not isinstance(readiness, Mapping):
+            return {}
+        status = readiness.get("status")
+        reason = readiness.get("reason_code")
+        if reason not in BLITZORTUNG_READINESS_REASONS:
+            return {}
+        if status == "running_exact_raw" and readiness.get("ready") is True:
+            state = "operational"
+        elif status == "intentionally_inert":
+            state = "unknown"
+        elif status in {"starting", "waiting", "degraded"}:
+            state = "degraded"
+        else:
+            state = "offline"
+        return {BLITZORTUNG_SOURCE_ID: (state, reason)}
+
     async def _stage_cycle(self) -> bool:
         desired = self._raw.desired_state_store.load_active()
         if desired is None:
@@ -770,6 +813,7 @@ class WorkerOnlyServiceRuntime:
             desired,
             evaluated_at_ms=now_ms,
         )
+        provider_status_overrides = self._provider_status_overrides()
         cycle = build_raw_capture_operational_cycle(
             desired,
             tuple(self._captures.values()),
@@ -816,6 +860,7 @@ class WorkerOnlyServiceRuntime:
                         worker_state=worker_state,
                         queue_depth=queue_depth,
                         failed_jobs=failed_jobs,
+                        provider_status_overrides=provider_status_overrides,
                     )
                     if arrivals
                     else build_positive_radar_fact_revision(
@@ -827,6 +872,7 @@ class WorkerOnlyServiceRuntime:
                         worker_state=worker_state,
                         queue_depth=queue_depth,
                         failed_jobs=failed_jobs,
+                        provider_status_overrides=provider_status_overrides,
                     )
                 )
             except (
@@ -861,6 +907,7 @@ class WorkerOnlyServiceRuntime:
                     worker_state=worker_state,
                     queue_depth=queue_depth,
                     failed_jobs=failed_jobs,
+                    provider_status_overrides=provider_status_overrides,
                 )
         else:
             committed = build_multi_source_status_fact_revision(
@@ -871,6 +918,7 @@ class WorkerOnlyServiceRuntime:
                 worker_state=worker_state,
                 queue_depth=queue_depth,
                 failed_jobs=failed_jobs,
+                provider_status_overrides=provider_status_overrides,
             )
         if self._model_guidance:
             try:

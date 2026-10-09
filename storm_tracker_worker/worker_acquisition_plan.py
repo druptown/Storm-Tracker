@@ -91,6 +91,7 @@ class WorkloadClass(str, Enum):
 class CapabilityStatus(str, Enum):
     CONTRACT_READY_UNWIRED = "contract_ready_unwired"
     EXTERNAL_CONTRACT_BLOCKED = "external_contract_blocked"
+    API_REQUIRED = "api_required"
     DECOMMISSIONED = "decommissioned"
     UNSUPPORTED_FAIL_CLOSED = "unsupported_fail_closed"
 
@@ -474,8 +475,8 @@ _WORKLOADS: tuple[_WorkloadDefinition, ...] = (
         # keeping the externally blocked product non-dispatchable.
         "coverage", "kmi_radqpe_be", 300, 240, 18, None,
         ("worker_secret.kmi_radqpe_access",), ("BE", "LU"), (48.5, 2.0, 52.5, 7.0), None,
-        CapabilityStatus.EXTERNAL_CONTRACT_BLOCKED,
-        "external_native_radqpe_delivery_contract_and_credential_unavailable",
+        CapabilityStatus.API_REQUIRED,
+        "api_required",
         source_role="quantitative_radar_candidate",
         durable_production_retention_eligible=False,
     ),

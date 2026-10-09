@@ -8,7 +8,8 @@ while making every catalog source and its exact failure state visible.
 from __future__ import annotations
 
 import math
-from typing import Any
+import re
+from typing import Any, Mapping
 
 from .desired_state import DesiredState
 from .multi_source_operational_cycle import (
@@ -152,10 +153,14 @@ def _provider_item(
         reason = contribution.reason_code or "source_failed"
         error = reason
     elif effective is CycleStatus.BLOCKED:
-        state = "offline"
         freshness = "unknown"
         reason = contribution.reason_code or "source_blocked"
-        error = reason
+        if reason == "api_required":
+            state = "api_required"
+            error = None
+        else:
+            state = "offline"
+            error = reason
     else:
         state = "unknown"
         freshness = "unknown"
@@ -256,6 +261,7 @@ def build_multi_source_status_snapshot(
     worker_state: str = "online",
     queue_depth: int = 0,
     failed_jobs: int = 0,
+    provider_status_overrides: Mapping[str, tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Build a strict snapshot that exposes all sources without fake weather.
 
@@ -288,6 +294,30 @@ def build_multi_source_status_snapshot(
         )
         for contribution in cycle.contributions
     ]
+    overrides = dict(provider_status_overrides or {})
+    allowed_override_ids = {"lightning.blitzortung.event_ingress"}
+    if set(overrides) - allowed_override_ids:
+        raise MultiSourceSnapshotError("providerstatusoverride bevat onbekende bron")
+    providers_by_id = {item["provider_id"]: item for item in providers}
+    for provider_id, override in overrides.items():
+        if (
+            not isinstance(override, tuple)
+            or len(override) != 2
+            or override[0] not in {"operational", "degraded", "offline", "unknown"}
+            or not isinstance(override[1], str)
+            or re.fullmatch(r"[a-z][a-z0-9_]{0,127}", override[1]) is None
+        ):
+            raise MultiSourceSnapshotError("providerstatusoverride is ongeldig")
+        provider = providers_by_id[provider_id]
+        state, reason = override
+        provider.update({
+            "state": state,
+            "freshness": "unknown",
+            "product_valid_at": None,
+            "received_at": None,
+            "error": reason if state in {"degraded", "offline"} else None,
+            "reason_codes": [reason],
+        })
     current_ids = sorted(
         item["provider_id"]
         for item in providers
@@ -313,12 +343,14 @@ def build_multi_source_status_snapshot(
         "stale": sum(item["state"] == "stale" for item in providers),
         "error": sum(item["state"] == "degraded" for item in providers),
         "blocked": sum(item["state"] == "offline" for item in providers),
+        "api_required": sum(item["state"] == "api_required" for item in providers),
     }
     status_text = (
         f"Bronnen: {len(current_ids)} actueel, "
         f"{effective_counts['stale']} verouderd, "
         f"{effective_counts['error']} fout, "
-        f"{effective_counts['blocked']} geblokkeerd"
+        f"{effective_counts['blocked']} geblokkeerd, "
+        f"{effective_counts['api_required']} API vereist"
     )
     snapshot = build_unknown_operational_snapshot(
         desired_state,
@@ -353,6 +385,7 @@ def build_multi_source_status_fact_revision(
     worker_state: str = "online",
     queue_depth: int = 0,
     failed_jobs: int = 0,
+    provider_status_overrides: Mapping[str, tuple[str, str]] | None = None,
 ) -> CommittedOperationalFactRevision:
     """Commit the all-source status view with exact current-source evidence."""
 
@@ -364,6 +397,7 @@ def build_multi_source_status_fact_revision(
         worker_state=worker_state,
         queue_depth=queue_depth,
         failed_jobs=failed_jobs,
+        provider_status_overrides=provider_status_overrides,
     )
     contribution_by_id = {
         item.source_id: item for item in cycle.contributions

@@ -37,7 +37,7 @@ MODEL_INPUT_CONTRACT = "stv3-multi-source-model-input-v1"
 VALIDATION_INPUT_CONTRACT = "stv3-multi-source-validation-input-v1"
 
 EXPECTED_ACQUISITION_CATALOG_SHA256 = (
-    "3d9ff419d390c8c73ca6173ca083e8514a86aee6ab12329f0a4dc605cac86397"
+    "9cd9af5bf6324cea930e6eb044a7af5ed2f7783bedbceacb9056faf0a88199fb"
 )
 
 MAX_TARGETS = 64

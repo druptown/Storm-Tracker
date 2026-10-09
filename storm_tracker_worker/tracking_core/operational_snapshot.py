@@ -163,7 +163,7 @@ _WORKER_STATES = frozenset({
 })
 _FRESHNESS_STATES = frozenset({"current", "stale", "unknown"})
 _PROVIDER_STATES = frozenset({
-    "operational", "degraded", "offline", "stale", "unknown",
+    "operational", "degraded", "offline", "stale", "unknown", "api_required",
 })
 _REGION_STATES = frozenset({"current", "degraded", "stale", "unknown"})
 _UI_STORM_STATES = frozenset({
@@ -756,7 +756,7 @@ def _validate_provider(value: Any, path: str) -> None:
         f"{path}.freshness",
         allowed=_FRESHNESS_STATES,
     )
-    if state in {"offline", "stale", "unknown"} and freshness == "current":
+    if state in {"offline", "stale", "unknown", "api_required"} and freshness == "current":
         raise SnapshotValidationError(
             f"{path} mag voor een niet-operationele provider niet current zijn"
         )

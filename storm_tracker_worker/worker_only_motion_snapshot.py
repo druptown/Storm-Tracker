@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from .desired_state import DesiredState
 from .multi_source_operational_cycle import MultiSourceOperationalCycle
@@ -90,6 +90,7 @@ def build_radar_motion_nowcast_revision(
     worker_state: str = "online",
     queue_depth: int = 0,
     failed_jobs: int = 0,
+    provider_status_overrides: Mapping[str, tuple[str, str]] | None = None,
 ) -> CommittedOperationalFactRevision:
     """Publish the earliest current certified radar intersection per target."""
 
@@ -106,6 +107,7 @@ def build_radar_motion_nowcast_revision(
         worker_state=worker_state,
         queue_depth=queue_depth,
         failed_jobs=failed_jobs,
+        provider_status_overrides=provider_status_overrides,
     )
     snapshot = validate_snapshot(base.snapshot)
     current_providers = {
