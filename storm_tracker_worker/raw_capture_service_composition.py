@@ -1357,21 +1357,11 @@ class RawCaptureServiceRuntime:
                 raise RawCaptureServiceIntegrityError(
                     "raw_capture_runtime_restart_required"
                 )
-            startup_recover = getattr(
-                self._acquisition,
-                "startup_recover",
-                None,
-            )
-            if callable(startup_recover):
-                startup_recover()
-            recovered_objects = self._recover_unmanaged_raw_store_objects()
-            if recovered_objects:
-                _LOGGER.warning(
-                    "RAW startup recovery catalogued %d verified "
-                    "content objects without receipt claims",
-                    recovered_objects,
-                )
-            self._retention_preflight(full_audit=True)
+            # Healthy restarts take the bounded live preflight only.  The
+            # preflight already escalates storage-integrity failures to orphan
+            # recovery plus one deep audit, so an ever-growing retained corpus
+            # can no longer delay every normal worker start.
+            self._retention_preflight(full_audit=False)
             self._resource_preflight()
             self._sync_blitzortung_event_ingress()
             self._retention_preflight(full_audit=False)

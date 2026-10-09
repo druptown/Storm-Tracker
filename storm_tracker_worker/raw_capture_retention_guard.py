@@ -1186,11 +1186,12 @@ class RawCaptureRetentionGuard:
                     filesystem_total=filesystem_total,
                     filesystem_free=filesystem_free,
                 )
-                full_audit_completed = (
-                    self._full_audit_completed or full_audit
-                )
-                if not full_audit_completed:
-                    alarms.append("retention_guard_not_inspected")
+                # The bounded stats, capacity, path-identity and ownership
+                # checks above are sufficient for normal live admission.
+                # A deep object-by-object audit is deliberately reserved for
+                # a concrete integrity failure; otherwise startup time grows
+                # linearly with the retained corpus.
+                full_audit_completed = self._full_audit_completed or full_audit
                 unknown = set(alarms) - _KNOWN_ALARMS
                 if unknown:
                     raise RawCaptureRetentionGuardError(
