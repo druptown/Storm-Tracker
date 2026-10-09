@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 
 MAX_SOURCE_AGE_SECONDS = 15 * 60
+MAX_GROUND_SOURCE_AGE_SECONDS = 2 * 60 * 60
 MAX_FUTURE_SKEW_SECONDS = 30
 
 
@@ -219,6 +220,7 @@ class NormalizedObservation:
         quality: ObservationQuality,
         geometry: Mapping[str, Any] | None = None,
         metadata: Mapping[str, Any] | None = None,
+        maximum_age_seconds: float = MAX_SOURCE_AGE_SECONDS,
     ) -> "NormalizedObservation":
         if not isinstance(provider_id, str) or not provider_id.strip():
             raise ThinObservationError("provider_id_invalid")
@@ -236,13 +238,16 @@ class NormalizedObservation:
             received = float(received_at)
             lat = float(latitude)
             lon = float(longitude)
+            maximum_age = float(maximum_age_seconds)
         except (TypeError, ValueError) as error:
             raise ThinObservationError("coordinate_or_time_invalid") from error
         if not math.isfinite(observed) or not math.isfinite(received):
             raise ThinObservationError("observed_at_invalid")
         if observed > received + MAX_FUTURE_SKEW_SECONDS:
             raise ThinObservationError("observed_at_invalid")
-        if received - observed > MAX_SOURCE_AGE_SECONDS:
+        if not math.isfinite(maximum_age) or maximum_age < 0.0:
+            raise ThinObservationError("maximum_age_invalid")
+        if received - observed > maximum_age:
             raise ThinObservationError("observation_stale")
         if not math.isfinite(lat) or lat < -90.0 or lat > 90.0:
             raise ThinObservationError("latitude_invalid")
@@ -290,6 +295,7 @@ class NormalizedObservation:
 
 __all__ = [
     "MAX_SOURCE_AGE_SECONDS",
+    "MAX_GROUND_SOURCE_AGE_SECONDS",
     "NormalizedObservation",
     "ObservationKind",
     "ObservationQuality",
