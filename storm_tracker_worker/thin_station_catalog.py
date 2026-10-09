@@ -203,11 +203,19 @@ def select_stations(
     *,
     now: float,
     maximum_per_region: int = 4,
-    maximum_station_age_seconds: float = 7 * 86400.0,
+    maximum_station_age_seconds: float | None = None,
 ) -> StationSelectionPlan:
     current = _finite(now, "selection_now")
     if maximum_per_region < 1:
         raise ValueError("maximum_per_region_invalid")
+    maximum_age = None
+    if maximum_station_age_seconds is not None:
+        maximum_age = _finite(
+            maximum_station_age_seconds,
+            "selection_maximum_station_age",
+        )
+        if maximum_age < 0.0:
+            raise ValueError("selection_maximum_station_age_invalid")
     inventory = {item.station_key: item for item in stations}
     combined: dict[str, StationSelectionRequest] = {}
     for request in requests:
@@ -231,10 +239,9 @@ def select_stations(
     for region_id, request in sorted(combined.items()):
         candidates: list[tuple[float, GroundStation]] = []
         for station in inventory.values():
-            if (
-                not station.operational
-                or current - station.last_seen_at > maximum_station_age_seconds
-            ):
+            if not station.operational:
+                continue
+            if maximum_age is not None and current - station.last_seen_at > maximum_age:
                 continue
             distance = _distance_km(
                 request.latitude,

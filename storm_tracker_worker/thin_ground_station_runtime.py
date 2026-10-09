@@ -32,13 +32,17 @@ class GroundStationRuntime:
         *,
         required_capabilities: Iterable[str] = GROUND_CAPABILITIES,
         maximum_per_region: int = 4,
-        maximum_station_age_seconds: float = 7 * 86400.0,
+        maximum_station_age_seconds: float | None = None,
         enabled_providers: Iterable[str] = GROUND_PROVIDERS,
     ) -> None:
         self._catalog = catalog
         self._required_capabilities = tuple(required_capabilities)
         self._maximum_per_region = int(maximum_per_region)
-        self._maximum_station_age_seconds = float(maximum_station_age_seconds)
+        self._maximum_station_age_seconds = (
+            None
+            if maximum_station_age_seconds is None
+            else float(maximum_station_age_seconds)
+        )
         self._enabled_providers = frozenset(str(item) for item in enabled_providers)
 
     def _selection_requests(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import gzip
 import json
@@ -291,10 +292,20 @@ class StationCatalogBootstrap:
         repository: BootstrapRepository,
         source: BootstrapSource,
         clock: Callable[[], float] = time.time,
+        minimum_call_interval_seconds: float = 0.0,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
+        interval = _finite(
+            minimum_call_interval_seconds,
+            "bootstrap_minimum_call_interval_seconds",
+        )
+        if interval < 0.0:
+            raise ValueError("bootstrap_minimum_call_interval_seconds_invalid")
         self._repository = repository
         self._source = source
         self._clock = clock
+        self._minimum_call_interval_seconds = interval
+        self._sleep = sleep
 
     async def run(
         self,
@@ -324,6 +335,8 @@ class StationCatalogBootstrap:
                 if calls >= budget.maximum_calls or response_bytes >= budget.maximum_bytes:
                     status = "budget_exhausted"
                     break
+                if calls and self._minimum_call_interval_seconds:
+                    await self._sleep(self._minimum_call_interval_seconds)
                 page = await self._source.discover(tile, cursor=cursor)
                 calls += 1
                 response_bytes += page.response_bytes
