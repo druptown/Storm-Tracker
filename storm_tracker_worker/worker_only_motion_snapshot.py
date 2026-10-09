@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from typing import Iterable, Mapping
 
 from .desired_state import DesiredState
@@ -62,6 +63,10 @@ def _candidate_process_sha(
             "detection_id": candidate.detection_id,
             "entry_seconds": candidate.entry_seconds,
             "exit_seconds": candidate.exit_seconds,
+            "area_km2": candidate.area_km2,
+            "footprint_pixel_count": candidate.footprint_pixel_count,
+            "maximum_rain_rate_mm_h": candidate.maximum_rain_rate_mm_h,
+            "mean_rain_rate_mm_h": candidate.mean_rain_rate_mm_h,
             "method": candidate.method,
             "reference_valid_at": candidate.reference_valid_at,
             "source_candidate_content_sha256": (
@@ -69,6 +74,7 @@ def _candidate_process_sha(
             ),
             "target_id": candidate.target_id,
             "track_id": candidate.track_id,
+            "track_sample_count": candidate.track_sample_count,
             "vx_m_s": candidate.vx_m_s,
             "vy_m_s": candidate.vy_m_s,
             "workload_id": candidate.workload_id,
@@ -77,6 +83,39 @@ def _candidate_process_sha(
             observation.process_receipt_sha256
         ),
     })
+
+
+def _storm_summary(
+    candidate: WorkerOnlyShadowArrivalCandidate,
+    *,
+    region_id: str,
+) -> dict[str, object]:
+    """Project one admitted target-relevant track into the bounded UI view."""
+
+    identity_sha = _digest({
+        "region_id": region_id,
+        "track_id": candidate.track_id,
+        "workload_id": candidate.workload_id,
+    })
+    speed_kmh = math.hypot(candidate.vx_m_s, candidate.vy_m_s) * 3.6
+    heading_deg = math.degrees(math.atan2(
+        candidate.vx_m_s,
+        candidate.vy_m_s,
+    )) % 360.0
+    return {
+        "storm_id": f"storm:{identity_sha}",
+        "region_id": region_id,
+        "display_name": f"Buiencel {identity_sha[:8]}",
+        "state": "active",
+        "diagnostic_quality_percent": None,
+        "diagnostic_quality_kind": None,
+        "motion_speed_kmh": round(speed_kmh, 1),
+        "motion_heading_deg": round(heading_deg, 1),
+        "max_dbz": None,
+        "area_km2": round(candidate.area_km2, 3),
+        "product_valid_at": candidate.reference_valid_at,
+        "reason_codes": [MOTION_THREAT_REASON],
+    }
 
 
 def build_radar_motion_nowcast_revision(
@@ -175,6 +214,14 @@ def build_radar_motion_nowcast_revision(
         for item in snapshot["targets"]["items"]
     }
     receipts = list(base.admission_receipts)
+    storms: dict[
+        str,
+        tuple[
+            dict[str, object],
+            WorkerOnlyShadowArrivalCandidate,
+            RadarTargetObservation,
+        ],
+    ] = {}
     for target_id, (candidate, observation) in sorted(selected.items()):
         target = targets[target_id]
         eta_minutes = round(candidate.entry_seconds / 60.0, 1)
@@ -200,6 +247,35 @@ def build_radar_motion_nowcast_revision(
             fact_kind=OperationalFactKind.NEXT_THREAT_AVAILABLE,
             scope_id=target_id,
             fact_value=threat,
+            desired_state_sha256=desired_state.state_sha256,
+            authority_epoch=desired_state.authority_epoch,
+            source_receipt_sha256s=(observation.source_receipt_sha256,),
+            certificate_sha256s=(observation.certificate_sha256,),
+            process_receipt_sha256=_candidate_process_sha(
+                candidate,
+                observation,
+            ),
+            full_scan_complete=False,
+            external_truth_validated=False,
+            decided_at=evaluated,
+            valid_until=float(snapshot["valid_until"]),
+            disposition=AdmissionDisposition.ADMITTED,
+            reason_codes=(MOTION_THREAT_REASON,),
+        ))
+        storm = _storm_summary(candidate, region_id=target["region_id"])
+        storms.setdefault(
+            str(storm["storm_id"]),
+            (storm, candidate, observation),
+        )
+
+    snapshot["ui_storms"]["items"] = [
+        storm for storm, _candidate, _observation in storms.values()
+    ]
+    for storm_id, (storm, candidate, observation) in sorted(storms.items()):
+        receipts.append(FactAdmissionReceipt.create(
+            fact_kind=OperationalFactKind.UI_STORM,
+            scope_id=storm_id,
+            fact_value=storm,
             desired_state_sha256=desired_state.state_sha256,
             authority_epoch=desired_state.authority_epoch,
             source_receipt_sha256s=(observation.source_receipt_sha256,),

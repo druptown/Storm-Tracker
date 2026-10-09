@@ -341,6 +341,7 @@ class WorkerOnlyShadowArrivalCandidate:
     vy_m_s: float
     track_sample_count: int
     footprint_pixel_count: int
+    area_km2: float
     mean_rain_rate_mm_h: float
     maximum_rain_rate_mm_h: float
     target_location_accuracy_m: float | None
@@ -378,6 +379,7 @@ class WorkerOnlyShadowArrivalCandidate:
             "exit_seconds",
             "vx_m_s",
             "vy_m_s",
+            "area_km2",
             "mean_rain_rate_mm_h",
             "maximum_rain_rate_mm_h",
         ):
@@ -398,7 +400,11 @@ class WorkerOnlyShadowArrivalCandidate:
         )
         if self.track_sample_count < 2 or self.footprint_pixel_count < 1:
             raise ValueError("arrival vereist trackhistorie en footprint")
-        if self.maximum_rain_rate_mm_h < self.mean_rain_rate_mm_h:
+        if (
+            self.area_km2 <= 0.0
+            or self.mean_rain_rate_mm_h < 0.0
+            or self.maximum_rain_rate_mm_h < self.mean_rain_rate_mm_h
+        ):
             raise ValueError("arrival intensiteiten zijn ongeldig")
         if self.target_location_accuracy_m is not None and (
             not math.isfinite(self.target_location_accuracy_m)
@@ -832,6 +838,7 @@ def build_worker_only_shadow_arrivals(
                 vy_m_s=vy_m_s,
                 track_sample_count=track.sample_count,
                 footprint_pixel_count=len(detected.footprint_pixels),
+                area_km2=detected.area_m2 / 1_000_000.0,
                 mean_rain_rate_mm_h=detected.mean_value,
                 maximum_rain_rate_mm_h=detected.maximum_value,
                 target_location_accuracy_m=target.location_accuracy_m,
