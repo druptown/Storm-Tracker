@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from types import MappingProxyType
 from typing import Mapping
 
@@ -94,6 +95,26 @@ def _fused_value(values: list[NormalizedObservation]) -> float | None:
     if total_weight <= 0.0:
         return None
     return sum(item.value * _QUALITY_WEIGHT[item.quality] for item in values) / total_weight
+
+
+def _current_precipitation_values(
+    values: list[NormalizedObservation],
+) -> list[NormalizedObservation]:
+    """Keep forecast guidance and unusable radar quality out of current weather."""
+    eligible: list[NormalizedObservation] = []
+    for item in values:
+        if item.metadata.get("role") == "model_guidance":
+            continue
+        quality_index = item.metadata.get("quality_index")
+        if (
+            item.kind in {ObservationKind.REFLECTIVITY, ObservationKind.RADAR_LEVEL}
+            and isinstance(quality_index, (int, float))
+            and not isinstance(quality_index, bool)
+            and (not math.isfinite(float(quality_index)) or float(quality_index) <= 0.0)
+        ):
+            continue
+        eligible.append(item)
+    return eligible
 
 
 def _remove_disagreement_outliers(
@@ -215,9 +236,15 @@ def fuse_observations(
             target_id=target_id,
             status="operational" if target_observations else "onvoldoende_data",
             evaluated_at=evaluated,
-            precipitation_rate_mm_h=_fused_value(by_kind[ObservationKind.RAIN_RATE]),
-            reflectivity_dbz=_fused_value(by_kind[ObservationKind.REFLECTIVITY]),
-            radar_level=_fused_value(by_kind[ObservationKind.RADAR_LEVEL]),
+            precipitation_rate_mm_h=_fused_value(_current_precipitation_values(
+                by_kind[ObservationKind.RAIN_RATE]
+            )),
+            reflectivity_dbz=_fused_value(_current_precipitation_values(
+                by_kind[ObservationKind.REFLECTIVITY]
+            )),
+            radar_level=_fused_value(_current_precipitation_values(
+                by_kind[ObservationKind.RADAR_LEVEL]
+            )),
             rain_probability_percent=_fused_value(
                 by_kind[ObservationKind.RAIN_PROBABILITY]
             ),

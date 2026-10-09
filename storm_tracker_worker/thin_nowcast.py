@@ -393,7 +393,9 @@ class ThinNowcastRuntime:
                     or (fused.radar_level is not None and fused.radar_level > 0.0)
                 )
             )
-            raining = bool((rain_rate is not None and rain_rate > 0.0) or has_echo)
+            raining = bool(
+                rain_rate > 0.0 if rain_rate is not None else has_echo
+            )
             target_region_id = self._target_region_ids.get(target_id)
             eligible_cells = tuple(
                 cell
@@ -480,7 +482,11 @@ class ThinNowcastRuntime:
                     if arrival is not None
                     else "tracked_cell_arrival_handoff_hold"
                 )
-            elif fused is not None and fused.status == "operational":
+            elif (
+                fused is not None
+                and fused.status == "operational"
+                and rain_rate is not None
+            ):
                 current_state = "droog"
                 forecast_state = "geen_dreiging"
                 reason = "no_tracked_arrival"
