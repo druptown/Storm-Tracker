@@ -72,7 +72,6 @@ _EXTERNAL_TRUTH_KINDS = frozenset({
     OperationalFactKind.CURRENT_DRY,
     OperationalFactKind.GROUND_STATE,
     OperationalFactKind.GROUND_CONFIRMATION,
-    OperationalFactKind.NEXT_THREAT_AVAILABLE,
     OperationalFactKind.NEXT_THREAT_NONE,
     OperationalFactKind.CALIBRATED_PROBABILITY,
     OperationalFactKind.PASSAGE_EXPECTED,

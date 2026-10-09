@@ -508,7 +508,11 @@ _HANDLERS = MappingProxyType({
         ledger_provider="kmi",
         capture_provenance_kind="kmi_opendata_v1",
         capture_state="captured_exact_raw",
-        payload_contract="canonical_scheduled_slot_timestamp_v1",
+        # GeoServer must select its declared default/latest mosaic.  Binding a
+        # wall-clock five-minute timestamp recreates the invalid/404 request
+        # that this route deliberately replaced.  Keep this identical to the
+        # activation rule and to KMI_PUBLIC_RADAR_LATEST.
+        payload_contract="exact_empty_object_v1",
     ),
     KMI_APPV4_HANDLER_ID: _HandlerSpec(
         KMI_APPV4_HANDLER_ID,
@@ -570,7 +574,7 @@ _HANDLERS = MappingProxyType({
         ledger_provider="opera",
         capture_provenance_kind="opera_stream_raw_v1",
         capture_state="exact_raw_committed",
-        payload_contract="canonical_scheduled_slot_timestamp_v1",
+        payload_contract="canonical_previous_complete_slot_timestamp_v1",
     ),
     DPC_HANDLER_ID: _HandlerSpec(
         DPC_HANDLER_ID,
@@ -1144,7 +1148,7 @@ def _validate_handlers() -> None:
                 "exact_empty_object_v1",
                 "acquisition_query_authority_projection_v1",
                 "canonical_previous_ten_minute_window_v1",
-                "canonical_scheduled_slot_timestamp_v1",
+                "canonical_previous_complete_slot_timestamp_v1",
                 "openmeteo_target_query_batch_v1",
                 "public_region_query_v1",
             }
@@ -1817,7 +1821,11 @@ def execute_shadow_capture(
     if limits.max_total_bytes < spec.maximum_transport_bytes:
         raise ValueError("raw store total bound is below the handler reservation")
     store = RawArtifactStore(raw_root, limits=limits)
-    store.initialize()
+    # The parent runtime has already created and fully audited this exact
+    # catalog before admission opened.  A fresh provider child must only
+    # attach to that authority; repeating the full startup integrity scan in
+    # every parallel child serializes otherwise independent provider I/O.
+    store.attach_existing()
     if spec.handler_id == EUMETSAT_LI_HANDLER_ID:
         now_epoch = _finite_time(clock(), "trusted worker clock")
         remainder = float(request["execution_deadline_at"]) - now_epoch

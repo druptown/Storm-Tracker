@@ -8,10 +8,12 @@ imported by ``service.py`` and cannot publish an operational snapshot.
 from __future__ import annotations
 
 from contextlib import closing
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from functools import partial
 import hashlib
 import json
+import logging
 import math
 from pathlib import Path
 import re
@@ -40,6 +42,7 @@ from .acquisition_capture_recovery import (
     CaptureRecoveryBusyError,
     CaptureRecoveryCapacityError,
     CaptureRecoveryIntegrityError,
+    RecoveryAuditResult,
     RecoveredCaptureEvidence,
     RawRecoveryBinding,
 )
@@ -70,6 +73,97 @@ from .raw_capacity_ledger import (
 )
 
 
+_LOGGER = logging.getLogger(__name__)
+
+_SAFE_STARTUP_RECOVERY_INTEGRITY_REASONS = MappingProxyType({
+    "capacity reservation inventory failed closed":
+        "existing_raw_capture_reservation_inventory_invalid",
+    "raw bytes exist outside the exact catalog inventory":
+        "existing_raw_capture_catalog_inventory_mismatch",
+    "capacity reservation has no acquisition job identity":
+        "existing_raw_capture_reservation_identity_invalid",
+    "capacity reservation is outside recovery":
+        "existing_raw_capture_reservation_outside_recovery",
+    "capacity ledger contains duplicate job identities":
+        "existing_raw_capture_duplicate_job_identity",
+    "safe native job alias collision detected":
+        "existing_raw_capture_job_alias_collision",
+    "raw bytes exist without a durable prior origin reservation":
+        "existing_raw_capture_missing_origin_reservation",
+    "raw binding differs from its reservation envelope":
+        "existing_raw_capture_reservation_binding_mismatch",
+    "content-addressed raw object has conflicting sizes":
+        "existing_raw_capture_object_size_conflict",
+    "one acquisition job appears in multiple raw bindings":
+        "existing_raw_capture_multiple_bindings",
+    "one acquisition job has duplicate raw roles":
+        "existing_raw_capture_duplicate_roles",
+    "raw receipts exceed their aggregate transport binding":
+        "existing_raw_capture_transport_bound_exceeded",
+    "raw catalog contains an object without an accounted receipt":
+        "existing_raw_capture_unaccounted_object",
+    "active raw capture has no members":
+        "existing_raw_capture_members_missing",
+    "raw capture member has no catalog receipt":
+        "existing_raw_capture_member_receipt_missing",
+    "raw capture spans multiple recovery bindings":
+        "existing_raw_capture_spans_bindings",
+    "active raw capture identity drifted":
+        "existing_raw_capture_identity_drift",
+    "active raw capture handler is not selected":
+        "existing_raw_capture_handler_not_selected",
+    "active raw capture provider drifted":
+        "existing_raw_capture_provider_drift",
+    "active raw capture product drifted":
+        "existing_raw_capture_product_drift",
+    "active raw capture fetch suffix drifted":
+        "existing_raw_capture_fetch_suffix_drift",
+    "active raw capture bytes are unavailable":
+        "existing_raw_capture_bytes_unavailable",
+    "active raw capture byte inventory drifted":
+        "existing_raw_capture_byte_inventory_drift",
+    "raw capture and receipt use different closed bindings":
+        "existing_raw_capture_closed_binding_mismatch",
+    "raw capture has no derivable origin reservation":
+        "existing_raw_capture_origin_not_derivable",
+    "raw capture changed job identity":
+        "existing_raw_capture_job_identity_drift",
+    "one acquisition job has multiple complete raw captures":
+        "existing_raw_capture_multiple_complete_captures",
+    "committed capacity has no complete raw capture":
+        "existing_raw_capture_committed_incomplete",
+    "committed capacity has no durable raw capture":
+        "existing_raw_capture_committed_missing",
+    "raw recovery inventory failed closed":
+        "existing_raw_capture_inventory_invalid",
+})
+
+
+def _safe_startup_recovery_integrity_reason(error: BaseException) -> str:
+    """Classify only fixed internal recovery messages for safe live diagnosis."""
+
+    reason = str(error)
+    mapped = _SAFE_STARTUP_RECOVERY_INTEGRITY_REASONS.get(reason)
+    if mapped is not None:
+        return mapped
+    prefix = "active raw capture fetch suffix drifted:"
+    if reason.startswith(prefix):
+        parts = reason[len(prefix):].rsplit(":", 1)
+        known_workloads = {
+            binding.workload_id for binding in RECOVERY_BINDINGS.values()
+        }
+        if (
+            len(parts) == 2
+            and parts[0] in known_workloads
+            and parts[1] in {
+                "capture_revision", "captured", "plain_capture", "other"
+            }
+        ):
+            workload = parts[0].replace(".", "_")
+            return f"existing_raw_capture_fetch_suffix_drift_{workload}_{parts[1]}"
+    return "existing_raw_capture_accounting_integrity"
+
+
 CONTRACT = "stv3-worker-acquisition-shadow-runtime-v3"
 MAX_DIAGNOSTIC_BYTES = 16 * 1024
 MAX_CHILD_RESULT_BYTES = 16 * 1024
@@ -77,6 +171,11 @@ MAX_CHILD_REQUEST_BYTES = 16 * 1024
 MAX_EXECUTOR_WALL_SECONDS = 300.0
 ADAPTIVE_ATTEMPT_WALL_SECONDS = 20.0
 ADAPTIVE_ATTEMPT_FAILURE_THRESHOLD = 2
+ADAPTIVE_PARALLEL_FALLBACK_LANES = 5
+FULL_PARALLEL_ACQUISITION = False
+ADAPTIVE_PARALLEL_COOLDOWN_SECONDS = 300.0
+ADAPTIVE_RUNTIME_GROWTH_FACTOR = 1.5
+ADAPTIVE_RUNTIME_GROWTH_MIN_SECONDS = 2.0
 ADAPTIVE_FULL_PROBE_INTERVAL = 6
 DEFAULT_OWNER = "acquisition-shadow-v3"
 DEADLINE_BINDING_CONTRACT = "stv3-worker-acquisition-deadline-binding-v1"
@@ -136,8 +235,10 @@ _ACTIVE_SHADOW_RAW_WORKLOAD_IDS = frozenset(
     for workload_id, rule in ACTIVATION_RULES.items()
     if rule.executable
 )
-_PRIMARY_QUANTITATIVE_WORKLOAD_IDS = frozenset({
+_PRIORITY_LOCAL_WORKLOAD_IDS = frozenset({
+    "ground.kmi.aws_10min",
     "radar.dwd.radolan_rv",
+    "radar.kmi.public_wcs_unknown_quantity",
 })
 _STATIC_REQUIREMENT_UNAVAILABLE_REASONS = frozenset(
     {"secret_requirement_unavailable"}
@@ -345,6 +446,11 @@ def raw_capture_executor_factory(wall_seconds: float) -> HardDecoderExecutor:
             max_result_bytes=MAX_CHILD_RESULT_BYTES,
         ),
         environment_allowlist=RAW_CAPTURE_CHILD_ENVIRONMENT_ALLOWLIST,
+        # Raw provider transport is I/O-bound and already guarded per
+        # workload by AcquisitionShadowRuntime.  Keep it outside the global
+        # singleton used by CPU-heavy decoder/fusion children so the declared
+        # provider lanes are real rather than immediately returning busy.
+        process_slot_policy="independent",
     )
 
 
@@ -380,6 +486,7 @@ class AcquisitionShadowRuntime:
         collector_scope: str = acquisition.COLLECTOR_SCOPE_COVERAGE_RELEVANT,
         clock: Callable[[], float] = time.time,
         capture_recovery_fault_injector: Callable[[str], None] | None = None,
+        defer_startup_recovery: bool = False,
     ) -> None:
         if not isinstance(desired_state_store, DesiredStateStore):
             raise TypeError("desired_state_store must be DesiredStateStore")
@@ -407,6 +514,8 @@ class AcquisitionShadowRuntime:
             )
         ):
             raise TypeError("runtime factories must be callable")
+        if type(defer_startup_recovery) is not bool:
+            raise TypeError("defer_startup_recovery must be bool")
         if (
             not isinstance(lease_owner, str)
             or not lease_owner
@@ -433,8 +542,8 @@ class AcquisitionShadowRuntime:
             selection.workload_ids if selection.explicit else None
         )
         self._collector_scope = validated_collector_scope
-        self._primary_quantitative_workload_ids = (
-            _PRIMARY_QUANTITATIVE_WORKLOAD_IDS.intersection(
+        self._priority_local_workload_ids = (
+            _PRIORITY_LOCAL_WORKLOAD_IDS.intersection(
                 selection.workload_ids
             )
             if validated_collector_scope
@@ -442,9 +551,19 @@ class AcquisitionShadowRuntime:
             else frozenset()
         )
         self._clock = clock
-        self._lock = threading.Lock()
+        self._admission = threading.BoundedSemaphore(
+            max(1, len(self._selection.workload_ids))
+        )
+        self._claim_lock = threading.Lock()
+        self._state_lock = threading.RLock()
+        self._batch_lock = threading.Lock()
+        self._active_workload_ids: set[str] = set()
+        self._batch_claimed_workload_ids: set[str] = set()
+        self._batch_active = False
+        self._batch_reconciled = False
         self._stop_event = threading.Event()
         self._missing_requirement_suppressions: set[str] = set()
+        self._priority_local_attempted_since_general: set[str] = set()
         self._last_tick = ShadowTickResult(
             "idle", "not_started", None, None, None, None, False
         )
@@ -452,6 +571,17 @@ class AcquisitionShadowRuntime:
             str, tuple[tuple[float, str, str], dict[str, str]]
         ] = {}
         self._consecutive_terminal_failures: dict[str, int] = {}
+        self._parallel_mode = "recovery"
+        self._parallel_cooldown_until = 0.0
+        self._parallel_previous_mean_runtime_seconds: float | None = None
+        self._parallel_last_batch_duration_seconds = 0.0
+        self._parallel_last_batch_mean_runtime_seconds = 0.0
+        self._parallel_last_batch_job_count = 0
+        self._parallel_last_batch_lane_limit = min(
+            ADAPTIVE_PARALLEL_FALLBACK_LANES,
+            max(1, len(self._selection.workload_ids)),
+        )
+        self._parallel_last_unhealthy_reasons: tuple[str, ...] = ()
         self._raw_store = self._validate_storage_envelope()
         self._capture_reconciler = CaptureCapacityReconciler(
             raw_store=self._raw_store,
@@ -467,14 +597,41 @@ class AcquisitionShadowRuntime:
                 selection.workload_ids if selection.explicit else None
             ),
         )
-        try:
-            self._startup_recovery = self._capture_reconciler.audit_existing()
-        except (CaptureRecoveryBusyError, CaptureRecoveryCapacityError,
-                CaptureRecoveryIntegrityError) as err:
-            raise AcquisitionRuntimeError(
-                "existing raw capture accounting failed closed"
-            ) from err
-        self._recover_terminal_observations()
+        self._startup_recovery_lock = threading.Lock()
+        self._startup_recovery = RecoveryAuditResult(0, 0, 0, 0, 0)
+        self._startup_recovery_complete = False
+        if not defer_startup_recovery:
+            self.startup_recover()
+
+    def startup_recover(self) -> RecoveryAuditResult:
+        """Reconcile retained evidence once before acquisition admission opens.
+
+        The production service defers this potentially long disk audit until
+        after its status transport has connected.  This preserves fail-closed
+        acquisition while making the worker's recovery state observable.
+        """
+
+        with self._startup_recovery_lock:
+            if self._startup_recovery_complete:
+                return self._startup_recovery
+            try:
+                recovered = self._capture_reconciler.audit_existing()
+            except CaptureRecoveryBusyError as err:
+                raise AcquisitionRuntimeError(
+                    "existing_raw_capture_accounting_busy"
+                ) from err
+            except CaptureRecoveryCapacityError as err:
+                raise AcquisitionRuntimeError(
+                    "existing_raw_capture_accounting_capacity"
+                ) from err
+            except CaptureRecoveryIntegrityError as err:
+                raise AcquisitionRuntimeError(
+                    _safe_startup_recovery_integrity_reason(err)
+                ) from err
+            self._recover_terminal_observations()
+            self._startup_recovery = recovered
+            self._startup_recovery_complete = True
+            return recovered
 
     @staticmethod
     def _terminal_status(receipt: ExecutionReceipt) -> str:
@@ -491,28 +648,29 @@ class AcquisitionShadowRuntime:
     ) -> None:
         if workload_id not in self._selection.workload_ids or not receipt.terminal:
             return
-        order = (
-            receipt.created_at,
-            receipt.acquisition_job_id,
-            receipt.receipt_sha256,
-        )
-        previous = self._latest_terminal_observations.get(workload_id)
-        if previous is not None and previous[0] >= order:
-            return
-        if receipt.outcome == "completed_shadow_raw":
-            self._consecutive_terminal_failures.pop(workload_id, None)
-        elif receipt.attempt_count > 0:
-            self._consecutive_terminal_failures[workload_id] = min(
-                1_000_000,
-                self._consecutive_terminal_failures.get(workload_id, 0) + 1,
+        with self._state_lock:
+            order = (
+                receipt.created_at,
+                receipt.acquisition_job_id,
+                receipt.receipt_sha256,
             )
-        self._latest_terminal_observations[workload_id] = (
-            order,
-            {
-                "reason_code": receipt.reason_code,
-                "status": self._terminal_status(receipt),
-            },
-        )
+            previous = self._latest_terminal_observations.get(workload_id)
+            if previous is not None and previous[0] >= order:
+                return
+            if receipt.outcome == "completed_shadow_raw":
+                self._consecutive_terminal_failures.pop(workload_id, None)
+            elif receipt.attempt_count > 0:
+                self._consecutive_terminal_failures[workload_id] = min(
+                    1_000_000,
+                    self._consecutive_terminal_failures.get(workload_id, 0) + 1,
+                )
+            self._latest_terminal_observations[workload_id] = (
+                order,
+                {
+                    "reason_code": receipt.reason_code,
+                    "status": self._terminal_status(receipt),
+                },
+            )
 
     def _recover_terminal_observations(self) -> None:
         """Rebuild one safe terminal result per workload after restart."""
@@ -540,16 +698,19 @@ class AcquisitionShadowRuntime:
         rule_wall_seconds: float,
         deadline_remaining_seconds: float,
     ) -> float:
-        """Bound repeat failures without permanently excluding slow products.
+        """Return the product wall while retaining the legacy serial guard.
 
         A provider that repeatedly consumes its complete wall budget can starve
-        the single crash-safe acquisition lane.  After two executed terminal
-        failures it therefore receives short probes.  One deterministic slot
-        in every six retains the complete native budget, so a legitimately
-        large product can still recover without an operator restart.
+        the bounded recovery cohort. Expanded mode gives every due workload an
+        I/O lane, while recovery mode retains the short-probe guard so repeated
+        failures cannot occupy all five lanes until their complete deadline.
         """
 
         remaining = min(rule_wall_seconds, deadline_remaining_seconds)
+        if FULL_PARALLEL_ACQUISITION:
+            return remaining
+        # Integer dictionary reads are atomic in the CPython worker runtime;
+        # writers replace the complete value while holding ``_state_lock``.
         failures = self._consecutive_terminal_failures.get(job.workload_id, 0)
         if failures < ADAPTIVE_ATTEMPT_FAILURE_THRESHOLD:
             return remaining
@@ -755,11 +916,17 @@ class AcquisitionShadowRuntime:
         *,
         now: float,
     ) -> scheduler_module.TransitionResult:
-        return self._scheduler.complete(
-            claimed.job_id,
-            claimed.lease_token,
-            now=self._transition_time(now),
-        )
+        # Parallel workers may finish in a different order from the order in
+        # which they were claimed.  Read the wall clock and mutate the
+        # scheduler under the same lock, otherwise a thread that sampled an
+        # earlier timestamp can enter after a newer transition and trip the
+        # scheduler's deliberate clock-regression guard.
+        with self._claim_lock:
+            return self._scheduler.complete(
+                claimed.job_id,
+                claimed.lease_token,
+                now=self._transition_time(now),
+            )
 
     def _retry_or_expire(
         self,
@@ -771,22 +938,26 @@ class AcquisitionShadowRuntime:
     ) -> ShadowTickResult:
         """Publish the attempt receipt before retry can become terminal."""
 
-        effective_now = self._transition_time(now)
-        expired = effective_now >= claimed.deadline_at
-        stored_reason = "deadline_expired" if expired else reason_code
-        receipt = self._record(
-            bound,
-            claimed,
-            outcome="blocked_permanent" if expired else "retryable_failure",
-            reason_code=stored_reason,
-            terminal=expired,
-        )
-        transition = self._scheduler.retry(
-            claimed.job_id,
-            claimed.lease_token,
-            reason_code,
-            now=effective_now,
-        )
+        # Keep the receipt-before-transition invariant while also serialising
+        # the timestamp sample with the scheduler mutation.  This is short
+        # metadata I/O only; provider network work remains fully parallel.
+        with self._claim_lock:
+            effective_now = self._transition_time(now)
+            expired = effective_now >= claimed.deadline_at
+            stored_reason = "deadline_expired" if expired else reason_code
+            receipt = self._record(
+                bound,
+                claimed,
+                outcome="blocked_permanent" if expired else "retryable_failure",
+                reason_code=stored_reason,
+                terminal=expired,
+            )
+            transition = self._scheduler.retry(
+                claimed.job_id,
+                claimed.lease_token,
+                reason_code,
+                now=effective_now,
+            )
         if expired and transition.status != "expired":
             raise AcquisitionRuntimeError("deadline receipt did not precede expiry")
         if not expired and transition.status == "expired":
@@ -1632,123 +1803,170 @@ class AcquisitionShadowRuntime:
             now=now,
         )
 
+    def _claim_one(self, requested_now: float | None) -> tuple[
+        ShadowTickResult | None,
+        tuple[Any, Any, Any, Any, float] | None,
+    ]:
+        """Claim one distinct workload and sample time under one lock."""
+
+        with self._claim_lock:
+            moment = float(
+                self._clock() if requested_now is None else requested_now
+            )
+            if not math.isfinite(moment) or moment < 0:
+                raise AcquisitionRuntimeError("tick time is invalid")
+            state_before = self._desired_state_store.load_active()
+            should_reconcile = (
+                not self._batch_active or not self._batch_reconciled
+            )
+            if state_before is not None and should_reconcile:
+                plan_before = acquisition.build_worker_acquisition_plan(
+                    state_before,
+                    collector_scope=self._collector_scope,
+                )
+                self._account_due_deadlines(plan=plan_before, now=moment)
+            reconciled = None
+            if should_reconcile:
+                try:
+                    reconciled = self._scheduler.reconcile(
+                        now=moment,
+                        allowed_workload_ids=self._allowed_workload_ids,
+                    )
+                except scheduler_module.SchedulerDesiredStateError as error:
+                    if error.reason_code not in (
+                        _RECOVERABLE_SCHEDULER_DESIRED_STATE_REASONS
+                    ):
+                        raise
+                    if self._batch_active:
+                        self._batch_reconciled = True
+                    return (
+                        ShadowTickResult(
+                            "idle", error.reason_code, None, None, None, None, False
+                        ),
+                        None,
+                    )
+                if self._batch_active:
+                    self._batch_reconciled = True
+            if state_before is None or (
+                reconciled is not None
+                and reconciled.status == "idle_unconfigured"
+            ):
+                return (
+                    ShadowTickResult(
+                        "idle",
+                        "desired_state_unconfigured",
+                        None,
+                        None,
+                        None,
+                        None,
+                        False,
+                    ),
+                    None,
+                )
+            requirements_ready = self._requirements_ready_workload_ids()
+            claimable = requirements_ready.union(
+                self._scheduler_workload_ids().difference(
+                    self._missing_requirement_suppressions
+                )
+            ).difference(
+                self._active_workload_ids,
+                self._batch_claimed_workload_ids,
+            )
+            priority_candidates = (
+                claimable.intersection(self._priority_local_workload_ids)
+                .difference(self._priority_local_attempted_since_general)
+            )
+            general_candidates = claimable.difference(
+                self._priority_local_workload_ids
+            )
+            if priority_candidates:
+                claim_candidates = priority_candidates
+            elif general_candidates:
+                claim_candidates = general_candidates
+            else:
+                # A new cadence may contain only local providers.  Start a
+                # fresh local cohort after every member had one opportunity.
+                self._priority_local_attempted_since_general.clear()
+                claim_candidates = claimable
+            lease_owner = self._lease_owner
+            if self._batch_active:
+                lease_owner = "lane-" + hashlib.sha256(
+                    (
+                        f"{self._lease_owner}:"
+                        f"{threading.get_ident()}"
+                    ).encode("utf-8")
+                ).hexdigest()[:32]
+            claimed = self._scheduler.claim_next(
+                lease_owner,
+                now=moment,
+                allowed_workload_ids=frozenset(claim_candidates),
+                prefer_unattempted=True,
+            )
+            if claimed is None:
+                return (
+                    ShadowTickResult(
+                        "idle", "no_ready_serial_job", None, None, None, None, False
+                    ),
+                    None,
+                )
+            workload_id = claimed.payload.get("workload_id")
+            if not isinstance(workload_id, str) or workload_id not in claimable:
+                raise AcquisitionRuntimeError("claimed job workload is invalid")
+            if workload_id in self._priority_local_workload_ids:
+                self._priority_local_attempted_since_general.add(workload_id)
+            else:
+                self._priority_local_attempted_since_general.clear()
+            state = self._desired_state_store.load_active()
+            if state is None:
+                raise AcquisitionRuntimeError("claimed job has no desired state")
+            plan = acquisition.build_worker_acquisition_plan(
+                state,
+                collector_scope=self._collector_scope,
+            )
+            bound = bridge.bind_claimed_acquisition_job(plan, claimed)
+            self._active_workload_ids.add(workload_id)
+            if self._batch_active:
+                self._batch_claimed_workload_ids.add(workload_id)
+            return None, (bound, claimed, state, plan, moment)
+
     def tick(self, *, now: float | None = None) -> ShadowTickResult:
-        """Reconcile and process at most one serial scheduler lease."""
+        """Claim and process one member of the bounded parallel batch."""
 
         if self._stop_event.is_set():
             return ShadowTickResult(
                 "stopped", "runtime_stop_requested", None, None, None, None, False
             )
-        if not self._lock.acquire(blocking=False):
+        if not self._admission.acquire(blocking=False):
             return ShadowTickResult(
-                "busy", "runtime_tick_in_progress", None, None, None, None, False
+                "busy", "runtime_parallel_capacity_full", None, None, None, None, False
             )
+        active_workload_id: str | None = None
         try:
             if self._stop_event.is_set():
                 return ShadowTickResult(
                     "stopped", "runtime_stop_requested", None, None, None, None, False
                 )
-            moment = float(self._clock() if now is None else now)
-            if not math.isfinite(moment) or moment < 0:
-                raise AcquisitionRuntimeError("tick time is invalid")
-            state_before_reconcile = self._desired_state_store.load_active()
-            if state_before_reconcile is not None:
-                plan_before_reconcile = acquisition.build_worker_acquisition_plan(
-                    state_before_reconcile,
-                    collector_scope=self._collector_scope,
-                )
-                self._account_due_deadlines(
-                    plan=plan_before_reconcile,
-                    now=moment,
-                )
-            try:
-                reconciled = self._scheduler.reconcile(
-                    now=moment,
-                    allowed_workload_ids=self._allowed_workload_ids,
-                )
-            except scheduler_module.SchedulerDesiredStateError as error:
-                # A stale/future head or a concurrent control-plane transition
-                # must block all provider work, but it must not kill the worker
-                # process that Home Assistant needs to install the repaired
-                # desired state.  Store/schema inconsistencies remain fatal.
-                if (
-                    error.reason_code
-                    not in _RECOVERABLE_SCHEDULER_DESIRED_STATE_REASONS
-                ):
-                    raise
-                result = ShadowTickResult(
-                    "idle",
-                    error.reason_code,
-                    None,
-                    None,
-                    None,
-                    None,
-                    False,
-                )
-                self._last_tick = result
-                return result
-            if reconciled.status == "idle_unconfigured":
-                result = ShadowTickResult(
-                    "idle", "desired_state_unconfigured", None, None, None, None, False
-                )
+            # _claim_one samples the scheduler clock inside its serialised
+            # reconcile/claim section.  Threads are started together and may
+            # otherwise enter in the reverse order of their timestamps.
+            immediate, prepared = self._claim_one(now)
+            if immediate is not None:
+                result = immediate
             else:
-                # Reconcile against static ownership so lease recovery and
-                # deadline accounting remain complete. A missing static
-                # requirement may probe once (and on restart, so exact durable
-                # capture recovery remains possible), but is then suppressed
-                # until the requirement becomes ready. Fairness prevents that
-                # one probe from monopolising the serial provider lane.
-                requirements_ready = self._requirements_ready_workload_ids()
-                claimable = requirements_ready.union(
-                    self._scheduler_workload_ids().difference(
-                        self._missing_requirement_suppressions
-                    )
+                if prepared is None:
+                    raise AcquisitionRuntimeError("parallel claim preparation missing")
+                bound, claimed, state, plan, moment = prepared
+                active_workload_id = str(claimed.payload["workload_id"])
+                result = self._execute(
+                    bound,
+                    claimed,
+                    now=moment,
+                    desired_state=state,
+                    plan=plan,
                 )
-                primary_claimable = frozenset(claimable).intersection(
-                    self._primary_quantitative_workload_ids
-                )
-                claimed = None
-                primary_was_last = (
-                    self._last_tick.workload_id
-                    in self._primary_quantitative_workload_ids
-                )
-                if primary_claimable and not primary_was_last:
-                    claimed = self._scheduler.claim_next(
-                        self._lease_owner,
-                        now=moment,
-                        allowed_workload_ids=primary_claimable,
-                        prefer_unattempted=False,
-                    )
-                if claimed is None:
-                    claimed = self._scheduler.claim_next(
-                        self._lease_owner,
-                        now=moment,
-                        allowed_workload_ids=frozenset(claimable),
-                        prefer_unattempted=True,
-                    )
-                if claimed is None:
-                    result = ShadowTickResult(
-                        "idle", "no_ready_serial_job", None, None, None, None, False
-                    )
-                else:
-                    state = self._desired_state_store.load_active()
-                    if state is None:
-                        raise AcquisitionRuntimeError("claimed job has no desired state")
-                    plan = acquisition.build_worker_acquisition_plan(
-                        state,
-                        collector_scope=self._collector_scope,
-                    )
-                    bound = bridge.bind_claimed_acquisition_job(plan, claimed)
-                    result = self._execute(
-                        bound,
-                        claimed,
-                        now=moment,
-                        desired_state=state,
-                        plan=plan,
-                    )
+                with self._claim_lock:
                     if (
-                        result.reason_code
-                        in _STATIC_REQUIREMENT_UNAVAILABLE_REASONS
+                        result.reason_code in _STATIC_REQUIREMENT_UNAVAILABLE_REASONS
                         and result.workload_id is not None
                     ):
                         self._missing_requirement_suppressions.add(
@@ -1758,16 +1976,300 @@ class AcquisitionShadowRuntime:
                         self._missing_requirement_suppressions.discard(
                             result.workload_id
                         )
-            self._last_tick = result
+            with self._state_lock:
+                self._last_tick = result
             return result
         finally:
-            self._lock.release()
+            if active_workload_id is not None:
+                with self._claim_lock:
+                    self._active_workload_ids.discard(active_workload_id)
+            self._admission.release()
+
+    def tick_all_due(self) -> tuple[ShadowTickResult, ...]:
+        """Drain every due acquisition workload through rolling lanes.
+
+        Cold start and recovery use five lanes. One healthy recovery batch can
+        open all lanes; deadline, runtime, capacity, lock or commit pressure
+        returns the next batch to five lanes for a bounded cooldown. Different
+        products from the same provider may run together, while one immutable
+        workload can never be active twice. CPU-heavy decode and fusion keep
+        their separate two-thread ceiling.
+        """
+
+        lane_fault_lock = threading.Lock()
+        lane_faults: list[str] = []
+
+        def run_lane() -> tuple[tuple[ShadowTickResult, float], ...]:
+            lane_results: list[tuple[ShadowTickResult, float]] = []
+            while not self._stop_event.is_set():
+                started = time.monotonic()
+                try:
+                    result = self.tick()
+                except scheduler_module.SchedulerDesiredStateError as error:
+                    if error.reason_code not in (
+                        _RECOVERABLE_SCHEDULER_DESIRED_STATE_REASONS
+                    ):
+                        raise
+                    # The integration can install a fresher desired state
+                    # while parallel lanes are still claiming the previous
+                    # plan. That supersedes this lane; it does not invalidate
+                    # independent provider effects that already completed.
+                    # End only this lane and let the next batch reconcile the
+                    # new head instead of aborting the whole worker cycle.
+                    result = ShadowTickResult(
+                        "idle",
+                        error.reason_code,
+                        None,
+                        None,
+                        None,
+                        None,
+                        False,
+                    )
+                except scheduler_module.SchedulerConflict as error:
+                    # The provider effect and its receipt are durable. A
+                    # concurrent scheduler transition can therefore leave a
+                    # short-lived lease conflict without making the provider
+                    # result unsafe. End this lane, let lease recovery retry
+                    # it, and keep the other independent providers running.
+                    reason = "scheduler_conflict"
+                    with lane_fault_lock:
+                        lane_faults.append(reason)
+                    _LOGGER.warning(
+                        "Parallel acquisition lane isolated: class=%s "
+                        "reason=%s",
+                        type(error).__name__,
+                        reason,
+                    )
+                    result = ShadowTickResult(
+                        "busy",
+                        "parallel_scheduler_conflict_retry",
+                        None,
+                        None,
+                        None,
+                        None,
+                        False,
+                    )
+                except scheduler_module.SchedulerClockError as error:
+                    # Wall-clock movement is global and retryable. Keep it
+                    # fail-closed for this lane without restarting the whole
+                    # worker and every unrelated provider request.
+                    reason = "scheduler_clock"
+                    with lane_fault_lock:
+                        lane_faults.append(reason)
+                    _LOGGER.warning(
+                        "Parallel acquisition lane isolated: class=%s "
+                        "reason=%s",
+                        type(error).__name__,
+                        reason,
+                    )
+                    result = ShadowTickResult(
+                        "busy",
+                        "parallel_scheduler_clock_retry",
+                        None,
+                        None,
+                        None,
+                        None,
+                        False,
+                    )
+                elapsed = max(0.0, time.monotonic() - started)
+                lane_results.append((result, elapsed))
+                if result.workload_id is None:
+                    break
+            return tuple(lane_results)
+
+        with self._batch_lock:
+            maximum = max(1, len(self._selection.workload_ids))
+            with self._state_lock:
+                mode = self._parallel_mode
+            lane_limit = (
+                maximum
+                if FULL_PARALLEL_ACQUISITION or mode == "expanded"
+                else min(ADAPTIVE_PARALLEL_FALLBACK_LANES, maximum)
+            )
+            capacity_before = self._capacity_ledger.stats()
+            batch_started = time.monotonic()
+            with self._claim_lock:
+                # Fairness is scoped to one rolling batch. Carrying the
+                # completed local cohort into the next provider cycle lets
+                # five long-running general jobs occupy every recovery lane
+                # before time-critical Belgian sources can claim their new
+                # cadence slot. Scheduler retry/backoff still suppresses a
+                # local workload that is not ready, while a fresh due slot
+                # always gets its intended first opportunity.
+                self._priority_local_attempted_since_general.clear()
+                self._batch_claimed_workload_ids.clear()
+                self._batch_active = True
+                self._batch_reconciled = False
+            try:
+                with ThreadPoolExecutor(
+                    max_workers=lane_limit,
+                    thread_name_prefix="stv3-acquisition",
+                ) as executor:
+                    lanes = [
+                        executor.submit(run_lane)
+                        for _ in range(lane_limit)
+                    ]
+                    timed_results = tuple(
+                        item
+                        for future in lanes
+                        for item in future.result()
+                    )
+            except Exception as error:
+                if isinstance(error, sqlite3.Error):
+                    batch_error_reason = "batch_sqlite_error"
+                elif isinstance(
+                    error,
+                    (
+                        RawCapacityLedgerBusyError,
+                        RawCapacityLedgerCapacityError,
+                        RawCapacityLedgerConflict,
+                        CaptureRecoveryBusyError,
+                        CaptureRecoveryCapacityError,
+                    ),
+                ):
+                    batch_error_reason = "batch_capacity_error"
+                elif isinstance(error, AcquisitionRuntimeError):
+                    batch_error_reason = "batch_runtime_error"
+                elif isinstance(error, TimeoutError):
+                    batch_error_reason = "batch_timeout"
+                else:
+                    batch_error_reason = "batch_exception"
+                # Only the class and one closed reason code cross the logging
+                # boundary. Exception arguments may contain paths, upstream
+                # metadata or other untrusted provider text and are therefore
+                # deliberately excluded.
+                _LOGGER.error(
+                    "Parallel acquisition batch failed: class=%s reason=%s",
+                    type(error).__name__,
+                    batch_error_reason,
+                )
+                controller_now = float(self._clock())
+                with self._state_lock:
+                    self._parallel_mode = "recovery"
+                    self._parallel_cooldown_until = (
+                        controller_now + ADAPTIVE_PARALLEL_COOLDOWN_SECONDS
+                    )
+                    self._parallel_last_unhealthy_reasons = (
+                        batch_error_reason,
+                    )
+                raise
+            finally:
+                with self._claim_lock:
+                    self._batch_active = False
+                    self._batch_reconciled = False
+                    self._batch_claimed_workload_ids.clear()
+
+            batch_duration = max(0.0, time.monotonic() - batch_started)
+            capacity_after = self._capacity_ledger.stats()
+            meaningful = tuple(
+                (result, elapsed)
+                for result, elapsed in timed_results
+                if result.workload_id is not None
+            )
+            mean_runtime = (
+                sum(elapsed for _result, elapsed in meaningful)
+                / len(meaningful)
+                if meaningful
+                else 0.0
+            )
+            unhealthy: set[str] = set()
+            unhealthy.update(lane_faults)
+            for result, _elapsed in meaningful:
+                reason = result.reason_code.lower()
+                if "deadline" in reason:
+                    unhealthy.add("deadline_miss")
+                if result.status == "busy" or "busy" in reason:
+                    unhealthy.add("busy")
+                if "capacity" in reason:
+                    unhealthy.add("capacity")
+                if "lock" in reason:
+                    unhealthy.add("lock_busy")
+                if "commit_failed" in reason:
+                    unhealthy.add("commit_backlog")
+            if (
+                int(capacity_after["reserved_count"])
+                > int(capacity_before["reserved_count"])
+                or int(capacity_after["reserved_entries"])
+                > int(capacity_before["reserved_entries"])
+            ):
+                unhealthy.add("commit_backlog")
+
+            controller_now = float(self._clock())
+            with self._state_lock:
+                previous_runtime = self._parallel_previous_mean_runtime_seconds
+                if (
+                    meaningful
+                    and previous_runtime is not None
+                    and mean_runtime
+                    > max(
+                        previous_runtime * ADAPTIVE_RUNTIME_GROWTH_FACTOR,
+                        previous_runtime
+                        + ADAPTIVE_RUNTIME_GROWTH_MIN_SECONDS,
+                    )
+                ):
+                    unhealthy.add("runtime_rising")
+                if meaningful:
+                    self._parallel_previous_mean_runtime_seconds = mean_runtime
+                if unhealthy:
+                    self._parallel_mode = "recovery"
+                    self._parallel_cooldown_until = (
+                        controller_now + ADAPTIVE_PARALLEL_COOLDOWN_SECONDS
+                    )
+                elif (
+                    meaningful
+                    and self._parallel_mode == "recovery"
+                    and controller_now >= self._parallel_cooldown_until
+                ):
+                    self._parallel_mode = "expanded"
+                self._parallel_last_batch_duration_seconds = batch_duration
+                self._parallel_last_batch_mean_runtime_seconds = mean_runtime
+                self._parallel_last_batch_job_count = len(meaningful)
+                self._parallel_last_batch_lane_limit = lane_limit
+                self._parallel_last_unhealthy_reasons = tuple(
+                    sorted(unhealthy)
+                )
+            return tuple(result for result, _elapsed in timed_results)
 
     def diagnostics(self) -> dict[str, Any]:
         """Return only fixed aggregates and hashes; no targets or secrets."""
 
         matrix = activation_matrix_snapshot()
         capacity = self._capacity_ledger.stats()
+        controller_now = float(self._clock())
+        with self._state_lock:
+            terminal_observations = dict(self._latest_terminal_observations)
+            terminal_failures = dict(self._consecutive_terminal_failures)
+            last_tick = self._last_tick
+            parallel = {
+                "cooldown_remaining_seconds": max(
+                    0.0,
+                    self._parallel_cooldown_until - controller_now,
+                ),
+                "fallback_lanes": (
+                    0 if FULL_PARALLEL_ACQUISITION
+                    else ADAPTIVE_PARALLEL_FALLBACK_LANES
+                ),
+                "lane_limit": self._parallel_last_batch_lane_limit,
+                "last_batch_duration_seconds": (
+                    self._parallel_last_batch_duration_seconds
+                ),
+                "last_batch_job_count": self._parallel_last_batch_job_count,
+                "last_batch_mean_runtime_seconds": (
+                    self._parallel_last_batch_mean_runtime_seconds
+                ),
+                "last_unhealthy_reasons": list(
+                    self._parallel_last_unhealthy_reasons
+                ),
+                "maximum_lanes": max(
+                    1, len(self._selection.workload_ids)
+                ),
+                "mode": (
+                    "full_parallel"
+                    if FULL_PARALLEL_ACQUISITION
+                    else self._parallel_mode
+                ),
+                "concurrency_scope": "workload",
+            }
         configured_workloads = []
         unavailable_workload_ids = []
         for workload_id in sorted(self._selection.workload_ids):
@@ -1782,7 +2284,7 @@ class AcquisitionShadowRuntime:
             requirements_ready = available == total
             if not requirements_ready:
                 unavailable_workload_ids.append(workload_id)
-            observation = self._latest_terminal_observations.get(workload_id)
+            observation = terminal_observations.get(workload_id)
             last_terminal = None if observation is None else dict(observation[1])
             configured_workloads.append({
                 "handler_configured": bool(
@@ -1846,25 +2348,35 @@ class AcquisitionShadowRuntime:
             "contract": CONTRACT,
             "collector_scope": self._collector_scope,
             "adaptive_attempts": {
+                "enabled": not FULL_PARALLEL_ACQUISITION,
                 "failure_threshold": ADAPTIVE_ATTEMPT_FAILURE_THRESHOLD,
                 "full_probe_interval": ADAPTIVE_FULL_PROBE_INTERVAL,
                 "short_wall_seconds": ADAPTIVE_ATTEMPT_WALL_SECONDS,
-                "throttled_workload_count": len([
-                    count
-                    for count in self._consecutive_terminal_failures.values()
-                    if count >= ADAPTIVE_ATTEMPT_FAILURE_THRESHOLD
-                ]),
-                "throttled_workload_ids": sorted(
-                    workload_id
-                    for workload_id, count in (
-                        self._consecutive_terminal_failures.items()
+                "throttled_workload_count": (
+                    0
+                    if FULL_PARALLEL_ACQUISITION
+                    else len([
+                        count
+                        for count in terminal_failures.values()
+                        if count >= ADAPTIVE_ATTEMPT_FAILURE_THRESHOLD
+                    ])
+                ),
+                "throttled_workload_ids": (
+                    []
+                    if FULL_PARALLEL_ACQUISITION
+                    else sorted(
+                        workload_id
+                        for workload_id, count in (
+                            terminal_failures.items()
+                        )
+                        if count >= ADAPTIVE_ATTEMPT_FAILURE_THRESHOLD
                     )
-                    if count >= ADAPTIVE_ATTEMPT_FAILURE_THRESHOLD
                 ),
             },
             "execution_receipts": self._execution_store.stats(),
-            "last_tick": self._last_tick.as_dict(),
+            "last_tick": last_tick.as_dict(),
             "operational_admission_eligible": False,
+            "parallel_acquisition": parallel,
             "stop_requested": self._stop_event.is_set(),
             "scheduler": self._scheduler.diagnostics(),
             "startup_recovery": self._startup_recovery.as_dict(),
@@ -1878,15 +2390,17 @@ class AcquisitionShadowRuntime:
     ) -> tuple[tuple[str, str, str], ...]:
         """Return one bounded, secret-free terminal result per workload."""
 
+        with self._state_lock:
+            observations = tuple(sorted(
+                self._latest_terminal_observations.items()
+            ))
         return tuple(
             (
                 workload_id,
                 observation[1]["status"],
                 observation[1]["reason_code"],
             )
-            for workload_id, observation in sorted(
-                self._latest_terminal_observations.items()
-            )
+            for workload_id, observation in observations
         )
 
     def request_stop(self) -> None:
@@ -1981,6 +2495,7 @@ def create_shadow_candidate(
     allowed_workload_ids: frozenset[str] | None = None,
     collector_scope: str = acquisition.COLLECTOR_SCOPE_COVERAGE_RELEVANT,
     clock: Callable[[], float] = time.time,
+    defer_startup_recovery: bool = False,
 ) -> AcquisitionShadowRuntime:
     """Construct the complete local candidate without starting any thread."""
 
@@ -1992,6 +2507,10 @@ def create_shadow_candidate(
     allowed_workloads = _validated_allowed_workload_ids(
         allowed_workload_ids
     )
+    scheduler_parallelism = max(
+        1,
+        len(_runtime_selection(allowed_workloads).workload_ids),
+    )
     desired = DesiredStateStore(paths.desired_state)
     scheduler = scheduler_module.AutonomousScheduler(
         paths.scheduler,
@@ -2001,6 +2520,7 @@ def create_shadow_candidate(
             collector_scope=validated_collector_scope,
         ),
         clock=clock,
+        max_active_leases=scheduler_parallelism,
     )
     capacity = RawCapacityLedger(
         paths.capacity_ledger,
@@ -2022,6 +2542,7 @@ def create_shadow_candidate(
         allowed_workload_ids=allowed_workloads,
         collector_scope=validated_collector_scope,
         clock=clock,
+        defer_startup_recovery=defer_startup_recovery,
     )
 
 

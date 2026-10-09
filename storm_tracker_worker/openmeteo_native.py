@@ -1,10 +1,11 @@
-"""Exact, non-operational Open-Meteo forecast capture.
+"""Exact Open-Meteo forecast capture and strict response verification.
 
 The worker stores the exact JSON response before inspecting its structure.
 Input is the pseudonymous target-query projection produced by
 ``AcquisitionQueryAuthority.openmeteo_shadow_query_batch``; target IDs never
 cross the child boundary.  This module makes no rain, threat, model-skill or
-operational-admission claim and is intentionally not wired into the service.
+operational-admission claim.  A separate parent-side decoder may consume the
+verified bytes; raw capture remains independent from that interpretation.
 """
 from __future__ import annotations
 
@@ -88,6 +89,11 @@ EXPECTED_HOURLY_UNITS = {
     "wind_speed_700hPa": "km/h",
     "wind_speed_850hPa": "km/h",
 }
+# Open-Meteo changed the dimensionless ``lifted_index`` unit marker from the
+# literal ``undefined`` to an empty string in September 2026. Preserve both
+# exact upstream representations so retained captures remain replayable while
+# new responses continue to pass a closed unit contract.
+SUPPORTED_LIFTED_INDEX_UNITS = frozenset({"", "undefined"})
 FORECAST_MINUTELY_15 = 13
 FORECAST_HOURS = 6
 MAX_QUERY_COUNT = 64
@@ -308,7 +314,10 @@ def _request_parameters(queries: tuple[dict[str, object], ...]) -> dict[str, str
         "wind_speed_unit": "kmh",
         # Preserve the selected numerical model grid instead of applying the
         # API's elevation downscaling or land-cell preference.
-        "elevation": "nan",
+        # The API requires one elevation selector per coordinate in a batch.
+        # A scalar ``nan`` is accepted for one target but rejected once the
+        # worker projects multiple Life360/fictitious targets together.
+        "elevation": ",".join("nan" for _query in queries),
         "cell_selection": "nearest",
     }
 
@@ -734,8 +743,29 @@ def _inspect(payload: bytes, *, query_count: int) -> OpenMeteoStructureIdentity:
         "minutely_15_units", "timezone", "timezone_abbreviation",
         "utc_offset_seconds",
     }
-    for item in items:
-        if set(item) != required:
+    location_id_mode = (
+        "indexed"
+        if query_count > 1
+        and all(
+            "location_id" not in item if index == 0
+            else item.get("location_id") == index
+            for index, item in enumerate(items)
+        )
+        else "legacy"
+    )
+    if location_id_mode == "legacy" and any(
+        "location_id" in item for item in items
+    ):
+        raise OpenMeteoNativeContractError(
+            "Open-Meteo locatie-indexen wijken af van requestvolgorde"
+        )
+    for index, item in enumerate(items):
+        expected_fields = (
+            required | {"location_id"}
+            if location_id_mode == "indexed" and index > 0
+            else required
+        )
+        if set(item) != expected_fields:
             raise OpenMeteoNativeContractError(
                 "Open-Meteo responsvelden wijken af van contract"
             )
@@ -806,7 +836,13 @@ def _inspect(payload: bytes, *, query_count: int) -> OpenMeteoStructureIdentity:
             raise OpenMeteoNativeContractError(
                 "Open-Meteo minutely_15-units wijken af"
             )
-        if hourly_units != EXPECTED_HOURLY_UNITS:
+        expected_hourly_units = dict(EXPECTED_HOURLY_UNITS)
+        lifted_index_unit = hourly_units.get("lifted_index")
+        expected_hourly_units["lifted_index"] = lifted_index_unit
+        if (
+            lifted_index_unit not in SUPPORTED_LIFTED_INDEX_UNITS
+            or hourly_units != expected_hourly_units
+        ):
             raise OpenMeteoNativeContractError(
                 "Open-Meteo hourly-units wijken af"
             )
@@ -831,6 +867,22 @@ def _inspect(payload: bytes, *, query_count: int) -> OpenMeteoStructureIdentity:
         variable_count=len(CURRENT) + len(MINUTELY_15) + len(HOURLY),
         structure_sha256=hashlib.sha256(structure_bytes).hexdigest(),
     )
+
+
+def decode_verified_openmeteo_response(
+    payload: bytes,
+    *,
+    query_count: int,
+) -> tuple[dict[str, Any], ...]:
+    """Return response locations only after the complete closed schema passes."""
+
+    _inspect(payload, query_count=query_count)
+    decoded = _strict_json(payload)
+    items = [decoded] if query_count == 1 else decoded
+    # ``_inspect`` proved exact dict/list types, count, axes, units and every
+    # numeric value.  Copy the mappings so no caller can mutate decoded state
+    # shared with another processing stage.
+    return tuple(dict(item) for item in items)
 
 
 def _provenance(*, request_sha256: str, query_count: int) -> dict[str, object]:
@@ -1122,4 +1174,5 @@ __all__ = [
     "OpenMeteoNativeTransportError",
     "OpenMeteoStructureIdentity",
     "capture_openmeteo_forecast",
+    "decode_verified_openmeteo_response",
 ]

@@ -4,9 +4,13 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 import hashlib
+import logging
+import math
 from pathlib import Path
 import threading
 from typing import Callable
+
+from pyproj import CRS, Transformer
 
 from .analysis_grid_transform import (
     AnalysisGridTransformConfig,
@@ -33,16 +37,21 @@ from .multi_source_radar_facts import (
 )
 from .multi_source_radar_snapshot import (
     RadarTargetObservation,
+    ReflectivityEchoTargetObservation,
     radar_observations_from_radar_batch,
 )
 from .raw_artifacts import RawArtifactStore
 from .tracking_core.engine.analysis_grid import AnalysisGrid
 
 
+_LOGGER = logging.getLogger(__name__)
+
+
 QUANTITATIVE_WORKLOAD_IDS = frozenset({
     "radar.dwd.radolan_rv",
     "radar.knmi.rtcor",
     "radar.metoffice.uk_rate",
+    "radar.opera.dbzh",
     "satellite.noaa.err",
 })
 
@@ -438,6 +447,148 @@ def decode_met_office_positive_observations(
     )
 
 
+def _opera_region(desired_state: DesiredState):
+    """Return one bounded OPERA window covering every available target."""
+
+    from .opera_dbzh_quantitative import OperaWgs84Region
+
+    targets = tuple(item for item in desired_state.targets if item.available)
+    if not targets:
+        return None
+    padding = 0.03
+    return OperaWgs84Region(
+        minimum_latitude=max(-89.99, min(item.latitude for item in targets) - padding),
+        minimum_longitude=max(-179.99, min(item.longitude for item in targets) - padding),
+        maximum_latitude=min(89.99, max(item.latitude for item in targets) + padding),
+        maximum_longitude=min(179.99, max(item.longitude for item in targets) + padding),
+    )
+
+
+def _opera_echo_observations_from_artifact(
+    desired_state: DesiredState,
+    artifact,
+    *,
+    received_at: float,
+    source_receipt_sha256: str,
+    certificate_sha256: str,
+    process_receipt_sha256: str,
+) -> tuple[RadarTargetObservation, ...]:
+    """Sample significant OPERA echoes while withholding rain-rate semantics."""
+
+    from . import opera_native as native
+
+    grid = artifact.metadata["grid"]
+    capture = artifact.metadata["capture"]
+    row_start = int(grid["row_start"])
+    column_start = int(grid["column_start"])
+    rows, columns = artifact.detected_dbz.shape
+    transformer = Transformer.from_crs(
+        CRS.from_epsg(4326),
+        CRS.from_user_input(native.OPERA_PROJDEF),
+        always_xy=True,
+    )
+    observations: list[RadarTargetObservation] = []
+    for target in desired_state.targets:
+        if not target.available:
+            continue
+        x_metres, y_metres = transformer.transform(
+            float(target.longitude), float(target.latitude)
+        )
+        if not math.isfinite(x_metres) or not math.isfinite(y_metres):
+            continue
+        row = math.floor(-y_metres / native.OPERA_GRID_SCALE_METRES) - row_start
+        column = math.floor(x_metres / native.OPERA_GRID_SCALE_METRES) - column_start
+        if not (0 <= row < rows and 0 <= column < columns):
+            continue
+        if (
+            int(artifact.coverage_mask[row, column]) != 1
+            or int(artifact.dbzh_detected_mask[row, column]) != 1
+            or int(artifact.qi_valid_mask[row, column]) != 1
+        ):
+            continue
+        reflectivity_dbz = float(artifact.detected_dbz[row, column])
+        quality_index = float(artifact.qi_raw[row, column])
+        # The legacy OPERA implementation used 8 dBZ as the first meaningful
+        # echo class.  We preserve that detection boundary, but deliberately do
+        # not convert reflectivity into surface rain rate.
+        if reflectivity_dbz < 8.0:
+            continue
+        observations.append(ReflectivityEchoTargetObservation(
+            source_id="radar.opera.dbzh",
+            target_id=target.target_id,
+            reflectivity_dbz=reflectivity_dbz,
+            quality_index=quality_index,
+            product_valid_at=float(artifact.metadata["product"]["nominal_timestamp"]),
+            received_at=float(received_at),
+            source_receipt_sha256=source_receipt_sha256,
+            certificate_sha256=certificate_sha256,
+            process_receipt_sha256=process_receipt_sha256,
+        ))
+    return tuple(sorted(observations, key=lambda item: item.target_id))
+
+
+def decode_opera_echo_observations(
+    *,
+    desired_state: DesiredState,
+    capture_id: str,
+    raw_store: RawArtifactStore,
+    artifact_root: str | Path,
+    evidence_path: str | Path,
+    evaluated_at: float,
+    clock: Callable[[], float],
+) -> tuple[RadarTargetObservation, ...]:
+    """Decode OPERA DBZH/QI and expose only significant reflectivity echoes."""
+
+    from .opera_dbzh_quantitative import (
+        DECODER_CONFIG_SHA256,
+        OperaDbzhDerivedArtifactStore,
+        OperaDbzhRawAuthority,
+        decode_opera_dbzh_region,
+        open_opera_evidence_store,
+    )
+
+    region = _opera_region(desired_state)
+    if region is None:
+        return ()
+    capture = raw_store.load_capture(capture_id)
+    if capture is None or not capture.members:
+        raise WorkerOnlyRadarProcessingError("capture_receipt_unavailable")
+    raw_authority = OperaDbzhRawAuthority(raw_store)
+    artifacts = OperaDbzhDerivedArtifactStore(Path(artifact_root))
+    evidence = open_opera_evidence_store(
+        Path(evidence_path), raw_authority=raw_authority, clock=clock
+    )
+    job_id = _identity("decoder-job-", capture_id, desired_state.state_sha256)
+    decoded = decode_opera_dbzh_region(
+        capture_id=capture_id,
+        decoder_job_id=job_id,
+        attempt_id=_identity("decoder-attempt-", job_id, capture_id),
+        region=region,
+        raw_authority=raw_authority,
+        artifact_store=artifacts,
+        evidence_store=evidence,
+        evaluated_at=evaluated_at,
+    )
+    if decoded.outcome != "decoded_complete" or decoded.artifact is None:
+        _LOGGER.warning(
+            "OPERA reflectivity decode withheld: outcome=%s reason=%s",
+            decoded.outcome,
+            decoded.reason_code,
+        )
+        raise WorkerOnlyRadarProcessingError("opera_reflectivity_decode_withheld")
+    artifact = artifacts.read_decoded(
+        decoded.artifact, checkpoint=lambda _stage: None
+    )
+    return _opera_echo_observations_from_artifact(
+        desired_state,
+        artifact,
+        received_at=max(member.received_at for member in capture.members),
+        source_receipt_sha256=capture.capture_receipt_sha256,
+        certificate_sha256=DECODER_CONFIG_SHA256,
+        process_receipt_sha256=decoded.evidence_receipt.receipt_sha256,
+    )
+
+
 def _noaa_region(desired_state: DesiredState):
     from .noaa_err_quantitative import (
         GRID_EAST,
@@ -565,6 +716,7 @@ def decode_worker_only_positive_observations(
         "radar.dwd.radolan_rv": decode_dwd_positive_observations,
         "radar.knmi.rtcor": decode_knmi_positive_observations,
         "radar.metoffice.uk_rate": decode_met_office_positive_observations,
+        "radar.opera.dbzh": decode_opera_echo_observations,
         "satellite.noaa.err": decode_noaa_positive_observations,
     }
     processor = processors.get(workload_id)
@@ -662,7 +814,11 @@ def decode_worker_only_radar_result(
         evidence_path=evidence_path,
         handoff_root=handoff_root,
     )
-    if source is None and any(item.available for item in desired_state.targets):
+    if (
+        workload_id != "radar.opera.dbzh"
+        and source is None
+        and any(item.available for item in desired_state.targets)
+    ):
         raise WorkerOnlyRadarProcessingError(
             "quantitative_verified_source_unavailable"
         )
@@ -676,6 +832,7 @@ __all__ = [
     "decode_dwd_positive_observations",
     "decode_knmi_positive_observations",
     "decode_met_office_positive_observations",
+    "decode_opera_echo_observations",
     "decode_noaa_positive_observations",
     "decode_worker_only_positive_observations",
     "decode_worker_only_radar_result",

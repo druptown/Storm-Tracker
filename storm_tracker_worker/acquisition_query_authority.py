@@ -629,6 +629,30 @@ def _target_reference(snapshot_sha256: str, target_id: str) -> str:
     )
 
 
+def openmeteo_response_target_ids(
+    desired_state: DesiredState,
+) -> tuple[str, ...]:
+    """Return the exact target order used by an Open-Meteo batch response.
+
+    Open-Meteo returns one location object per requested coordinate in request
+    order.  The child deliberately receives pseudonymous query keys only; this
+    parent-side resolver exposes target IDs without weakening that boundary.
+    """
+
+    state = _validated_desired_state(desired_state)
+    available = tuple(item for item in state.targets if item.available)
+    return tuple(
+        item.target_id
+        for item in sorted(
+            available,
+            key=lambda item: _target_reference(
+                state.state_sha256,
+                item.target_id,
+            ),
+        )
+    )
+
+
 def _validated_desired_state(desired_state: DesiredState) -> DesiredState:
     if not isinstance(desired_state, DesiredState):
         raise AcquisitionQueryAuthorityError(
@@ -1369,6 +1393,7 @@ __all__ = [
     "TargetQuery",
     "build_acquisition_query_authority",
     "build_acquisition_query_authorities",
+    "openmeteo_response_target_ids",
     "safe_native_job_id",
     "validate_acquisition_query_authority",
     "validate_acquisition_query_batch",

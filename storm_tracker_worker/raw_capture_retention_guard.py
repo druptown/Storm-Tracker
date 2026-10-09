@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -25,6 +26,9 @@ from .raw_capacity_ledger import (
     capacity_ledger_catalog_cycle_reserve_bytes,
     capacity_ledger_catalog_main_database_max_bytes,
 )
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 CONTRACT: Final = "stv3-worker-raw-capture-retention-guard-v2"
@@ -670,56 +674,115 @@ class RawCaptureRetentionGuard:
             max_catalog_bytes=fields["max_catalog_bytes"],
             page_size_bytes=fields["catalog_page_size_bytes"],
         )
-        if (
-            fields["max_total_bytes"] != config.cadence_raw_max_bytes
-            or fields["max_object_entries"] != config.cadence_raw_max_entries
-            or fields["max_receipt_entries"]
-            != config.cadence_raw_max_receipts
-            or fields["max_capture_entries"]
-            != config.cadence_raw_max_captures
-            or fields["max_catalog_bytes"]
-            != config.cadence_raw_catalog_max_bytes
-            or fields["filesystem_bytes"] > fields["max_total_bytes"]
-            or fields["catalog_bytes"] != fields["filesystem_bytes"]
-            or fields["filesystem_object_entries"]
-            > fields["max_object_entries"]
-            or fields["object_count"] != fields["filesystem_object_entries"]
-            or fields["receipt_count"] > fields["max_receipt_entries"]
-            or fields["capture_count"] > fields["max_capture_entries"]
-            or fields["catalog_database_bytes"] > fields["max_catalog_bytes"]
-            or fields["catalog_main_database_max_bytes"]
-            != expected_catalog_main_max
-            or fields["catalog_main_database_bytes"]
-            > fields["catalog_main_database_max_bytes"]
-            or fields["catalog_main_database_bytes"]
-            > fields["catalog_database_bytes"]
-            or fields["filesystem_staging_entries"] != 0
-            or fields["unmanaged_file_count"] != 0
-            or stats.get("retention_policy") != "none"
-        ):
+        invariant_failures: list[str] = []
+
+        def failed(condition: bool, code: str) -> None:
+            if condition:
+                invariant_failures.append(code)
+
+        failed(
+            fields["max_total_bytes"] != config.cadence_raw_max_bytes,
+            "configured_total_bytes",
+        )
+        failed(
+            fields["max_object_entries"] != config.cadence_raw_max_entries,
+            "configured_object_entries",
+        )
+        failed(
+            fields["max_receipt_entries"] != config.cadence_raw_max_receipts,
+            "configured_receipt_entries",
+        )
+        failed(
+            fields["max_capture_entries"] != config.cadence_raw_max_captures,
+            "configured_capture_entries",
+        )
+        failed(
+            fields["max_catalog_bytes"] != config.cadence_raw_catalog_max_bytes,
+            "configured_catalog_bytes",
+        )
+        failed(
+            fields["filesystem_bytes"] > fields["max_total_bytes"],
+            "filesystem_byte_capacity",
+        )
+        failed(
+            fields["catalog_bytes"] != fields["filesystem_bytes"],
+            "catalog_filesystem_bytes",
+        )
+        failed(
+            fields["filesystem_object_entries"] > fields["max_object_entries"],
+            "filesystem_object_capacity",
+        )
+        failed(
+            fields["object_count"] != fields["filesystem_object_entries"],
+            "catalog_filesystem_object_count",
+        )
+        failed(
+            fields["receipt_count"] > fields["max_receipt_entries"],
+            "receipt_capacity",
+        )
+        failed(
+            fields["capture_count"] > fields["max_capture_entries"],
+            "capture_capacity",
+        )
+        failed(
+            fields["catalog_database_bytes"] > fields["max_catalog_bytes"],
+            "catalog_physical_capacity",
+        )
+        failed(
+            fields["catalog_main_database_max_bytes"] != expected_catalog_main_max,
+            "catalog_main_envelope",
+        )
+        failed(
+            fields["catalog_main_database_bytes"]
+            > fields["catalog_main_database_max_bytes"],
+            "catalog_main_capacity",
+        )
+        failed(
+            fields["catalog_main_database_bytes"]
+            > fields["catalog_database_bytes"],
+            "catalog_main_physical_bytes",
+        )
+        failed(fields["filesystem_staging_entries"] != 0, "staging_not_empty")
+        failed(fields["unmanaged_file_count"] != 0, "unmanaged_files")
+        failed(stats.get("retention_policy") != "none", "retention_policy")
+        if invariant_failures:
+            _LOGGER.error(
+                "RAW retention raw-store invariant failed: checks=%s",
+                ",".join(invariant_failures),
+            )
             raise RawCaptureRetentionGuardError("storage_integrity_failed")
         if full_audit is not None:
             audit = _mapping(full_audit, "raw_store_audit")
             reclamation = _mapping(
                 audit.get("reclamation"), "raw_store_reclamation_audit"
             )
+            audit_failures: list[str] = []
+            if audit.get("healthy") is not True:
+                audit_failures.append("audit_unhealthy")
+            if audit.get("issues") != []:
+                audit_failures.append("audit_issues")
+            if reclamation.get("enabled") is not False:
+                audit_failures.append("reclamation_enabled")
             if (
-                audit.get("healthy") is not True
-                or audit.get("issues") != []
-                or reclamation.get("enabled") is not False
-                or _integer_field(
-                    audit, "checked_objects", "raw_store_audit"
-                )
+                _integer_field(audit, "checked_objects", "raw_store_audit")
                 != fields["object_count"]
-                or _integer_field(
-                    audit, "checked_receipts", "raw_store_audit"
-                )
+            ):
+                audit_failures.append("audit_object_count")
+            if (
+                _integer_field(audit, "checked_receipts", "raw_store_audit")
                 != fields["receipt_count"]
-                or _integer_field(
-                    audit, "checked_captures", "raw_store_audit"
-                )
+            ):
+                audit_failures.append("audit_receipt_count")
+            if (
+                _integer_field(audit, "checked_captures", "raw_store_audit")
                 != fields["capture_count"]
             ):
+                audit_failures.append("audit_capture_count")
+            if audit_failures:
+                _LOGGER.error(
+                    "RAW retention raw-store audit failed: checks=%s",
+                    ",".join(audit_failures),
+                )
                 raise RawCaptureRetentionGuardError("storage_integrity_failed")
         return fields
 
@@ -1057,6 +1120,7 @@ class RawCaptureRetentionGuard:
         if type(full_audit) is not bool:
             raise TypeError("full_audit must be bool")
         with self._lock:
+            phase = "ownership"
             try:
                 self._ownership_assertion()
             except Exception:
@@ -1065,6 +1129,7 @@ class RawCaptureRetentionGuard:
                     "exclusive_process_owner_not_held"
                 ) from None
             try:
+                phase = "event_diagnostics"
                 self._fault("after_ownership")
                 event = self._validate_event(
                     self._event_diagnostics_supplier()
@@ -1072,9 +1137,11 @@ class RawCaptureRetentionGuard:
                     else None
                 )
                 require_event_paths = event["paths_required"] is True
+                phase = "path_observation"
                 before = self._observe_path_set(
                     require_event_paths=require_event_paths
                 )
+                phase = "capacity_ledger"
                 ledger_stats = self._ledger_stats_supplier()
                 ledger_audit = self._ledger_audit_supplier() if full_audit else None
                 ledger = self._validate_ledger(
@@ -1082,14 +1149,19 @@ class RawCaptureRetentionGuard:
                     full_audit=ledger_audit,
                 )
                 self._fault("after_ledger")
+                phase = "raw_store_stats"
                 raw_stats = self._raw_store_stats_supplier()
+                phase = "raw_store_audit"
                 raw_audit = self._raw_store_audit_supplier() if full_audit else None
+                phase = "raw_store_validation"
                 raw = self._validate_raw_store(raw_stats, full_audit=raw_audit)
                 self._fault("after_raw_store")
+                phase = "filesystem_capacity"
                 filesystem_total, filesystem_free = self._disk_usage(
                     before.capacity_probe_root
                 )
                 self._fault("after_capacity_probe")
+                phase = "path_identity_reproof"
                 after = self._observe_path_set(
                     require_event_paths=require_event_paths
                 )
@@ -1098,6 +1170,7 @@ class RawCaptureRetentionGuard:
                         "path_identity_reproof_failed"
                     )
                 self._fault("after_identity_reproof")
+                phase = "ownership_reproof"
                 try:
                     self._ownership_assertion()
                 except Exception:
@@ -1105,6 +1178,7 @@ class RawCaptureRetentionGuard:
                         "exclusive_process_owner_not_held"
                     ) from None
                 self._fault("after_ownership_reproof")
+                phase = "capacity_document"
                 capacity, alarms = self._capacity_document(
                     ledger=ledger,
                     raw=raw,
@@ -1145,11 +1219,19 @@ class RawCaptureRetentionGuard:
                 raise
             except RawCaptureRetentionGuardError as error:
                 code = str(error)
+                _LOGGER.error(
+                    "RAW retention integrity check failed: phase=%s",
+                    phase,
+                )
                 self._cache_failure(code)
                 raise RawCaptureRetentionGuardBlocked(
                     self._last["reason_code"]
                 ) from None
             except Exception:
+                _LOGGER.error(
+                    "RAW retention integrity check failed: phase=%s",
+                    phase,
+                )
                 self._cache_failure("storage_integrity_failed")
                 raise RawCaptureRetentionGuardBlocked(
                     "storage_integrity_failed"

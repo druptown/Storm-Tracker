@@ -8,7 +8,7 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 
@@ -65,6 +65,40 @@ def _terminate_limiter(limiter: subprocess.Popen[bytes]) -> None:
             limiter.wait(timeout=2.0)
 
 
+def _affinity_capacity_percent() -> int | None:
+    """Return the hard inherited taskset ceiling in cpulimit units."""
+    if not hasattr(os, "sched_getaffinity"):
+        return None
+    try:
+        affinity = os.sched_getaffinity(0)
+    except OSError:
+        return None
+    if not affinity:
+        return None
+    return len(affinity) * 100
+
+
+def _run_affinity_enforced(
+    command: Sequence[str],
+    *,
+    pending_signal: Callable[[], int | None],
+) -> int:
+    """Run behind a kernel CPU affinity that is already the tighter cap."""
+    worker = subprocess.Popen(command, start_new_session=True)
+    stop_deadline: float | None = None
+    while worker.poll() is None:
+        signum = pending_signal()
+        if signum is not None and stop_deadline is None:
+            worker.send_signal(signal.SIGCONT)
+            worker.send_signal(signum)
+            stop_deadline = time.monotonic() + STOP_GRACE_SECONDS
+        if stop_deadline is not None and time.monotonic() >= stop_deadline:
+            os.killpg(worker.pid, signal.SIGKILL)
+        time.sleep(POLL_SECONDS)
+    assert worker.returncode is not None
+    return _exit_code(worker.returncode)
+
+
 def _request_worker_stop(
     worker: subprocess.Popen[bytes],
     limiter: subprocess.Popen[bytes] | None,
@@ -81,11 +115,6 @@ def _request_worker_stop(
 
 def run(argv: Sequence[str] | None = None) -> int:
     limit, command = _arguments(argv)
-    cpulimit = shutil.which("cpulimit")
-    if cpulimit is None:
-        print("CPU-limiter ontbreekt; worker start fail-closed", file=sys.stderr)
-        return LIMITER_START_EXIT
-
     pending_signal: int | None = None
 
     def remember_signal(signum: int, _frame: object) -> None:
@@ -95,6 +124,23 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     signal.signal(signal.SIGINT, remember_signal)
     signal.signal(signal.SIGTERM, remember_signal)
+
+    affinity_capacity = _affinity_capacity_percent()
+    if affinity_capacity is not None and affinity_capacity <= limit:
+        print(
+            "CPU-plafond wordt hard door de geërfde kernel-affinity afgedwongen "
+            f"({affinity_capacity}% <= {limit}%)",
+            file=sys.stderr,
+        )
+        return _run_affinity_enforced(
+            command,
+            pending_signal=lambda: pending_signal,
+        )
+
+    cpulimit = shutil.which("cpulimit")
+    if cpulimit is None:
+        print("CPU-limiter ontbreekt; worker start fail-closed", file=sys.stderr)
+        return LIMITER_START_EXIT
 
     worker = subprocess.Popen(command, start_new_session=True)
     try:

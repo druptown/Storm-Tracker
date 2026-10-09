@@ -1675,6 +1675,101 @@ def _binding_for_capture(
     return matches[0]
 
 
+def _capture_suffix_for_recovery(
+    capture: RawArtifactCaptureReceipt,
+    binding: RawRecoveryBinding,
+) -> str:
+    """Return the exact current or narrowly supported historical suffix.
+
+    GOES-18 and GOES-19 originally shared the generic capture suffix while
+    their member receipts already carried the satellite identity.  Retained
+    captures remain unambiguous once the member-derived binding is known.
+    """
+
+    if capture.fetch_id.endswith(binding.capture_suffix):
+        return binding.capture_suffix
+    if (
+        binding.capture_suffix in {":G18:capture", ":G19:capture"}
+        and capture.fetch_id.endswith(":capture")
+    ):
+        return ":capture"
+    if ":capture:" in capture.fetch_id:
+        shape = "capture_revision"
+    elif capture.fetch_id.endswith(":captured"):
+        shape = "captured"
+    elif capture.fetch_id.endswith(":capture"):
+        shape = "plain_capture"
+    else:
+        shape = "other"
+    raise CaptureRecoveryIntegrityError(
+        f"active raw capture fetch suffix drifted:{binding.workload_id}:{shape}"
+    )
+
+
+_OPERA_CERTIFIED_CAPTURE_FETCH = re.compile(
+    r"^(?P<raw_fetch>.+:capture):certified:(?P<binding>[0-9a-f]{64})$"
+)
+
+
+def _raw_captures_after_certified_derivative_audit(
+    captures: tuple[RawArtifactCaptureReceipt, ...],
+) -> tuple[RawArtifactCaptureReceipt, ...]:
+    """Validate and exclude metadata-only OPERA certification manifests.
+
+    Certification reuses the exact raw member receipts and adds no raw object
+    bytes.  It is therefore catalog evidence, not a second provider capture.
+    """
+
+    raw = tuple(
+        capture for capture in captures
+        if ":certified:" not in capture.fetch_id
+    )
+    raw_by_identity = {
+        (capture.provider, capture.product, capture.fetch_id): capture
+        for capture in raw
+    }
+    if len(raw_by_identity) != len(raw):
+        raise CaptureRecoveryIntegrityError(
+            "raw capture catalog contains duplicate identities"
+        )
+    for capture in captures:
+        if ":certified:" not in capture.fetch_id:
+            continue
+        match = _OPERA_CERTIFIED_CAPTURE_FETCH.fullmatch(capture.fetch_id)
+        if (
+            match is None
+            or capture.provider != "opera"
+            or capture.product != "eumetnet_opera_cirrus_dbzh_capture"
+            or capture.product_timestamp is None
+            or isinstance(capture.product_timestamp, bool)
+            or not isinstance(capture.product_timestamp, (int, float))
+            or not math.isfinite(float(capture.product_timestamp))
+        ):
+            raise CaptureRecoveryIntegrityError(
+                "OPERA certified capture identity is invalid"
+            )
+        original = raw_by_identity.get((
+            capture.provider,
+            capture.product,
+            match.group("raw_fetch"),
+        ))
+        binding_sha256 = match.group("binding")
+        if (
+            original is None
+            or original.product_timestamp is not None
+            or capture.members != original.members
+            or capture.upstream_capture_id
+            != (
+                f"{original.upstream_capture_id}"
+                f"|decoder_certification_sha256={binding_sha256}"
+            )
+        ):
+            raise CaptureRecoveryIntegrityError(
+                "OPERA certified capture does not bind its exact raw capture"
+            )
+    return raw
+
+
 def _provenance_text(
     provenance: Mapping[str, Any],
     *,
@@ -3257,10 +3352,11 @@ def _validate_capture(
     metadata_by_role: Mapping[str, str | None],
     payloads_by_role: Mapping[str, bytes] | None = None,
 ) -> str:
+    capture_suffix = _capture_suffix_for_recovery(capture, binding)
     job_id = _raw_job_from_fetch_id(
         capture.fetch_id,
         binding=binding,
-        suffix=binding.capture_suffix,
+        suffix=capture_suffix,
     )
     expected_capture_id = RawArtifactStore._capture_id(  # noqa: SLF001
         provider=binding.raw_provider,
@@ -4180,11 +4276,14 @@ class CaptureCapacityReconciler:
                     raise CaptureRecoveryIntegrityError(
                         "raw catalog contains an object without an accounted receipt"
                     )
+                raw_captures = _raw_captures_after_certified_derivative_audit(
+                    captures
+                )
                 captured_receipts: set[str] = set()
                 captured_jobs: set[str] = set()
                 recovered = 0
                 already = 0
-                for capture in captures:
+                for capture in raw_captures:
                     if not capture.members:
                         raise CaptureRecoveryIntegrityError(
                             "active raw capture has no members"
@@ -4204,15 +4303,19 @@ class CaptureCapacityReconciler:
                             "raw capture spans multiple recovery bindings"
                         )
                     binding = next(iter(capture_bindings))
-                    if (
-                        binding.handler_id not in self._bindings
-                        or capture.provider != binding.raw_provider
-                        or capture.product != binding.capture_product
-                        or not capture.fetch_id.endswith(binding.capture_suffix)
-                    ):
+                    if binding.handler_id not in self._bindings:
                         raise CaptureRecoveryIntegrityError(
-                            "active raw capture identity drifted"
+                            "active raw capture handler is not selected"
                         )
+                    if capture.provider != binding.raw_provider:
+                        raise CaptureRecoveryIntegrityError(
+                            "active raw capture provider drifted"
+                        )
+                    if capture.product != binding.capture_product:
+                        raise CaptureRecoveryIntegrityError(
+                            "active raw capture product drifted"
+                        )
+                    _capture_suffix_for_recovery(capture, binding)
                     binding.members_for_roles(
                         tuple(item.role for item in capture.members)
                     )

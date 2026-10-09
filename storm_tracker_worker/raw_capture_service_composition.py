@@ -88,8 +88,8 @@ from .worker_first_service_composition import (
 
 _LOGGER = logging.getLogger(__name__)
 
-CONFIG_CONTRACT: Final = "stv3-worker-raw-capture-service-config-v5"
-RUNTIME_CONTRACT: Final = "stv3-worker-raw-capture-runtime-v5"
+CONFIG_CONTRACT: Final = "stv3-worker-raw-capture-service-config-v6"
+RUNTIME_CONTRACT: Final = "stv3-worker-raw-capture-runtime-v6"
 MODE: Final = "service_raw_capture_shadow"
 SCIENCE_MODE: Final = "disabled"
 RAW_PAYLOAD_TRANSPORT: Final = "worker_direct_not_mqtt"
@@ -828,7 +828,7 @@ class RawCaptureServiceConfig:
 
 
 class RawCaptureServiceRuntime:
-    """One serialized raw-acquisition lane plus bounded MQTT control calls."""
+    """One serialized service gate around adaptive raw-acquisition lanes."""
 
     def __init__(
         self,
@@ -876,6 +876,15 @@ class RawCaptureServiceRuntime:
                 "raw_capture_retention_guard_invalid"
             )
         self._retention_guard = retention_guard
+        raw_store = getattr(acquisition, "raw_store", None)
+        raw_store_recovery = getattr(
+            raw_store,
+            "recover_unmanaged_content_objects",
+            None,
+        )
+        self._raw_store_recovery = (
+            raw_store_recovery if callable(raw_store_recovery) else None
+        )
         self._storage_capacity = json.loads(_canonical(storage_capacity))
         self._acquisition_timeout = acquisition_timeout_seconds
         self._stop_timeout = stop_timeout_seconds
@@ -905,6 +914,7 @@ class RawCaptureServiceRuntime:
         self._last_tick = ShadowTickResult(
             "idle", "not_started", None, None, None, None, False
         )
+        self._last_tick_results = (self._last_tick,)
         self._counts = {
             "control_calls": 0,
             "event_failures": 0,
@@ -931,9 +941,21 @@ class RawCaptureServiceRuntime:
 
     @property
     def latest_tick_result(self) -> ShadowTickResult:
-        """Return the immutable result of the latest serialized acquisition tick."""
+        """Return the immutable result of the latest acquisition batch."""
 
         return self._last_tick
+
+    @property
+    def latest_tick_results(self) -> tuple[ShadowTickResult, ...]:
+        """Return every immutable result from the latest acquisition batch.
+
+        ``latest_tick_result`` remains the compact diagnostic head.  Parallel
+        acquisition can complete several provider jobs in one service tick,
+        so downstream consumers must use this complete batch view rather than
+        silently dropping every result except the last finisher.
+        """
+
+        return self._last_tick_results
 
     def retained_successful_captures(self):
         """Expose only verified retained captures for restart restoration."""
@@ -1240,26 +1262,46 @@ class RawCaptureServiceRuntime:
 
     def _retention_preflight(self, *, full_audit: bool) -> None:
         self._assert_held()
-        try:
-            diagnostics = self._retention_guard.inspect(
-                full_audit=full_audit
-            )
-        except RawCaptureRetentionGuardBlocked as error:
-            _LOGGER.error(
-                "RAW retention guard blocked: reason=%s",
-                error.reason_code,
-            )
-            self._restart_required = True
-            self._stop_blitzortung_event_ingress()
-            raise RawCaptureServiceIntegrityError(
-                "raw_capture_retention_guard_blocked"
-            ) from None
-        except Exception:
-            self._restart_required = True
-            self._stop_blitzortung_event_ingress()
-            raise RawCaptureServiceIntegrityError(
-                "raw_capture_retention_guard_failed"
-            ) from None
+        diagnostics: Mapping[str, Any] | None = None
+        for attempt in range(2):
+            try:
+                diagnostics = self._retention_guard.inspect(
+                    # A failed integrity inspection clears the guard's prior
+                    # full-audit proof.  The one permitted retry therefore
+                    # always rebuilds that proof before acquisition may resume.
+                    full_audit=(full_audit or attempt == 1)
+                )
+                break
+            except RawCaptureRetentionGuardBlocked as error:
+                if (
+                    error.reason_code == "storage_integrity_failed"
+                    and attempt == 0
+                ):
+                    recovered_objects = self._recover_unmanaged_raw_store_objects()
+                    _LOGGER.warning(
+                        "RAW retention storage proof changed; recovered %d "
+                        "verified content objects and retrying one full stable "
+                        "audit",
+                        recovered_objects,
+                    )
+                    continue
+                _LOGGER.error(
+                    "RAW retention guard blocked: reason=%s",
+                    error.reason_code,
+                )
+                self._restart_required = True
+                self._stop_blitzortung_event_ingress()
+                raise RawCaptureServiceIntegrityError(
+                    "raw_capture_retention_guard_blocked"
+                ) from None
+            except Exception:
+                self._restart_required = True
+                self._stop_blitzortung_event_ingress()
+                raise RawCaptureServiceIntegrityError(
+                    "raw_capture_retention_guard_failed"
+                ) from None
+        if diagnostics is None:  # pragma: no cover - loop contract
+            raise AssertionError("retention diagnostics missing")
         if (
             not isinstance(diagnostics, Mapping)
             or diagnostics.get("admission_ready") is not True
@@ -1271,11 +1313,48 @@ class RawCaptureServiceRuntime:
                 "raw_capture_retention_guard_blocked"
             )
 
+    def _recover_unmanaged_raw_store_objects(self) -> int:
+        """Catalogue verified orphan objects before rebuilding storage proof."""
+
+        if self._raw_store_recovery is None:
+            return 0
+        try:
+            recovered_objects = self._raw_store_recovery()
+        except Exception:
+            self._restart_required = True
+            raise RawCaptureServiceIntegrityError(
+                "raw_capture_object_recovery_failed"
+            ) from None
+        if (
+            isinstance(recovered_objects, bool)
+            or not isinstance(recovered_objects, int)
+            or recovered_objects < 0
+        ):
+            self._restart_required = True
+            raise RawCaptureServiceIntegrityError(
+                "raw_capture_object_recovery_invalid"
+            )
+        return recovered_objects
+
     def _start_all_raw_ingress(self) -> None:
         with self._raw_ingress_integrity_lock:
             if self._restart_required:
                 raise RawCaptureServiceIntegrityError(
                     "raw_capture_runtime_restart_required"
+                )
+            startup_recover = getattr(
+                self._acquisition,
+                "startup_recover",
+                None,
+            )
+            if callable(startup_recover):
+                startup_recover()
+            recovered_objects = self._recover_unmanaged_raw_store_objects()
+            if recovered_objects:
+                _LOGGER.warning(
+                    "RAW startup recovery catalogued %d verified "
+                    "content objects without receipt claims",
+                    recovered_objects,
                 )
             self._retention_preflight(full_audit=True)
             self._resource_preflight()
@@ -1290,7 +1369,28 @@ class RawCaptureServiceRuntime:
                 )
             self._retention_preflight(full_audit=False)
             try:
-                result = self._acquisition.tick()
+                batch_tick = getattr(
+                    self._acquisition, "tick_all_due", None
+                )
+                batch = (
+                    batch_tick()
+                    if callable(batch_tick)
+                    else (self._acquisition.tick(),)
+                )
+                if not batch or any(
+                    not isinstance(item, ShadowTickResult) for item in batch
+                ):
+                    raise RawCaptureServiceIntegrityError(
+                        "raw_capture_batch_result_invalid"
+                    )
+                result = next(
+                    (
+                        item
+                        for item in reversed(batch)
+                        if item.workload_id is not None
+                    ),
+                    batch[-1],
+                )
             except SchedulerDesiredStateError as error:
                 if error.reason_code not in _RECOVERABLE_DESIRED_STATE_BLOCKS:
                     raise
@@ -1309,8 +1409,10 @@ class RawCaptureServiceRuntime:
                     None,
                     False,
                 )
+                batch = (result,)
             else:
                 self._sync_blitzortung_event_ingress()
+            self._last_tick_results = tuple(batch)
             self._retention_preflight(full_audit=False)
             return result
 
@@ -1443,6 +1545,16 @@ class RawCaptureServiceRuntime:
             "meteorological_output": METEOROLOGICAL_OUTPUT,
             "mode": MODE,
             "ownership_fence_held": fence_held,
+            "parallel_acquisition": dict(acquisition.get(
+                "parallel_acquisition",
+                {
+                    "fallback_lanes": 1,
+                    "lane_limit": 1,
+                    "maximum_lanes": 1,
+                    "mode": "serial_compatibility",
+                    "concurrency_scope": "workload",
+                },
+            )),
             "production_enable_ready": False,
             "provider_configuration": {
                 "configured_count": sum(
@@ -1604,6 +1716,7 @@ def build_raw_capture_service(
             allowed_workload_ids=frozenset(config.allowed_workload_ids),
             collector_scope=COLLECTOR_SCOPE_ALL_SOURCES,
             clock=clock,
+            defer_startup_recovery=True,
         )
         blitzortung_sidecar: Any | None = None
         if config.blitzortung_enabled:

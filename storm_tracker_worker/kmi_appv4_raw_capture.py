@@ -74,7 +74,10 @@ COLLECTOR_VERSION = "worker-kmi-appv4-exact-raw-v2"
 FORECAST_HOST = "app.meteo.be"
 FORECAST_PATH = "/services/appv4/"
 FORECAST_ENDPOINT = f"https://{FORECAST_HOST}{FORECAST_PATH}"
-ALLOWED_IMAGE_HOSTS = frozenset({"app.meteo.be"})
+# KMI moved the app-v4 animation frames to its official CDN in September
+# 2026 while retaining the forecast manifest on app.meteo.be.  Keep this an
+# exact hostname allowlist: redirects and arbitrary subdomains remain denied.
+ALLOWED_IMAGE_HOSTS = frozenset({"app.meteo.be", "cdn.meteo.be"})
 APP_USER_AGENT = "be.meteo.app"
 
 # This value is part of the already deployed mobile-app request contract.  It
@@ -569,7 +572,6 @@ def _header_entries(headers: object) -> tuple[tuple[str, str], ...]:
             not name
             or len(name) > 256
             or _HEADER_NAME_RE.fullmatch(name) is None
-            or not value
             or len(value) > MAX_HEADER_CHARS
             or any(
                 ord(character) < 0x20 or ord(character) == 0x7F

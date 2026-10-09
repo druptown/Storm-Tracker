@@ -498,7 +498,12 @@ def _parameters(
             "timeformat": "unixtime",
             "precipitation_unit": "mm",
             "wind_speed_unit": "kmh",
-            "elevation": "nan",
+            # Open-Meteo applies scalar parameters per coordinate.  For a
+            # multi-location request ``elevation`` must therefore contain the
+            # same number of values as latitude/longitude; a single ``nan``
+            # is rejected with HTTP 400 and used to make every live batch
+            # retry until its scheduler deadline.
+            "elevation": ",".join("nan" for _item in locations),
             "cell_selection": "nearest",
         }, len(locations)
     if spec.workload_id == ITALIAMETEO_CATALOG_WORKLOAD_ID:

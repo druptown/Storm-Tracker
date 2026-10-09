@@ -484,7 +484,7 @@ def _slot_candidate(
 
 
 class AutonomousScheduler:
-    """Durable planner/outbox with exactly one active serial lease."""
+    """Durable planner/outbox with an explicit active-lease ceiling."""
 
     _EXPECTED_TABLES = frozenset({
         "scheduler_schema",
@@ -539,6 +539,7 @@ class AutonomousScheduler:
         fault_injector: Callable[[str], None] | None = None,
         max_outbox_rows: int = MAX_OUTBOX_ROWS,
         max_database_bytes: int = MAX_DATABASE_BYTES,
+        max_active_leases: int = 1,
         lease_seconds: float = DEFAULT_LEASE_SECONDS,
         retry_base_seconds: float = DEFAULT_RETRY_BASE_SECONDS,
         retry_max_seconds: float = DEFAULT_RETRY_MAX_SECONDS,
@@ -567,6 +568,12 @@ class AutonomousScheduler:
             "max_database_bytes",
             minimum=1024 * 1024,
             maximum=MAX_DATABASE_BYTES,
+        )
+        self._max_active_leases = _bounded_integer(
+            max_active_leases,
+            "max_active_leases",
+            minimum=1,
+            maximum=MAX_PLAN_INTENTS,
         )
         self._lease_seconds = _finite_number(
             lease_seconds,
@@ -697,8 +704,9 @@ class AutonomousScheduler:
                         AND lease_expires_at IS NULL)
                 )
             );
-            CREATE UNIQUE INDEX IF NOT EXISTS scheduler_one_active_lease
-                ON scheduler_outbox((1)) WHERE state = 'leased';
+            DROP INDEX IF EXISTS scheduler_one_active_lease;
+            CREATE INDEX IF NOT EXISTS scheduler_active_leases
+                ON scheduler_outbox(state, lease_expires_at, job_id);
             CREATE INDEX IF NOT EXISTS scheduler_ready_order
                 ON scheduler_outbox(
                     state, next_attempt_at, priority, scheduled_for, job_id
@@ -1232,7 +1240,7 @@ class AutonomousScheduler:
         allowed_workload_ids: frozenset[str] | None = None,
         prefer_unattempted: bool = False,
     ) -> ClaimedJob | None:
-        """Lease at most one ready job for the worker's serial queue."""
+        """Lease one ready job within the configured parallel ceiling."""
 
         if type(prefer_unattempted) is not bool:
             raise TypeError("prefer_unattempted must be a bool")
@@ -1292,11 +1300,13 @@ class AutonomousScheduler:
                     effective_now,
                     allowed,
                 )
-                active_lease = db.execute(
-                    "SELECT * FROM scheduler_outbox WHERE state='leased'"
-                ).fetchone()
-                if active_lease is not None:
+                active_leases = db.execute(
+                    "SELECT * FROM scheduler_outbox WHERE state='leased' "
+                    "ORDER BY job_id"
+                ).fetchall()
+                for active_lease in active_leases:
                     self._validate_static_row(active_lease)
+                if len(active_leases) >= self._max_active_leases:
                     db.commit()
                     return None
                 if allowed is None:
@@ -1699,6 +1709,8 @@ class AutonomousScheduler:
                 "database_bytes": 0,
                 "state_counts": {state: 0 for state in _OUTBOX_STATES},
                 "active_lease": False,
+                "active_lease_count": 0,
+                "max_active_leases": self._max_active_leases,
                 "last_wall_time": None,
                 "active_desired_state_sha256": None,
                 "active_plan_sha256": None,
@@ -1723,7 +1735,9 @@ class AutonomousScheduler:
             "outbox_capacity": self._max_outbox_rows,
             "database_bytes": page_size * page_count,
             "state_counts": counts,
-            "active_lease": counts["leased"] == 1,
+            "active_lease": counts["leased"] > 0,
+            "active_lease_count": counts["leased"],
+            "max_active_leases": self._max_active_leases,
             "last_wall_time": (
                 None
                 if runtime["last_wall_time"] is None

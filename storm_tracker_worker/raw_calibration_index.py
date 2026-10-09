@@ -425,6 +425,27 @@ class RawCalibrationIndex:
             for row in rows
         )
 
+    def expedite_projection_retries(self, *, now: float) -> int:
+        """Make retained ready rows immediately eligible after operator restart.
+
+        The durable attempt counter is intentionally retained.  This only
+        removes an obsolete wall-clock delay after an external database repair;
+        leased and already projected rows remain untouched.
+        """
+
+        _owner, moment = self._validated_projection_request(
+            "postgis-startup-recovery", now
+        )
+        self.initialize()
+        with closing(self._connect()) as database:
+            updated = database.execute(
+                "UPDATE raw_calibration_projection_outbox SET "
+                "next_attempt_at=? WHERE state='ready' AND next_attempt_at>?",
+                (moment, moment),
+            )
+            database.commit()
+            return int(updated.rowcount)
+
     @staticmethod
     def _validated_capture_ids(capture_ids: Any) -> tuple[str, ...]:
         if not isinstance(capture_ids, (tuple, list)) or not capture_ids:

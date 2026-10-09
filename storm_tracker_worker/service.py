@@ -71,7 +71,7 @@ WORKER_FIRST_CANARY_ADMISSION = {
     "allowed_workload_ids": ["radar.dwd.radolan_rv"],
     "policy": "exact_dwd_radolan_rv_only_v1",
 }
-RAW_CAPTURE_RUNTIME_CONTRACT = "stv3-worker-raw-capture-runtime-v5"
+RAW_CAPTURE_RUNTIME_CONTRACT = "stv3-worker-raw-capture-runtime-v6"
 RAW_CAPTURE_SERVICE_MODE = "service_raw_capture_shadow"
 WORKER_ONLY_RUNTIME_CONTRACT = "stv3-worker-only-service-runtime-v1"
 WORKER_ONLY_SERVICE_MODE = "service_worker_only"
@@ -3338,8 +3338,11 @@ class WorkerService:
                 "last_tick_workload_id",
                 "live_wiring",
                 "meteorological_output",
+                "model_guidance_errors",
+                "model_guidance_target_count",
                 "mode",
                 "ownership_fence_held",
+                "parallel_acquisition",
                 "postgis_projection",
                 "provider_count",
                 "quantitative_capture_count",
@@ -3379,6 +3382,9 @@ class WorkerService:
                     "ground_successes",
                     "ground_track_match_failures",
                     "ground_track_match_successes",
+                    "model_guidance_failures",
+                    "model_guidance_skipped_stale",
+                    "model_guidance_successes",
                     "quantitative_failures",
                     "quantitative_skipped_stale",
                     "quantitative_successes",
@@ -3420,6 +3426,12 @@ class WorkerService:
                 "quantitative_capture_count"
             )
             quantitative_errors = diagnostics.get("quantitative_errors")
+            model_guidance_target_count = diagnostics.get(
+                "model_guidance_target_count"
+            )
+            model_guidance_errors = diagnostics.get(
+                "model_guidance_errors"
+            )
             ground_source_count = diagnostics.get("ground_source_count")
             ground_fact_count = diagnostics.get("ground_fact_count")
             ground_errors = diagnostics.get("ground_errors")
@@ -3442,6 +3454,7 @@ class WorkerService:
             tracking_errors = diagnostics.get("tracking_errors")
             raw_calibration = diagnostics.get("raw_calibration")
             postgis_projection = diagnostics.get("postgis_projection")
+            parallel_acquisition = diagnostics.get("parallel_acquisition")
             snapshot_diagnostic_counts = tuple(
                 diagnostics.get(key)
                 for key in (
@@ -3515,7 +3528,7 @@ class WorkerService:
                             postgis_projection.get("contract")
                             == "stv3-postgis-raw-calibration-projection-v1"
                             and postgis_projection.get("status")
-                            in {"current", "degraded"}
+                            in {"current", "degraded", "waiting"}
                             and postgis_numbers_ready
                             and postgis_time_ready
                             and postgis_error_ready
@@ -3549,6 +3562,51 @@ class WorkerService:
                 and diagnostics.get("last_error_code") is None
                 and diagnostics.get("provider_count")
                 == WORKER_ONLY_PROVIDER_COUNT
+                and isinstance(parallel_acquisition, Mapping)
+                and set(parallel_acquisition)
+                == {
+                    "concurrency_scope",
+                    "cooldown_remaining_seconds",
+                    "fallback_lanes",
+                    "lane_limit",
+                    "last_batch_duration_seconds",
+                    "last_batch_job_count",
+                    "last_batch_mean_runtime_seconds",
+                    "last_unhealthy_reasons",
+                    "maximum_lanes",
+                    "mode",
+                }
+                and parallel_acquisition.get("mode")
+                in {"full_parallel", "recovery", "expanded", "serial_compatibility"}
+                and parallel_acquisition.get("concurrency_scope") == "workload"
+                and all(
+                    type(parallel_acquisition.get(key)) is int
+                    and 0 <= parallel_acquisition[key] <= WORKER_ONLY_PROVIDER_COUNT
+                    for key in (
+                        "fallback_lanes",
+                        "lane_limit",
+                        "last_batch_job_count",
+                        "maximum_lanes",
+                    )
+                )
+                and all(
+                    type(parallel_acquisition.get(key)) in {int, float}
+                    and not isinstance(parallel_acquisition[key], bool)
+                    and math.isfinite(float(parallel_acquisition[key]))
+                    and 0.0 <= float(parallel_acquisition[key]) <= 86_400.0
+                    for key in (
+                        "cooldown_remaining_seconds",
+                        "last_batch_duration_seconds",
+                        "last_batch_mean_runtime_seconds",
+                    )
+                )
+                and type(parallel_acquisition.get("last_unhealthy_reasons")) is list
+                and len(parallel_acquisition["last_unhealthy_reasons"]) <= 8
+                and all(
+                    isinstance(reason, str)
+                    and re.fullmatch(r"[a-z][a-z0-9_]{0,47}", reason) is not None
+                    for reason in parallel_acquisition["last_unhealthy_reasons"]
+                )
                 and isinstance(raw_calibration, Mapping)
                 and raw_calibration.get("status") in {"ready", "not_configured"}
                 and raw_calibration.get("exact_raw") is True
@@ -3568,20 +3626,33 @@ class WorkerService:
                 and type(captured) is int
                 and 0 <= captured <= WORKER_ONLY_PROVIDER_COUNT
                 and type(quantitative_captured) is int
-                and 0 <= quantitative_captured <= 4
+                and 0 <= quantitative_captured <= 5
                 and isinstance(quantitative_errors, Mapping)
-                and len(quantitative_errors) <= 4
+                and len(quantitative_errors) <= 5
                 and all(
                     isinstance(key, str)
                     and key in {
                         "radar.dwd.radolan_rv",
                         "radar.knmi.rtcor",
                         "radar.metoffice.uk_rate",
+                        "radar.opera.dbzh",
                         "satellite.noaa.err",
                     }
                     and isinstance(value, str)
                     and 1 <= len(value) <= 64
                     for key, value in quantitative_errors.items()
+                )
+                and type(model_guidance_target_count) is int
+                and 0 <= model_guidance_target_count <= 64
+                and isinstance(model_guidance_errors, Mapping)
+                and len(model_guidance_errors) <= 1
+                and all(
+                    key == "model.openmeteo.region"
+                    and value in {
+                        "model_guidance_admission_failed",
+                        "model_guidance_decode_failed",
+                    }
+                    for key, value in model_guidance_errors.items()
                 )
                 and type(ground_source_count) is int
                 and 0 <= ground_source_count <= 3

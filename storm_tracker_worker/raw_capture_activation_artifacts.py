@@ -99,19 +99,19 @@ MATERIALIZER_CONTRACT: Final = (
     "stv3-worker-raw-capture-activation-materializer-v2"
 )
 EXPECTED_RAW_CAPTURE_CONFIG_CONTRACT: Final = (
-    "stv3-worker-raw-capture-service-config-v5"
+    "stv3-worker-raw-capture-service-config-v6"
 )
 EXPECTED_RAW_CAPTURE_RUNTIME_CONTRACT: Final = (
-    "stv3-worker-raw-capture-runtime-v5"
+    "stv3-worker-raw-capture-runtime-v6"
 )
 EXPECTED_RAW_CAPTURE_COMPOSITION_SHA256: Final = (
-    "ddf982451d898fa2ea4827a279ae658371fa95ff5f48328417bc029c0209ea69"
+    "f84db01f8b65a4c30132ec0c9161a843d675222047a45508d5f9b9dbab28a011"
 )
 EXPECTED_WORKER_SERVICE_SHA256: Final = (
-    "39493c0e734654af24b852f17a96c236eef0d5814970d3936e4d9c8324ddd07b"
+    "677366a2279041bfdb9b56b47df90f8484d0d32eca80617ff082c42f731181a0"
 )
 EXPECTED_RAW_CAPTURE_RETENTION_GUARD_SHA256: Final = (
-    "a1c102b8846097f7ddd6511a9acd76bf3568900ef7141b7675fa4bba866db174"
+    "720103a889c3bb3892b2145ffda7e8cda0e5fcec18cd09a2c7e93806b4b442d8"
 )
 EXPECTED_RAW_CAPTURE_RETENTION_GUARD_CONTRACT: Final = (
     "stv3-worker-raw-capture-retention-guard-v2"

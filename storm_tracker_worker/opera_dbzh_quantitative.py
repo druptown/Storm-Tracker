@@ -1,10 +1,10 @@
 """Bounded quantitative DBZH/QI decoder for one verified OPERA v3 capture.
 
-This candidate is intentionally absent from every production handler and
-provider registry.  It preserves a bounded regional source window as exact
-float64 DBZH and QI values plus explicit masks.  It never converts dBZ to
-rain-rate, never classifies wet/dry, and never grants motion truth or
-operational admission.
+This decoder preserves a bounded regional source window as exact float64 DBZH
+and QI values plus explicit masks.  Its production consumer may expose a
+significant reflectivity echo as a distinct presentation state.  It never
+converts dBZ to rain-rate, never classifies wet/dry, and never grants motion
+truth or an operational rain claim.
 
 The schema-3 raw store remains the sole upstream authority.  One
 ``OperaDbzhRawAuthority`` session combines the payload read used by the
@@ -57,7 +57,7 @@ from .raw_artifacts import (
 OPERA_PROVIDER = "opera"
 OPERA_MEMBER_ROLE = "hdf5"
 DECODER_IDENTITY = "opera-cirrus-dbzh-qi-bounded-region"
-DECODER_VERSION = "opera-dbzh-qi-quantitative-v1"
+DECODER_VERSION = "opera-dbzh-qi-quantitative-v2"
 ARTIFACT_SCHEMA = "stv3-worker-opera-dbzh-qi-region-v1"
 ARTIFACT_MAGIC = b"STV3-OPERA-DBZH-QI-Q1\n"
 ARTIFACT_HANDLE_PREFIX = "artifact:opera-dbzh-quantitative:"
@@ -121,8 +121,14 @@ _DECODER_CONFIG = {
         "projection_guard_metres": BBOX_PROJECTION_GUARD_METRES,
         "topology": "non_wrapping_wgs84_bbox",
     },
-    "capture_contract": native.OPERA_CERTIFICATION_CONTRACT_VERSION,
-    "collector_version": native.OPERA_RAW_COLLECTOR_VERSION,
+    "capture_contracts": [
+        native.OPERA_CERTIFICATION_CONTRACT_VERSION,
+        native.OPERA_RAW_ONLY_CAPTURE_CONTRACT_VERSION,
+    ],
+    "collector_versions": [
+        native.OPERA_RAW_COLLECTOR_VERSION,
+        native.OPERA_STREAM_RAW_COLLECTOR_VERSION,
+    ],
     "decoder_identity": DECODER_IDENTITY,
     "decoder_version": DECODER_VERSION,
     "grid": {
@@ -254,6 +260,7 @@ class OperaDbzhDecodeResult:
 @dataclass(frozen=True, slots=True)
 class _VerifiedSource:
     capture: RawArtifactCaptureReceipt
+    evidence_capture: RawArtifactCaptureReceipt
     receipt: RawArtifactReceipt
     payload: bytes
     object_key: str
@@ -297,6 +304,59 @@ class OperaDbzhRawAuthority:
     @property
     def raw_verification_count(self) -> int:
         return self._raw_verification_count
+
+    def certify_product_time(
+        self,
+        capture: RawArtifactCaptureReceipt,
+        *,
+        product_timestamp: float,
+        validation_verdict_sha256: str,
+    ) -> RawArtifactCaptureReceipt:
+        """Publish a second immutable manifest after file-backed validation.
+
+        The raw-only manifest remains untouched.  The derived manifest binds the
+        validated HDF product time to the exact original capture and verdict so
+        canonical evidence can retain its strict authoritative-time invariant.
+        """
+
+        if (
+            isinstance(product_timestamp, bool)
+            or not isinstance(product_timestamp, (int, float))
+            or not math.isfinite(float(product_timestamp))
+            or not isinstance(validation_verdict_sha256, str)
+            or _SHA256_RE.fullmatch(validation_verdict_sha256) is None
+        ):
+            raise ValueError("OPERA certified product time binding is invalid")
+        with self._lock:
+            if self._bundle is None or self._bundle[0] != capture:
+                raise OperaDbzhQuantitativeError(
+                    "raw authority cannot certify an unverified capture"
+                )
+            _current, receipts, payloads = self._bundle
+            binding = {
+                "decoder_config_sha256": DECODER_CONFIG_SHA256,
+                "original_capture_id": capture.capture_id,
+                "original_capture_receipt_sha256": capture.capture_receipt_sha256,
+                "product_timestamp": float(product_timestamp),
+                "validation_verdict_sha256": validation_verdict_sha256,
+            }
+            binding_sha256 = hashlib.sha256(_canonical_json(binding)).hexdigest()
+            certified = self.raw_store.commit_capture(
+                provider=capture.provider,
+                product=capture.product,
+                fetch_id=f"{capture.fetch_id}:certified:{binding_sha256}",
+                upstream_capture_id=(
+                    f"{capture.upstream_capture_id}"
+                    f"|decoder_certification_sha256={binding_sha256}"
+                ),
+                product_timestamp=float(product_timestamp),
+                members={role: receipt.receipt_id for role, receipt in receipts.items()},
+            )
+            self._capture_id = certified.capture_id
+            self._bundle = (certified, dict(receipts), dict(payloads))
+            self._receipt_only = None
+            self._absence_cached = False
+            return certified
 
     def load_capture_bundle_bytes(
         self, capture_id: str,
@@ -1206,14 +1266,13 @@ def _validate_raw_capture(
     *,
     receipts: Mapping[str, RawArtifactReceipt],
     payloads: Mapping[str, bytes],
+    native_deadline: float,
 ) -> _VerifiedSource:
     if (
         capture.provider != OPERA_PROVIDER
         or capture.product != native.OPERA_CAPTURE_PRODUCT
     ):
         raise _RejectedDecode("unsupported", "unsupported:capture_contract")
-    if capture.product_timestamp is None:
-        raise _RejectedDecode("incomplete", "incomplete:product_time")
     receipt = _member_receipt(capture, receipts)
     if set(payloads) != {OPERA_MEMBER_ROLE}:
         raise RawArtifactIntegrityError("OPERA capture bundle has wrong payload roles")
@@ -1227,6 +1286,87 @@ def _validate_raw_capture(
     provenance = receipt.provenance
     if not isinstance(provenance, Mapping):
         raise _RejectedDecode("unsupported", "unsupported:raw_provenance")
+    if capture.product_timestamp is None:
+        fetch_id = receipt.fetch_id
+        if not fetch_id.endswith(":hdf5"):
+            raise _RejectedDecode(
+                "unsupported", "unsupported:current_collector_contract"
+            )
+        raw_identity = fetch_id.removesuffix(":hdf5")
+        try:
+            context = native.validate_opera_raw_only_capture_for_recovery(
+                capture,
+                receipts,
+                job_id=raw_identity,
+            )
+            timestamp = float(context["requested_timestamp"])
+            _job_id, object_key = _canonical_slot(timestamp)
+            if object_key != context["object_key"]:
+                raise ValueError("raw-only object slot differs")
+            revision = native._revision_from_raw_only_receipt(
+                receipt,
+                fetch_id=fetch_id,
+                object_key=object_key,
+                requested_timestamp=timestamp,
+            )
+            verdict = native._load_validation_verdict(
+                raw_authority.raw_store,
+                revision,
+                content_sha256=receipt.content_sha256,
+            )
+            if verdict is not None and verdict[0].get("status") == (
+                "deterministic_rejection"
+            ):
+                raise _RejectedDecode("unsupported", "unsupported:hdf5_contract")
+            if verdict is None:
+                identity = native._inspect_opera_hdf5(
+                    receipt.artifact_path,
+                    expected_size=receipt.size_bytes,
+                    deadline=native_deadline,
+                )
+                native._assert_identity_matches_request(
+                    object_key=object_key,
+                    requested_timestamp=timestamp,
+                    identity=identity,
+                )
+                verdict = native._publish_validation_verdict(
+                    raw_authority.raw_store,
+                    revision,
+                    content_sha256=receipt.content_sha256,
+                    status="validated_complete",
+                    identity=identity,
+                )
+            else:
+                identity = native._identity_from_document(verdict[0]["identity"])
+                native._assert_identity_matches_request(
+                    object_key=object_key,
+                    requested_timestamp=timestamp,
+                    identity=identity,
+                )
+        except _RejectedDecode:
+            raise
+        except (TimeoutError, OSError):
+            raise
+        except (KeyError, TypeError, ValueError, OverflowError):
+            raise _RejectedDecode(
+                "unsupported", "unsupported:raw_only_certification"
+            ) from None
+        evidence_capture = raw_authority.certify_product_time(
+            capture,
+            product_timestamp=identity.nominal_timestamp,
+            validation_verdict_sha256=verdict[1],
+        )
+        return _VerifiedSource(
+            capture=capture,
+            evidence_capture=evidence_capture,
+            receipt=receipt,
+            payload=payload,
+            object_key=object_key,
+            revision=revision,
+            identity=identity,
+            validation_verdict_id=str(verdict[0]["verdict_id"]),
+            validation_verdict_sha256=verdict[1],
+        )
     if (
         receipt.provider != OPERA_PROVIDER
         or receipt.product != native.OPERA_HDF5_PRODUCT
@@ -1306,6 +1446,7 @@ def _validate_raw_capture(
         raise _RejectedDecode("unsupported", "unsupported:motion_truth_contract")
     return _VerifiedSource(
         capture=capture,
+        evidence_capture=capture,
         receipt=receipt,
         payload=payload,
         object_key=object_key,
@@ -1730,8 +1871,8 @@ def _artifact_source_metadata(source: _VerifiedSource) -> dict[str, Any]:
     provenance = source.receipt.provenance
     return {
         "certification_contract": native.OPERA_CERTIFICATION_CONTRACT_VERSION,
-        "collector": native.OPERA_RAW_COLLECTOR,
-        "collector_version": native.OPERA_RAW_COLLECTOR_VERSION,
+        "collector": provenance.get("collector"),
+        "collector_version": provenance.get("collector_version"),
         "content_sha256": source.receipt.content_sha256,
         "content_type": source.receipt.content_type,
         "object_key": source.object_key,
@@ -2014,9 +2155,6 @@ def _parse_artifact(
         )
         or capture_metadata.get("provider") != OPERA_PROVIDER
         or capture_metadata.get("product") != native.OPERA_CAPTURE_PRODUCT
-        or isinstance(capture_metadata.get("product_timestamp"), bool)
-        or not isinstance(capture_metadata.get("product_timestamp"), (int, float))
-        or not math.isfinite(float(capture_metadata["product_timestamp"]))
     ):
         raise OperaDbzhArtifactError("artifact capture identity is invalid")
     source_metadata = _exact_mapping(
@@ -2045,8 +2183,10 @@ def _parse_artifact(
         source_metadata.get("certification_contract")
         != native.OPERA_CERTIFICATION_CONTRACT_VERSION
         or source_metadata.get("collector") != native.OPERA_RAW_COLLECTOR
-        or source_metadata.get("collector_version")
-        != native.OPERA_RAW_COLLECTOR_VERSION
+        or source_metadata.get("collector_version") not in {
+            native.OPERA_RAW_COLLECTOR_VERSION,
+            native.OPERA_STREAM_RAW_COLLECTOR_VERSION,
+        }
         or source_metadata.get("structure_inspector_version")
         != native.OPERA_STRUCTURE_INSPECTOR_VERSION
         or not isinstance(source_metadata.get("object_key"), str)
@@ -2067,6 +2207,23 @@ def _parse_artifact(
         or not 0 < int(source_metadata["raw_size_bytes"]) <= MAX_SOURCE_BYTES
     ):
         raise OperaDbzhArtifactError("artifact source identity is invalid")
+    product_timestamp = capture_metadata.get("product_timestamp")
+    raw_only_source = (
+        source_metadata.get("collector_version")
+        == native.OPERA_STREAM_RAW_COLLECTOR_VERSION
+    )
+    if (
+        (raw_only_source and product_timestamp is not None)
+        or (
+            not raw_only_source
+            and (
+                isinstance(product_timestamp, bool)
+                or not isinstance(product_timestamp, (int, float))
+                or not math.isfinite(float(product_timestamp))
+            )
+        )
+    ):
+        raise OperaDbzhArtifactError("artifact capture product time is invalid")
     product_metadata = _exact_mapping(
         metadata.get("product"),
         {
@@ -2439,11 +2596,17 @@ def decode_opera_dbzh_region(
         raise ValueError("evaluated_at must be finite and follow raw receipt")
     evaluation = float(evaluated_at)
     try:
+        remaining = deadline - float(monotonic_clock())
+        if not math.isfinite(remaining) or remaining <= 0.0:
+            raise OperaDbzhDecodeDeadlineError(
+                "OPERA decoder deadline expired before raw certification"
+            )
         source = _validate_raw_capture(
             raw_authority,
             capture,
             receipts=receipts,
             payloads=payloads,
+            native_deadline=time.monotonic() + remaining,
         )
     except _RejectedDecode as rejected:
         checkpoint("canonical_contract_rejection_before")
@@ -2498,7 +2661,7 @@ def decode_opera_dbzh_region(
         )
         checkpoint("canonical_cached_success_before")
         receipt = evidence_store.commit(_run_mapping(
-            capture,
+            source.evidence_capture,
             decoder_job_id=decoder_job_id,
             attempt_id=attempt_id,
             evaluated_at=evaluation,
@@ -2570,7 +2733,7 @@ def decode_opera_dbzh_region(
     )
     checkpoint("canonical_success_before")
     evidence_receipt = evidence_store.commit(_run_mapping(
-        capture,
+        source.evidence_capture,
         decoder_job_id=decoder_job_id,
         attempt_id=attempt_id,
         evaluated_at=evaluation,

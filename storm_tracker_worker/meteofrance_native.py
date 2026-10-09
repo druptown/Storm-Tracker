@@ -236,9 +236,16 @@ def _content_type(headers: Any) -> str:
     return value.split(";", 1)[0].strip().lower()
 
 
-def _content_length(headers: Any, *, maximum: int) -> int:
-    value = _header(headers, "Content-Length", required=True, maximum=32)
-    assert value is not None
+def _content_length(headers: Any, *, maximum: int) -> int | None:
+    """Return a valid declared length, or ``None`` for chunked responses.
+
+    The official DPRadar endpoint may legitimately omit ``Content-Length``.
+    The streaming reader remains independently bounded, so accepting that
+    standard HTTP form does not weaken the hard response-size limit.
+    """
+    value = _header(headers, "Content-Length", maximum=32)
+    if value is None:
+        return None
     if not value.isascii() or not value.isdecimal():
         raise MeteoFranceNativeContractError(
             "Météo-France Content-Length is ongeldig"
@@ -251,7 +258,9 @@ def _content_length(headers: Any, *, maximum: int) -> int:
     return result
 
 
-def _read_bounded(response: Any, *, maximum: int, declared: int) -> bytes:
+def _read_bounded(
+    response: Any, *, maximum: int, declared: int | None
+) -> bytes:
     chunks: list[bytes] = []
     total = 0
     while True:
@@ -269,7 +278,11 @@ def _read_bounded(response: Any, *, maximum: int, declared: int) -> bytes:
                 "Météo-France response overschrijdt de bytegrens"
             )
     payload = b"".join(chunks)
-    if not payload or len(payload) != declared:
+    if not payload:
+        raise MeteoFranceNativeContractError(
+            "Météo-France response is leeg"
+        )
+    if declared is not None and len(payload) != declared:
         raise MeteoFranceNativeContractError(
             "Météo-France payloadlengte wijkt af van Content-Length"
         )
@@ -348,7 +361,7 @@ def _fetch(
             payload=payload,
             content_type=content_type,
             received_at=time.time(),
-            content_length=declared,
+            content_length=len(payload),
             content_disposition=_header(headers, "Content-Disposition"),
             etag=_header(headers, "ETag", maximum=256),
             last_modified=_header(headers, "Last-Modified", maximum=128),

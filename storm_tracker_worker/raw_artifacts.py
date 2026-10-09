@@ -101,6 +101,7 @@ RAW_RECLAMATION_APPLIED = "APPLIED"
 RAW_RECLAMATION_ABORTED = "ABORTED"
 RAW_RECLAMATION_FAILED_FENCED = "FAILED_FENCED"
 OBJECT_DIRECTORY = "objects"
+OBJECT_FILE_SUFFIX = ".raw"
 STAGING_DIRECTORY = "staging"
 MAX_PROVENANCE_BYTES = 64 * 1024
 _CATALOG_PHYSICAL_SAFETY_FACTOR = 4
@@ -842,6 +843,319 @@ class RawArtifactStore:
                 ) from exc
             self._initialized = True
             return self.stats()
+
+    def attach_existing(self) -> None:
+        """Attach a capture child to the already-proven parent raw store.
+
+        The worker parent performs :meth:`initialize`, the complete catalog
+        integrity proof and the physical retention audit before acquisition
+        admission opens.  Every provider attempt then runs in a fresh child
+        process.  Repeating ``initialize()`` in every child used to execute a
+        ``BEGIN IMMEDIATE``, ``PRAGMA integrity_check`` and a full physical
+        stats scan.  With parallel provider I/O those readers and writers
+        needlessly serialized on the shared rollback-journal catalog and
+        could consume an entire provider deadline before HTTP even started.
+
+        This method is deliberately attach-only: it creates no directory,
+        profile or schema and it never repairs anything.  It re-proves the
+        exact store profile, regular catalog identity, closed table set and
+        immutable base schema using a read-only SQLite connection.  Missing
+        or conflicting state fails closed; the parent remains the sole
+        startup/integrity authority.
+        """
+
+        with self._lock:
+            self._assert_safe_layout()
+            try:
+                info = self.catalog_path.lstat()
+            except FileNotFoundError as exc:
+                raise RawArtifactIntegrityError(
+                    "raw-artifactchild mist de bewezen parentcatalogus"
+                ) from exc
+            if self.catalog_path.is_symlink() or not stat.S_ISREG(info.st_mode):
+                raise RawArtifactIntegrityError(
+                    "raw-artifactchildcatalogus is geen regulier bestand"
+                )
+            if int(info.st_size) <= 0:
+                raise RawArtifactIntegrityError(
+                    "raw-artifactchildcatalogus is leeg"
+                )
+            if self._catalog_database_bytes() > self.limits.max_catalog_bytes:
+                raise RawArtifactCapacityError(
+                    scope="catalog",
+                    current_bytes=self._catalog_database_bytes(),
+                    attempted_bytes=0,
+                    limit_bytes=self.limits.max_catalog_bytes,
+                )
+            try:
+                uri = f"{self.catalog_path.resolve().as_uri()}?mode=ro"
+                with closing(sqlite3.connect(
+                    uri,
+                    uri=True,
+                    timeout=5.0,
+                )) as database:
+                    database.row_factory = sqlite3.Row
+                    database.execute("PRAGMA query_only=ON")
+                    tables = self._table_names(database)
+                    extension_tables = self._TABLES | self._RECLAMATION_TABLES
+                    if tables not in (self._TABLES, extension_tables):
+                        raise RawArtifactIntegrityError(
+                            "raw-artifactchildcatalogus heeft onbekend schema"
+                        )
+                    self._validate_base_schema(database)
+                    if tables == extension_tables:
+                        self._validate_reclamation_extension_schema(database)
+                    journal_mode = str(database.execute(
+                        "PRAGMA journal_mode"
+                    ).fetchone()[0]).lower()
+                    if journal_mode != "delete":
+                        raise RawArtifactIntegrityError(
+                            "raw-artifactchildcatalogus wijkt af van rollback-journaling"
+                        )
+            except RawArtifactError:
+                raise
+            except sqlite3.DatabaseError as exc:
+                raise RawArtifactIntegrityError(
+                    "raw-artifactchild kon parentcatalogus niet valideren"
+                ) from exc
+            self._initialized = True
+
+    def recover_unmanaged_content_objects(self) -> int:
+        """Recover crash stages and catalog objects without inventing receipts.
+
+        A child can be hard-killed while writing its private staging file, or
+        after atomically publishing its content-addressed object but before the
+        surrounding SQLite transaction commits.  Under the worker's exclusive
+        startup fence, complete stages are published, incomplete scratch stages
+        are removed, and verified objects are registered only as neutral object
+        facts.  A later normal retry can attach its exact receipt and capture;
+        no provider/provenance claim is invented.
+        """
+
+        self._require_initialized()
+        recovered = 0
+        with self._lock, closing(self._connect()) as database:
+            database.execute("BEGIN IMMEDIATE")
+            try:
+                self._recover_crash_staging_objects()
+                storage_usage = self._scan_storage(force=True)
+                if storage_usage.staging_entries != 0:
+                    raise RawArtifactIntegrityError(
+                        "raw-artifactstaging vereist afzonderlijk herstel"
+                    )
+                catalog_paths = {
+                    str(row[0])
+                    for row in database.execute(
+                        "SELECT relative_path FROM raw_artifact_objects"
+                    )
+                }
+                unmanaged = sorted(storage_usage.entries - catalog_paths)
+                for relative_path in unmanaged:
+                    supplied = PurePosixPath(relative_path)
+                    if (
+                        len(supplied.parts) != 2
+                        or supplied.parts[0] != OBJECT_DIRECTORY
+                        or _OBJECT_NAME_RE.fullmatch(supplied.parts[1]) is None
+                    ):
+                        raise RawArtifactIntegrityError(
+                            "raw-artifactopslag bevat onbekend unmanaged object"
+                        )
+                    content_sha256 = supplied.parts[1][
+                        :-len(OBJECT_FILE_SUFFIX)
+                    ]
+                    target = self._safe_object_path(
+                        relative_path,
+                        content_sha256,
+                    )
+                    info = target.lstat()
+                    if (
+                        target.is_symlink()
+                        or not stat.S_ISREG(info.st_mode)
+                        or info.st_size > self.limits.max_object_bytes
+                    ):
+                        raise RawArtifactIntegrityError(
+                            "unmanaged raw-artifactobject is onveilig"
+                        )
+                    self._read_verified(
+                        target,
+                        expected_size=int(info.st_size),
+                        expected_sha256=content_sha256,
+                        return_bytes=False,
+                    )
+                    database.execute(
+                        """
+                        INSERT INTO raw_artifact_objects(
+                            content_sha256, relative_path, size_bytes, created_at
+                        ) VALUES(?,?,?,?)
+                        """,
+                        (
+                            content_sha256,
+                            relative_path,
+                            int(info.st_size),
+                            time.time(),
+                        ),
+                    )
+                    recovered += 1
+                database.commit()
+            except sqlite3.IntegrityError as exc:
+                if database.in_transaction:
+                    database.rollback()
+                raise RawArtifactIntegrityError(
+                    "unmanaged raw-artifactobject recovery conflict"
+                ) from exc
+            except sqlite3.OperationalError as exc:
+                if database.in_transaction:
+                    database.rollback()
+                if self._is_sqlite_capacity_error(exc):
+                    raise self._catalog_capacity_error() from exc
+                raise
+            except BaseException:
+                if database.in_transaction:
+                    database.rollback()
+                raise
+        if recovered:
+            verified = self.stats()
+            if (
+                verified["unmanaged_file_count"] != 0
+                or verified["catalog_bytes"] != verified["filesystem_bytes"]
+                or verified["object_count"]
+                != verified["filesystem_object_entries"]
+            ):
+                raise RawArtifactIntegrityError(
+                    "unmanaged raw-artifactobject recovery verifieert niet"
+                )
+        return recovered
+
+    @staticmethod
+    def _recovery_file_identity(info: os.stat_result) -> tuple[int, ...]:
+        return (
+            int(info.st_dev),
+            int(info.st_ino),
+            int(info.st_mode),
+            int(info.st_size),
+            int(info.st_nlink),
+        )
+
+    def _crash_stage_sha256(
+        self,
+        stage_path: Path,
+        expected_info: os.stat_result,
+    ) -> str:
+        """Hash one proven private stage without following links."""
+
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+            os,
+            "O_NOFOLLOW",
+            0,
+        )
+        try:
+            descriptor = os.open(stage_path, flags)
+        except OSError as exc:
+            raise RawArtifactIntegrityError(
+                "raw-artifact crash-stage kon niet veilig worden geopend"
+            ) from exc
+        try:
+            expected_identity = self._recovery_file_identity(expected_info)
+            opened = os.fstat(descriptor)
+            if self._recovery_file_identity(opened) != expected_identity:
+                raise RawArtifactIntegrityError(
+                    "raw-artifact crash-stage veranderde voor herstel"
+                )
+            digest = hashlib.sha256()
+            while chunk := os.read(descriptor, FILE_STORE_CHUNK_BYTES):
+                digest.update(chunk)
+            after_descriptor = os.fstat(descriptor)
+            after_path = stage_path.lstat()
+            if (
+                self._recovery_file_identity(after_descriptor)
+                != expected_identity
+                or self._recovery_file_identity(after_path)
+                != expected_identity
+            ):
+                raise RawArtifactIntegrityError(
+                    "raw-artifact crash-stage veranderde tijdens herstel"
+                )
+            return digest.hexdigest()
+        finally:
+            os.close(descriptor)
+
+    def _recover_crash_staging_objects(self) -> int:
+        """Publish complete stages and remove only proven private scratch files."""
+
+        directory_identities = self._file_publication_directory_identities()
+        recovered = 0
+        for stage_path in sorted(self.staging_path.iterdir()):
+            if _STAGING_NAME_RE.fullmatch(stage_path.name) is None:
+                raise RawArtifactIntegrityError(
+                    "raw-artifactopslag bevat onbekende staging-entry"
+                )
+            info = stage_path.lstat()
+            if (
+                self._path_is_link_or_reparse(stage_path, info)
+                or not stat.S_ISREG(info.st_mode)
+                or int(info.st_ino) <= 0
+                or int(info.st_nlink) not in {1, 2}
+                or int(info.st_size) > self.limits.max_object_bytes
+            ):
+                raise RawArtifactIntegrityError(
+                    "raw-artifact crash-stage heeft een onveilige identity"
+                )
+            content_sha256 = stage_path.name.split(".", 2)[1]
+            actual_sha256 = self._crash_stage_sha256(stage_path, info)
+            target = self._safe_object_path(
+                self._relative_object_path(content_sha256),
+                content_sha256,
+            )
+            target_exists = target.exists()
+            if target_exists:
+                self._read_verified(
+                    target,
+                    expected_size=int(target.lstat().st_size),
+                    expected_sha256=content_sha256,
+                    return_bytes=False,
+                )
+                target_info = target.lstat()
+                if int(info.st_nlink) == 2 and (
+                    int(info.st_dev),
+                    int(info.st_ino),
+                ) != (
+                    int(target_info.st_dev),
+                    int(target_info.st_ino),
+                ):
+                    raise RawArtifactIntegrityError(
+                        "raw-artifact linked crash-stage wijkt af van objecttarget"
+                    )
+            elif actual_sha256 == content_sha256:
+                if int(info.st_nlink) != 1:
+                    raise RawArtifactIntegrityError(
+                        "raw-artifact complete crash-stage heeft onbekende hardlink"
+                    )
+                os.link(stage_path, target)
+                self._fsync_directory(self.objects_path)
+                self._read_verified(
+                    target,
+                    expected_size=int(info.st_size),
+                    expected_sha256=content_sha256,
+                    return_bytes=False,
+                )
+                recovered += 1
+            elif int(info.st_nlink) != 1:
+                raise RawArtifactIntegrityError(
+                    "raw-artifact incomplete crash-stage heeft onbekende hardlink"
+                )
+            self._reprove_file_publication_directories(directory_identities)
+            self._unlink_owned_file_stage(
+                stage_path,
+                expected_identity=self._stage_identity(info),
+                allowed_link_counts=(
+                    frozenset({1, 2})
+                    if target_exists or actual_sha256 == content_sha256
+                    else frozenset({1})
+                ),
+            )
+            directory_identities = self._file_publication_directory_identities()
+        self._storage_usage_cache = None
+        return recovered
 
     def initialize_reclamation_extension_v1(self) -> str:
         """Atomically opt an exact raw-v3 catalogue into reclamation v1.

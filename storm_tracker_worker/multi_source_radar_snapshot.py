@@ -38,6 +38,7 @@ from .tracking_core.operational_snapshot import validate_snapshot
 
 METHOD = "worker_positive_radar_fusion_v1"
 RAIN_REASON = "positive_radar_candidates_fused"
+REFLECTIVITY_ECHO_REASON = "certified_positive_reflectivity_echo_rain_rate_withheld"
 ZERO_OBSERVATION_REASON = "certified_zero_radar_sample_dry_claim_withheld"
 UNDETECT_OBSERVATION_REASON = (
     "certified_undetect_radar_sample_dry_claim_withheld"
@@ -132,6 +133,64 @@ class PositiveRadarTargetObservation:
             "product_valid_at": float(self.product_valid_at),
             "rain_rate_mm_h": float(self.rain_rate_mm_h),
             "received_at": float(self.received_at),
+            "source_id": self.source_id,
+            "source_receipt_sha256": self.source_receipt_sha256,
+            "target_id": self.target_id,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ReflectivityEchoTargetObservation:
+    """Certified OPERA reflectivity echo without a rain-rate claim."""
+
+    source_id: str
+    target_id: str
+    reflectivity_dbz: float
+    quality_index: float
+    product_valid_at: float
+    received_at: float
+    source_receipt_sha256: str
+    certificate_sha256: str
+    process_receipt_sha256: str
+
+    def __post_init__(self) -> None:
+        _identifier(self.source_id, "source_id")
+        _identifier(self.target_id, "target_id")
+        if self.source_id != "radar.opera.dbzh":
+            raise MultiSourceRadarSnapshotError(
+                "source_id heeft geen gecertificeerde reflectiviteitsemantiek"
+            )
+        if (
+            isinstance(self.reflectivity_dbz, bool)
+            or not isinstance(self.reflectivity_dbz, (int, float))
+            or not math.isfinite(float(self.reflectivity_dbz))
+            or not 8.0 <= float(self.reflectivity_dbz) <= 100.0
+        ):
+            raise MultiSourceRadarSnapshotError("reflectivity_dbz is ongeldig")
+        if (
+            isinstance(self.quality_index, bool)
+            or not isinstance(self.quality_index, (int, float))
+            or not math.isfinite(float(self.quality_index))
+            or not 0.0 <= float(self.quality_index) <= 1.0
+        ):
+            raise MultiSourceRadarSnapshotError("quality_index is ongeldig")
+        valid_at = _time(self.product_valid_at, "product_valid_at")
+        received_at = _time(self.received_at, "received_at")
+        if received_at < valid_at:
+            raise MultiSourceRadarSnapshotError("radartijden zijn omgekeerd")
+        _sha(self.source_receipt_sha256, "source_receipt_sha256")
+        _sha(self.certificate_sha256, "certificate_sha256")
+        _sha(self.process_receipt_sha256, "process_receipt_sha256")
+
+    def receipt_mapping(self) -> dict[str, Any]:
+        return {
+            "certificate_sha256": self.certificate_sha256,
+            "observation_state": "reflectivity_echo",
+            "process_receipt_sha256": self.process_receipt_sha256,
+            "product_valid_at": float(self.product_valid_at),
+            "quality_index": float(self.quality_index),
+            "received_at": float(self.received_at),
+            "reflectivity_dbz": float(self.reflectivity_dbz),
             "source_id": self.source_id,
             "source_receipt_sha256": self.source_receipt_sha256,
             "target_id": self.target_id,
@@ -237,6 +296,7 @@ class WithheldUndetectRadarTargetObservation:
 
 RadarTargetObservation = (
     PositiveRadarTargetObservation
+    | ReflectivityEchoTargetObservation
     | WithheldDryRadarTargetObservation
     | WithheldUndetectRadarTargetObservation
 )
@@ -407,6 +467,7 @@ def build_positive_radar_fact_revision(
             item,
             (
                 PositiveRadarTargetObservation,
+                ReflectivityEchoTargetObservation,
                 WithheldDryRadarTargetObservation,
                 WithheldUndetectRadarTargetObservation,
             ),
@@ -469,6 +530,11 @@ def build_positive_radar_fact_revision(
             for item in target_observations
             if isinstance(item, PositiveRadarTargetObservation)
         ]
+        echo_observations = [
+            item
+            for item in target_observations
+            if isinstance(item, ReflectivityEchoTargetObservation)
+        ]
         zero_observations = [
             item
             for item in target_observations
@@ -480,7 +546,9 @@ def build_positive_radar_fact_revision(
             if isinstance(item, WithheldUndetectRadarTargetObservation)
         ]
         nonpositive_observations = zero_observations + undetect_observations
-        admitted_observations = positive_observations or nonpositive_observations
+        admitted_observations = (
+            positive_observations or echo_observations or nonpositive_observations
+        )
         source_ids = sorted(item.source_id for item in admitted_observations)
         product_valid_at = max(
             float(item.product_valid_at) for item in admitted_observations
@@ -509,6 +577,23 @@ def build_positive_radar_fact_revision(
                 fact_value=current,
                 observations=positive_observations,
             ))
+        elif echo_observations:
+            strongest_echo = max(
+                echo_observations,
+                key=lambda item: (item.reflectivity_dbz, item.quality_index),
+            )
+            current.update({
+                "state": "unknown",
+                "freshness": "current",
+                "rain_rate_mm_h": None,
+                "product_valid_at": product_valid_at,
+                "provider_ids": source_ids,
+                "reason_codes": [REFLECTIVITY_ECHO_REASON],
+            })
+            target["status_text"] = (
+                f"Radarecho: {strongest_echo.reflectivity_dbz:.1f} dBZ "
+                "(regenintensiteit nog niet gekwantificeerd)"
+            )
         else:
             reason = (
                 ZERO_OBSERVATION_REASON
@@ -564,12 +649,19 @@ def build_positive_radar_fact_revision(
                     for item in region_observations
                 )
                 else (
-                    (ZERO_OBSERVATION_REASON,)
+                    (REFLECTIVITY_ECHO_REASON,)
                     if any(
-                        isinstance(item, WithheldDryRadarTargetObservation)
+                        isinstance(item, ReflectivityEchoTargetObservation)
                         for item in region_observations
                     )
-                    else (UNDETECT_OBSERVATION_REASON,)
+                    else (
+                        (ZERO_OBSERVATION_REASON,)
+                        if any(
+                            isinstance(item, WithheldDryRadarTargetObservation)
+                            for item in region_observations
+                        )
+                        else (UNDETECT_OBSERVATION_REASON,)
+                    )
                 )
             ),
         ))
@@ -590,6 +682,8 @@ __all__ = [
     "MAX_RAIN_RATE_MM_H",
     "MultiSourceRadarSnapshotError",
     "PositiveRadarTargetObservation",
+    "ReflectivityEchoTargetObservation",
+    "REFLECTIVITY_ECHO_REASON",
     "RadarTargetObservation",
     "RAIN_REASON",
     "THREAT_WITHHELD_REASON",

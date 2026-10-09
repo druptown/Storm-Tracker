@@ -36,11 +36,24 @@ from .multi_source_snapshot import (
     publication_safe_current_source_ids,
 )
 from .multi_source_radar_snapshot import (
+    MultiSourceRadarSnapshotError,
     PositiveRadarTargetObservation,
     RadarTargetObservation,
+    ReflectivityEchoTargetObservation,
     WithheldDryRadarTargetObservation,
     WithheldUndetectRadarTargetObservation,
     build_positive_radar_fact_revision,
+)
+from .worker_only_motion_snapshot import (
+    WorkerOnlyMotionSnapshotError,
+    build_radar_motion_nowcast_revision,
+)
+from .openmeteo_operational_guidance import (
+    SOURCE_ID as OPENMETEO_SOURCE_ID,
+    OpenMeteoOperationalGuidanceError,
+    OpenMeteoTargetGuidance,
+    decode_openmeteo_guidance,
+    enrich_revision_with_openmeteo_guidance,
 )
 from .operational_fact_store import (
     OperationalFactRevisionStore,
@@ -90,6 +103,39 @@ _SAFE_FAILURE_REASON_CODES = frozenset({
     "desired_state_inconsistent",
     "desired_state_stale",
     "desired_state_unavailable",
+    "existing_raw_capture_accounting_busy",
+    "existing_raw_capture_accounting_capacity",
+    "existing_raw_capture_accounting_integrity",
+    "existing_raw_capture_reservation_inventory_invalid",
+    "existing_raw_capture_catalog_inventory_mismatch",
+    "existing_raw_capture_reservation_identity_invalid",
+    "existing_raw_capture_reservation_outside_recovery",
+    "existing_raw_capture_duplicate_job_identity",
+    "existing_raw_capture_job_alias_collision",
+    "existing_raw_capture_missing_origin_reservation",
+    "existing_raw_capture_reservation_binding_mismatch",
+    "existing_raw_capture_object_size_conflict",
+    "existing_raw_capture_multiple_bindings",
+    "existing_raw_capture_duplicate_roles",
+    "existing_raw_capture_transport_bound_exceeded",
+    "existing_raw_capture_unaccounted_object",
+    "existing_raw_capture_members_missing",
+    "existing_raw_capture_member_receipt_missing",
+    "existing_raw_capture_spans_bindings",
+    "existing_raw_capture_identity_drift",
+    "existing_raw_capture_handler_not_selected",
+    "existing_raw_capture_provider_drift",
+    "existing_raw_capture_product_drift",
+    "existing_raw_capture_fetch_suffix_drift",
+    "existing_raw_capture_bytes_unavailable",
+    "existing_raw_capture_byte_inventory_drift",
+    "existing_raw_capture_closed_binding_mismatch",
+    "existing_raw_capture_origin_not_derivable",
+    "existing_raw_capture_job_identity_drift",
+    "existing_raw_capture_multiple_complete_captures",
+    "existing_raw_capture_committed_incomplete",
+    "existing_raw_capture_committed_missing",
+    "existing_raw_capture_inventory_invalid",
     "raw_capture_authority_invalid",
     "raw_capture_authority_path_mismatch",
     "raw_capture_desired_state_rejected",
@@ -109,7 +155,12 @@ _SAFE_FAILURE_REASON_CODES = frozenset({
     "worker_only_output_unavailable",
     "worker_only_snapshot_output_not_ready",
     "worker_only_status_invalid",
-})
+}) | frozenset(
+    f"existing_raw_capture_fetch_suffix_drift_"
+    f"{source.source_id.replace('.', '_')}_{shape}"
+    for source in CATALOG_SOURCES
+    for shape in ("capture_revision", "captured", "plain_capture", "other")
+)
 
 
 class WorkerOnlyServiceRuntimeError(RuntimeError):
@@ -220,6 +271,7 @@ class WorkerOnlyServiceRuntime:
         self._snapshot_store: OperationalSnapshotStore | None = None
         self._captures: dict[str, CapturedSourceEvidence] = {}
         self._capture_ids: dict[str, str] = {}
+        self._capture_desired_state_sha256: dict[str, str] = {}
         self._radar_observations: dict[
             tuple[str, str], RadarTargetObservation
         ] = {}
@@ -227,6 +279,8 @@ class WorkerOnlyServiceRuntime:
         self._quantitative_refresh_in_progress = False
         self._source_errors: dict[str, str] = {}
         self._quantitative_errors: dict[str, str] = {}
+        self._model_guidance: dict[str, OpenMeteoTargetGuidance] = {}
+        self._model_guidance_errors: dict[str, str] = {}
         self._ground_receipts: dict[
             str, tuple[GroundObservationReceipt, ...]
         ] = {}
@@ -257,6 +311,9 @@ class WorkerOnlyServiceRuntime:
             "quantitative_failures": 0,
             "quantitative_skipped_stale": 0,
             "quantitative_successes": 0,
+            "model_guidance_failures": 0,
+            "model_guidance_skipped_stale": 0,
+            "model_guidance_successes": 0,
             "ground_failures": 0,
             "ground_successes": 0,
             "ground_track_match_failures": 0,
@@ -291,6 +348,8 @@ class WorkerOnlyServiceRuntime:
             return
         try:
             initialized = index.initialize()
+            if self._postgis_projector is not None:
+                self._postgis_projector.expedite_startup_retries()
             initialized["source_statistics"] = [
                 dict(row) for row in index.source_statistics()
             ]
@@ -352,7 +411,7 @@ class WorkerOnlyServiceRuntime:
         if result.get("status") == "current":
             if int(result.get("batch", 0)) > 0:
                 self._increment("postgis_projection_successes")
-        else:
+        elif result.get("status") == "degraded":
             self._increment("postgis_projection_failures")
 
     def _ensure_output(self) -> None:
@@ -732,28 +791,97 @@ class WorkerOnlyServiceRuntime:
             ),
             key=lambda item: (item.target_id, item.source_id),
         ))
-        committed = (
-            build_positive_radar_fact_revision(
+        if observations:
+            try:
+                arrival_reader = (
+                    None
+                    if self._cell_tracker is None
+                    else getattr(self._cell_tracker, "shadow_arrivals", None)
+                )
+                arrivals = () if not callable(arrival_reader) else arrival_reader()
+                committed = (
+                    build_radar_motion_nowcast_revision(
+                        desired,
+                        cycle,
+                        observations,
+                        arrivals,
+                        revision=next_revision,
+                        evaluated_at=now,
+                        worker_state=worker_state,
+                        queue_depth=queue_depth,
+                        failed_jobs=failed_jobs,
+                    )
+                    if arrivals
+                    else build_positive_radar_fact_revision(
+                        desired,
+                        cycle,
+                        observations,
+                        revision=next_revision,
+                        evaluated_at=now,
+                        worker_state=worker_state,
+                        queue_depth=queue_depth,
+                        failed_jobs=failed_jobs,
+                    )
+                )
+            except (
+                MultiSourceRadarSnapshotError,
+                WorkerOnlyMotionSnapshotError,
+            ):
+                # Quantitative evidence is optional enrichment.  A source
+                # becoming stale or authority-incompatible while a parallel
+                # batch is being restaged must withhold that enrichment, not
+                # terminate the complete acquisition worker.  The status-only
+                # revision still carries the current provider truth and keeps
+                # all precipitation claims unknown until a later verified
+                # quantitative capture repopulates the observation set.
+                affected = {
+                    item.source_id for item in observations
+                }
+                self._radar_observations.clear()
+                for source_id in affected:
+                    self._quantitative_errors[source_id] = (
+                        "quantitative_processing_failed"
+                    )
+                self._increment("quantitative_failures")
+                _LOGGER.error(
+                    "Worker-only radar fusion withheld one inconsistent "
+                    "quantitative observation set"
+                )
+                committed = build_multi_source_status_fact_revision(
+                    desired,
+                    cycle,
+                    revision=next_revision,
+                    evaluated_at=now,
+                    worker_state=worker_state,
+                    queue_depth=queue_depth,
+                    failed_jobs=failed_jobs,
+                )
+        else:
+            committed = build_multi_source_status_fact_revision(
                 desired,
                 cycle,
-                observations,
                 revision=next_revision,
                 evaluated_at=now,
                 worker_state=worker_state,
                 queue_depth=queue_depth,
                 failed_jobs=failed_jobs,
             )
-            if observations
-            else build_multi_source_status_fact_revision(
-                desired,
-                cycle,
-                revision=next_revision,
-                evaluated_at=now,
-                worker_state=worker_state,
-                queue_depth=queue_depth,
-                failed_jobs=failed_jobs,
-            )
-        )
+        if self._model_guidance:
+            try:
+                committed = enrich_revision_with_openmeteo_guidance(
+                    desired,
+                    committed,
+                    self._model_guidance.values(),
+                )
+            except OpenMeteoOperationalGuidanceError:
+                self._model_guidance.clear()
+                self._model_guidance_errors[OPENMETEO_SOURCE_ID] = (
+                    "model_guidance_admission_failed"
+                )
+                self._increment("model_guidance_failures")
+                _LOGGER.error(
+                    "Worker-only Open-Meteo guidance admission withheld"
+                )
         item_id = (
             f"worker-only:{self._cycle_sequence}:"
             f"{committed.revision_sha256[:24]}"
@@ -853,8 +981,19 @@ class WorkerOnlyServiceRuntime:
             self._quantitative_refresh_in_progress = False
         return snapshot_published
 
-    def _consume_latest_terminal(self) -> bool:
-        result = self._raw.latest_tick_result
+    def _latest_tick_results(self) -> tuple[Any, ...]:
+        """Read the complete batch with a legacy single-result fallback."""
+
+        results = getattr(self._raw, "latest_tick_results", None)
+        if results is None:
+            return (self._raw.latest_tick_result,)
+        if not isinstance(results, tuple) or not results:
+            raise WorkerOnlyServiceRuntimeError(
+                "worker_only_raw_batch_result_invalid"
+            )
+        return results
+
+    def _consume_terminal_result(self, result: Any) -> bool:
         if not result.terminal or result.workload_id is None:
             return False
         identity = (
@@ -880,12 +1019,28 @@ class WorkerOnlyServiceRuntime:
                     receipt,
                 )
                 self._capture_ids[source_id] = result.source_capture_id
+                if isinstance(result.desired_state_sha256, str):
+                    self._capture_desired_state_sha256[source_id] = (
+                        result.desired_state_sha256
+                    )
                 self._index_raw_calibration_capture(source_id, receipt)
                 self._source_errors.pop(source_id, None)
         else:
             self._source_errors[source_id] = result.reason_code
         self._increment("terminal_updates")
         return True
+
+    def _consume_terminal_results(self) -> tuple[Any, ...]:
+        changed = []
+        for result in self._latest_tick_results():
+            if self._consume_terminal_result(result):
+                changed.append(result)
+        return tuple(changed)
+
+    def _consume_latest_terminal(self) -> bool:
+        """Compatibility wrapper for callers that only need a change flag."""
+
+        return bool(self._consume_terminal_results())
 
     def _restore_retained_captures(self) -> None:
         """Restore verified latest evidence without re-fetching providers."""
@@ -1068,6 +1223,18 @@ class WorkerOnlyServiceRuntime:
             capture_id=result.source_capture_id,
         )
 
+    async def _process_ground_results(self, results: tuple[Any, ...]) -> None:
+        for result in results:
+            if (
+                result.status in SUCCESS_STATUSES
+                and result.source_capture_id is not None
+                and result.workload_id is not None
+            ):
+                await self._process_ground_capture(
+                    workload_id=result.workload_id,
+                    capture_id=result.source_capture_id,
+                )
+
     def _quantitative_capture_is_current(self, workload_id: str) -> bool:
         evidence = self._captures.get(workload_id)
         source = next(
@@ -1142,6 +1309,7 @@ class WorkerOnlyServiceRuntime:
                     item,
                     (
                         PositiveRadarTargetObservation,
+                        ReflectivityEchoTargetObservation,
                         WithheldDryRadarTargetObservation,
                         WithheldUndetectRadarTargetObservation,
                     ),
@@ -1202,11 +1370,79 @@ class WorkerOnlyServiceRuntime:
                     "knmi_quantitative_decode_withheld",
                     "met_office_quantitative_decode_withheld",
                     "noaa_quantitative_decode_withheld",
+                    "opera_reflectivity_decode_withheld",
                     "capture_receipt_unavailable",
                 }
                 else "quantitative_processing_failed"
             )
             self._increment("quantitative_failures")
+
+    async def _process_model_guidance_capture(
+        self,
+        *,
+        capture_id: str,
+        desired,
+    ) -> None:
+        """Decode one exact Open-Meteo capture for the same desired state."""
+
+        if (
+            self._capture_desired_state_sha256.get(OPENMETEO_SOURCE_ID)
+            != desired.state_sha256
+        ):
+            self._model_guidance.clear()
+            return
+        if not self._quantitative_capture_is_current(OPENMETEO_SOURCE_ID):
+            self._model_guidance.clear()
+            self._model_guidance_errors.pop(OPENMETEO_SOURCE_ID, None)
+            self._increment("model_guidance_skipped_stale")
+            return
+        try:
+            values = await asyncio.to_thread(
+                decode_openmeteo_guidance,
+                raw_store=self._raw.raw_artifact_store,
+                capture_id=capture_id,
+                desired_state=desired,
+            )
+            self._model_guidance = {
+                item.target_id: item for item in values
+            }
+            self._model_guidance_errors.pop(OPENMETEO_SOURCE_ID, None)
+            self._increment("model_guidance_successes")
+        except Exception:
+            self._model_guidance.clear()
+            self._model_guidance_errors[OPENMETEO_SOURCE_ID] = (
+                "model_guidance_decode_failed"
+            )
+            self._increment("model_guidance_failures")
+            _LOGGER.error(
+                "Worker-only Open-Meteo guidance decode fail-closed"
+            )
+
+    async def _refresh_model_guidance_for_desired(self, desired) -> None:
+        self._model_guidance.clear()
+        capture_id = self._capture_ids.get(OPENMETEO_SOURCE_ID)
+        if capture_id is not None:
+            await self._process_model_guidance_capture(
+                capture_id=capture_id,
+                desired=desired,
+            )
+
+    async def _process_model_guidance_results(
+        self,
+        results: tuple[Any, ...],
+        desired,
+    ) -> None:
+        for result in results:
+            if (
+                result.status in SUCCESS_STATUSES
+                and result.workload_id == OPENMETEO_SOURCE_ID
+                and result.source_capture_id is not None
+                and result.desired_state_sha256 == desired.state_sha256
+            ):
+                await self._process_model_guidance_capture(
+                    capture_id=result.source_capture_id,
+                    desired=desired,
+                )
 
     async def _refresh_quantitative_for_desired(self, desired) -> None:
         """Re-sample retained raw captures after any target-location change."""
@@ -1233,6 +1469,23 @@ class WorkerOnlyServiceRuntime:
             capture_id=result.source_capture_id,
             desired=desired,
         )
+
+    async def _process_quantitative_results(
+        self,
+        results: tuple[Any, ...],
+        desired,
+    ) -> None:
+        for result in results:
+            if (
+                result.status in SUCCESS_STATUSES
+                and result.source_capture_id is not None
+                and result.workload_id is not None
+            ):
+                await self._process_quantitative_capture(
+                    workload_id=result.workload_id,
+                    capture_id=result.source_capture_id,
+                    desired=desired,
+                )
 
     async def async_start(self) -> dict[str, Any]:
         async with self._gate:
@@ -1334,13 +1587,14 @@ class WorkerOnlyServiceRuntime:
                     await self._raw_tick_with_snapshot_maintenance()
                 )
                 stage = "consume_terminal"
-                changed = self._consume_latest_terminal()
+                terminal_results = self._consume_terminal_results()
+                changed = bool(terminal_results)
                 desired = self._raw.desired_state_store.load_active()
                 if changed and desired is not None:
                     stage = "ground_processing"
                     _result, ground_snapshot_published = (
                         await self._await_with_snapshot_maintenance(
-                            self._process_latest_ground()
+                            self._process_ground_results(terminal_results)
                         )
                     )
                     maintenance_snapshot_published = (
@@ -1357,6 +1611,32 @@ class WorkerOnlyServiceRuntime:
                     and quantitative_authority_changed
                 )
                 ground_refresh_completed = False
+                if (
+                    quantitative_authority_changed
+                    and self._snapshot_requires_restaging()
+                ):
+                    # A target/location change invalidates HA's accepted
+                    # snapshot immediately. Publish the current-authority
+                    # fallback before replaying retained ground or radar
+                    # evidence: both reprocessing stages can take minutes on
+                    # a large calibration corpus and may never keep the UI in
+                    # a desired_state_transition during that work.
+                    self._radar_observations.clear()
+                    self._model_guidance.clear()
+                    assert self._output is not None
+                    stage = "authority_snapshot_stage"
+                    if await self._stage_cycle():
+                        stage = "authority_snapshot_publish"
+                        before = self._output.diagnostics()["publication"][
+                            "snapshot_revision"
+                        ]
+                        output = await self._output.async_publish_ready_fact()
+                        stage = "authority_snapshot_settle"
+                        output = await self._settle_snapshot_output(output)
+                        after = output["publication"]["snapshot_revision"]
+                        if after > before:
+                            self._increment("snapshots_published")
+                            authority_snapshot_published = True
                 if (
                     quantitative_authority_changed
                     and self._ground_processor is not None
@@ -1378,28 +1658,31 @@ class WorkerOnlyServiceRuntime:
                         or maintenance_snapshot_published
                     )
                     ground_refresh_completed = True
-                if (
-                    quantitative_authority_changed
-                    and self._snapshot_requires_restaging()
-                ):
-                    # Never make HA wait for target-independent radar decoding.
-                    # Old target samples are authority-bound, so clear them and
-                    # publish the exact current target/region fallback first.
-                    self._radar_observations.clear()
-                    assert self._output is not None
-                    stage = "authority_snapshot_stage"
-                    if await self._stage_cycle():
-                        stage = "authority_snapshot_publish"
-                        before = self._output.diagnostics()["publication"][
-                            "snapshot_revision"
-                        ]
-                        output = await self._output.async_publish_ready_fact()
-                        stage = "authority_snapshot_settle"
-                        output = await self._settle_snapshot_output(output)
-                        after = output["publication"]["snapshot_revision"]
-                        if after > before:
-                            self._increment("snapshots_published")
-                            authority_snapshot_published = True
+                if quantitative_authority_changed:
+                    stage = "model_guidance_refresh"
+                    _result, model_snapshot_published = (
+                        await self._await_with_snapshot_maintenance(
+                            self._refresh_model_guidance_for_desired(desired)
+                        )
+                    )
+                    maintenance_snapshot_published = (
+                        model_snapshot_published
+                        or maintenance_snapshot_published
+                    )
+                elif changed and desired is not None:
+                    stage = "model_guidance_processing"
+                    _result, model_snapshot_published = (
+                        await self._await_with_snapshot_maintenance(
+                            self._process_model_guidance_results(
+                                terminal_results,
+                                desired,
+                            )
+                        )
+                    )
+                    maintenance_snapshot_published = (
+                        model_snapshot_published
+                        or maintenance_snapshot_published
+                    )
                 if quantitative_authority_changed:
                     stage = "quantitative_processing"
                     maintenance_snapshot_published = (
@@ -1416,7 +1699,10 @@ class WorkerOnlyServiceRuntime:
                     stage = "quantitative_processing"
                     _result, quantitative_snapshot_published = (
                         await self._await_with_snapshot_maintenance(
-                            self._process_latest_quantitative(desired)
+                            self._process_quantitative_results(
+                                terminal_results,
+                                desired,
+                            )
                         )
                     )
                     maintenance_snapshot_published = (
@@ -1498,6 +1784,20 @@ class WorkerOnlyServiceRuntime:
         raw_last_tick = raw.get("last_tick", {})
         if not isinstance(raw_last_tick, Mapping):
             raw_last_tick = {}
+        parallel_acquisition = raw.get("parallel_acquisition", {
+            "cooldown_remaining_seconds": 0.0,
+            "fallback_lanes": 1,
+            "lane_limit": 1,
+            "last_batch_duration_seconds": 0.0,
+            "last_batch_job_count": 0,
+            "last_batch_mean_runtime_seconds": 0.0,
+            "last_unhealthy_reasons": [],
+            "maximum_lanes": 1,
+            "mode": "serial_compatibility",
+            "concurrency_scope": "workload",
+        })
+        if not isinstance(parallel_acquisition, Mapping):
+            parallel_acquisition = {}
         output = None if self._output is None else self._output.diagnostics()
         publication = {} if output is None else output.get("publication", {})
         publication_counts = publication.get("counts", {})
@@ -1515,17 +1815,23 @@ class WorkerOnlyServiceRuntime:
             "captured_provider_count": len(self._captures),
             "raw_calibration": dict(self._raw_calibration_stats),
             "postgis_projection": dict(self._postgis_projection_stats),
+            "parallel_acquisition": dict(parallel_acquisition),
             "quantitative_capture_count": len(
                 set(self._capture_ids).intersection(
                     {
                         "radar.dwd.radolan_rv",
                         "radar.knmi.rtcor",
                         "radar.metoffice.uk_rate",
+                        "radar.opera.dbzh",
                         "satellite.noaa.err",
                     }
                 )
             ),
             "quantitative_errors": dict(sorted(self._quantitative_errors.items())),
+            "model_guidance_target_count": len(self._model_guidance),
+            "model_guidance_errors": dict(sorted(
+                self._model_guidance_errors.items()
+            )),
             "ground_source_count": len(self._ground_receipts),
             "ground_fact_count": sum(
                 len(items) for items in self._ground_receipts.values()

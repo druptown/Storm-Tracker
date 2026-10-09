@@ -37,6 +37,10 @@ _TARGET_RE = re.compile(
 )
 _CONTRACT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,127}$", re.ASCII)
 _GLOBAL_JOB_SLOT = threading.Lock()
+# ``multiprocessing.Process`` has no per-child environment argument.  Raw I/O
+# children may execute concurrently, but their short parent-side spawn window
+# must remain serialized while os.environ is temporarily narrowed.
+_ENVIRONMENT_SPAWN_LOCK = threading.Lock()
 _PROCESS_SLOT_NAME = "storm-tracker-v3-hard-decoder-v1"
 _POLL_SECONDS = 0.02
 _TERMINATE_GRACE_SECONDS = 0.35
@@ -146,6 +150,8 @@ DecoderOutcome = Literal[
     "child_crashed",
     "protocol_error",
 ]
+
+ProcessSlotPolicy = Literal["exclusive", "independent"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1104,6 +1110,7 @@ class HardDecoderExecutor:
         limits: DecoderResourceLimits | None = None,
         context: multiprocessing.context.BaseContext | None = None,
         environment_allowlist: frozenset[str] | None = None,
+        process_slot_policy: ProcessSlotPolicy = "exclusive",
     ) -> None:
         self._limits = limits or DecoderResourceLimits()
         selected_context = context or multiprocessing.get_context("spawn")
@@ -1120,7 +1127,10 @@ class HardDecoderExecutor:
             raise TypeError(
                 "environment_allowlist must be a frozenset of canonical keys"
             )
+        if process_slot_policy not in {"exclusive", "independent"}:
+            raise ValueError("process_slot_policy is invalid")
         self._context = selected_context
+        self._process_slot_policy = process_slot_policy
         self._environment_keys = (
             None
             if environment_allowlist is None
@@ -1203,6 +1213,26 @@ class HardDecoderExecutor:
                 started=started,
                 detail_code="hard_kernel_boundary_unavailable",
             )
+        if self._process_slot_policy == "independent":
+            # Exact-raw acquisition has its own per-workload admission,
+            # durable capacity reservations and idempotent capture identity.
+            # It is I/O-bound and must not contend for the singleton decoder
+            # slot used by CPU-heavy decode/fusion processes.  Each child
+            # still receives the same hard wall, CPU and memory boundary.
+            try:
+                return self._execute_locked(
+                    target=target,
+                    request_bytes=request_bytes,
+                    started=started,
+                    cancel_event=cancel_event,
+                    environment_overrides=overrides,
+                )
+            except Exception:
+                return _result(
+                    "boundary_setup_failed",
+                    started=started,
+                    detail_code="unexpected_parent_setup_failure",
+                )
         if not _GLOBAL_JOB_SLOT.acquire(blocking=False):
             return _result(
                 "busy",
@@ -1593,29 +1623,30 @@ class HardDecoderExecutor:
         overrides = self._validate_environment_overrides(
             environment_overrides
         )
-        if self._environment_keys is None:
-            process.start()
-            return
-        # ``multiprocessing.Process`` exposes no per-child environment.  The
-        # global decoder slot already excludes another decoder spawn, and the
-        # explicit canary excludes every other heavy/process owner.  Narrow
-        # the process environment for the synchronous OS spawn, then restore
-        # the parent exactly.  The child repeats this scrub as defence in depth
-        # before importing its selected target.
-        original = dict(os.environ)
-        retained = {
-            key: original[key]
-            for key in self._environment_keys
-            if key in original
-        }
-        retained.update(overrides)
-        try:
-            os.environ.clear()
-            os.environ.update(retained)
-            process.start()
-        finally:
-            os.environ.clear()
-            os.environ.update(original)
+        with _ENVIRONMENT_SPAWN_LOCK:
+            # Every process start takes this short lock, including callers
+            # without an allowlist: otherwise they could inherit another
+            # thread's temporarily narrowed environment.
+            if self._environment_keys is None:
+                process.start()
+                return
+            # Narrow the process environment only for the synchronous OS
+            # spawn, then restore the parent exactly. The child repeats this
+            # scrub as defence in depth before importing its selected target.
+            original = dict(os.environ)
+            retained = {
+                key: original[key]
+                for key in self._environment_keys
+                if key in original
+            }
+            retained.update(overrides)
+            try:
+                os.environ.clear()
+                os.environ.update(retained)
+                process.start()
+            finally:
+                os.environ.clear()
+                os.environ.update(original)
 
     @staticmethod
     def _wait_for_message(

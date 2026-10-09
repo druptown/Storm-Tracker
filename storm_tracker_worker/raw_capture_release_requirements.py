@@ -52,26 +52,26 @@ SANITIZED_OPTIONS_SHA256: Final = (
     "b6662a7be1f42ebce40888eeae93b70b145914c084add29a187f901b9ddbfd6c"
 )
 FROZEN_MATERIALIZER_SHA256: Final = (
-    "f2b7ff2602dcf2bf402b82794ab317352e3098adb8e383fcb85c71ca7bc4a38e"
+    "5c07448e2f29a0344b870ee23806a08deb1ea3449a81a3a3eef1c657f29a436e"
 )
 FROZEN_CATALOG_SHA256: Final = (
     "3d9ff419d390c8c73ca6173ca083e8514a86aee6ab12329f0a4dc605cac86397"
 )
 FROZEN_ACTIVATION_MATRIX_SHA256: Final = (
-    "2857656359d814e86e46289073e1e283f24561b79b767740a50561b820535dbd"
+    "73b18e32becef60baf9288aab54f2e1cffb6271eb8840a77035ad0739716bc91"
 )
 FROZEN_RECOVERY_BINDING_COUNT: Final = 26
 FROZEN_RECOVERY_INVENTORY_SHA256: Final = (
     "b0635f77c6f2ffa0e8a278f8f7bd03500c59058e56f8d46eb86b7ef78f731675"
 )
 FROZEN_RAW_CAPTURE_COMPOSITION_SHA256: Final = (
-    "ddf982451d898fa2ea4827a279ae658371fa95ff5f48328417bc029c0209ea69"
+    "f84db01f8b65a4c30132ec0c9161a843d675222047a45508d5f9b9dbab28a011"
 )
 FROZEN_WORKER_SERVICE_SHA256: Final = (
-    "39493c0e734654af24b852f17a96c236eef0d5814970d3936e4d9c8324ddd07b"
+    "677366a2279041bfdb9b56b47df90f8484d0d32eca80617ff082c42f731181a0"
 )
 FROZEN_RETENTION_GUARD_SHA256: Final = (
-    "a1c102b8846097f7ddd6511a9acd76bf3568900ef7141b7675fa4bba866db174"
+    "720103a889c3bb3892b2145ffda7e8cda0e5fcec18cd09a2c7e93806b4b442d8"
 )
 FROZEN_BLITZORTUNG_INGRESS_METADATA_SHA256: Final = (
     "d69bf757c4783c91d94fb6c91348e9c7081dc4a4c1ae28e5fcd3f52e0baa2481"
@@ -80,7 +80,7 @@ FROZEN_BLITZORTUNG_EVENT_RAW_LIMITS_SHA256: Final = (
     "a032d8ff63e8009a87013039dfb5e9485e0dc2cd62837b9af05dddaec8427d9c"
 )
 FROZEN_DERIVATION_FIXTURE_SHA256: Final = (
-    "19bbbf79a62f23356f9c441451bdabe976d2f1d88094a0bb008f31c913d69c34"
+    "286940c5c536dc2322d527ba4472817c5febd5269f91f898d4a9752f7de4e134"
 )
 FROZEN_REQUIRED_SAME_FILESYSTEM_BYTES: Final = 20_594_032_640
 FROZEN_CAPTURE_WINDOW_HOURS: Final = 1
@@ -350,6 +350,7 @@ FROZEN_WORKER_PACKAGE_MEMBER_PATHS: Final = (
     "worker_only_bootstrap.py",
     "worker_only_cell_tracking.py",
     "worker_only_ground_processing.py",
+    "worker_only_motion_snapshot.py",
     "worker_only_radar_processing.py",
     "worker_only_service_runtime.py",
 )
@@ -841,10 +842,10 @@ def _require_frozen_pinset(pinset: RawCapturePortablePinset) -> None:
             FROZEN_RAW_CAPTURE_COMPOSITION_SHA256
         ),
         "raw_capture_config_contract": (
-            "stv3-worker-raw-capture-service-config-v5"
+            "stv3-worker-raw-capture-service-config-v6"
         ),
         "raw_capture_runtime_contract": (
-            "stv3-worker-raw-capture-runtime-v5"
+            "stv3-worker-raw-capture-runtime-v6"
         ),
         "recovery_binding_count": FROZEN_RECOVERY_BINDING_COUNT,
         "recovery_inventory_sha256": FROZEN_RECOVERY_INVENTORY_SHA256,

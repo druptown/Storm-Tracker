@@ -174,6 +174,11 @@ class PostGISRawCalibrationProjector:
             factory = psycopg.connect
         return factory(**self._settings.connect_kwargs())
 
+    def expedite_startup_retries(self) -> int:
+        """Release only retained retry delays after an explicit worker start."""
+
+        return self._index.expedite_projection_retries(now=self._now())
+
     @staticmethod
     def _insert_parameters(row: Mapping[str, Any]) -> tuple[Any, ...]:
         product_timestamp = row["product_timestamp"]
@@ -253,6 +258,8 @@ class PostGISRawCalibrationProjector:
             lease_seconds=120.0,
         )
         if not rows:
+            if self._index.statistics()["postgis_projection"]["ready"]:
+                return self._status("waiting")
             self._last_error_code = None
             return self._status("current")
         capture_ids = tuple(str(row["capture_id"]) for row in rows)

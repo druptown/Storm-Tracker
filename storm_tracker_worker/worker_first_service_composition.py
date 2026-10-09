@@ -82,7 +82,12 @@ KMI_APPV4_BINDING: Final = "exact_raw_only_autonomous_lifecycle_bound"
 MAX_CONFIG_BYTES: Final = 384 * 1024
 MAX_DIAGNOSTIC_BYTES: Final = 16 * 1024
 MAX_COUNTER: Final = 1_000_000_000
-ACQUISITION_LANE_TIMEOUT_SECONDS: Final = MAX_EXECUTOR_WALL_SECONDS + 15.0
+# One provider process remains hard-bounded to 300 seconds.  A full-parallel
+# service tick also includes bounded process teardown plus pre/post storage
+# proof, which can legitimately outlive that individual provider wall.
+ACQUISITION_LANE_TIMEOUT_SECONDS: Final = (
+    (2.0 * MAX_EXECUTOR_WALL_SECONDS) + 15.0
+)
 
 # Version 1 above remains the inert, byte-stable candidate contract.  Version
 # 2 is a separate, explicitly selected local canary authority; it does not

@@ -369,6 +369,7 @@ export STV3_RUNTIME_MODE
 
 # This release owns exactly two numerical threads in every deployment mode.
 STV3_CPU_THREADS="2"
+export STV3_MAX_WORKER_LOGICAL_CPUS="${STV3_CPU_THREADS}"
 
 bashio::log.info "Storm Tracker Worker start met profiel ${STV3_COMPUTE_PROFILE}, queue ${STV3_QUEUE_SIZE}, providercyclus ${STV3_PROVIDER_CYCLE_SECONDS}s, maximaal ${STV3_CPU_THREADS} CPU-threads, nice ${STV3_WORKER_NICE} en ${STV3_CPU_LIMIT_PERCENT}% totale CPU"
 export OMP_NUM_THREADS="${STV3_CPU_THREADS}"

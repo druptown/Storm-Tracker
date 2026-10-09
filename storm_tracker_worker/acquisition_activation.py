@@ -22,6 +22,7 @@ from . import worker_acquisition_plan as acquisition
 CONTRACT = "stv3-worker-acquisition-activation-v3"
 MATRIX_METHOD = "closed_shadow_exact_raw_v3"
 MAX_MATRIX_BYTES = 64 * 1024
+OPERA_PUBLICATION_LAG_SECONDS = 300.0
 SHADOW_CAPTURE_TARGET = (
     "storm_tracker_worker.acquisition_handler_child:execute_shadow_capture"
 )
@@ -791,7 +792,9 @@ def _build_rules() -> MappingProxyType[str, ActivationRule]:
                 handler_id="opera_dbzh_hdf5_exact_raw_only_v1",
                 process_target=SHADOW_CAPTURE_TARGET,
                 required_roles=("hdf5",),
-                handler_payload_contract="canonical_scheduled_slot_timestamp_v1",
+                handler_payload_contract=(
+                    "canonical_previous_complete_slot_timestamp_v1"
+                ),
                 maximum_transport_bytes=384 * 1024 * 1024,
                 maximum_artifacts=1,
                 maximum_wall_seconds=300,
@@ -1061,7 +1064,10 @@ def _bind_handler_payload(
             "window_end": timestamp,
             "window_start": timestamp - 600.0,
         }
-    if rule.handler_payload_contract == "canonical_scheduled_slot_timestamp_v1":
+    if (
+        rule.handler_payload_contract
+        == "canonical_previous_complete_slot_timestamp_v1"
+    ):
         timestamp = job.scheduled_for
         if (
             not math.isfinite(timestamp)
@@ -1069,7 +1075,14 @@ def _bind_handler_payload(
             or int(timestamp) % 300 != 0
         ):
             raise ActivationError("canonical five-minute slot binding is invalid")
-        return {"product_timestamp": timestamp}
+        # OPERA CIRRUS publishes a nominal five-minute product near the end
+        # of the following slot.  Binding the request to the scheduler's
+        # current slot therefore races a guaranteed 404 and leaves virtually
+        # no download time.  Keep the acquisition job identity current while
+        # requesting the newest fully closed upstream slot.
+        return {
+            "product_timestamp": timestamp - OPERA_PUBLICATION_LAG_SECONDS
+        }
     raise ActivationError("declared handler payload contract is not implemented")
 
 

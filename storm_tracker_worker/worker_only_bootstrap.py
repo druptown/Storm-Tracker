@@ -34,16 +34,34 @@ from .worker_first_composition import (
     initialize_worker_first_composition_authority,
 )
 from .worker_first_service_composition import WorkerFirstServiceSourcePaths
+from .worker_first_ownership import (
+    REQUIRED_STORE_ROLES,
+    WorkerFirstOwnershipError,
+    load_worker_first_authority,
+)
 
 
-CONTRACT = "stv3-worker-only-bootstrap-v4"
+CONTRACT = "stv3-worker-only-bootstrap-v7"
 DEFAULT_ROOT = Path("/data/storm_tracker_worker_runtime_production_v1")
 CONFIG_FILENAME = "worker-only-config.json"
+# Start a fresh acquisition epoch after the original append-only raw store
+# became too large to re-verify inside a bounded service start.  The previous
+# ``source`` directory is deliberately left untouched: no historical provider
+# bytes are deleted or rewritten, while new collection gets a small, coherent
+# catalog that can open immediately.
+PRODUCTION_ACQUISITION_EPOCH = "source-v2"
 # Existing raw and capacity-ledger catalogs bind this physical ceiling into
 # their immutable schema. Keep it unchanged so every retained byte remains
 # readable. Admission uses the lower claim below, leaving ample NAS headroom.
 PRODUCTION_RAW_CAPACITY_BYTES = 128 * 1024 * 1024 * 1024
-PRODUCTION_RETENTION_CLAIM_BYTES = 96 * 1024 * 1024 * 1024
+# Reserve a large but realistic raw payload envelope on the dedicated 160 GiB
+# NAS-HA volume.  The former 96 GiB claim plus both 4 GiB catalog ceilings and
+# the 2 GiB host reserve left less headroom than the filesystem can guarantee,
+# so a nearly empty store could fail closed at startup.  This changes only the
+# admission claim; the immutable 128 GiB store/ledger schema ceilings remain
+# unchanged and all existing objects stay readable.
+PRODUCTION_RETENTION_CLAIM_BYTES = 80 * 1024 * 1024 * 1024
+_PREVIOUS_PRODUCTION_RETENTION_CLAIM_BYTES = 96 * 1024 * 1024 * 1024
 _FAILED_INTERMEDIATE_RAW_CAPACITY_BYTES = 96 * 1024 * 1024 * 1024
 PRODUCTION_ENTRY_CAPACITY = 1_000_000
 PRODUCTION_RESERVATION_CAPACITY = 250_000
@@ -207,7 +225,7 @@ def _build_worker_only_config(
         process_limits=DwdRvCompletionIsolationLimits(),
         owner_id="worker-only-production",
     )
-    source = resolved / "source"
+    source = resolved / PRODUCTION_ACQUISITION_EPOCH
     return RawCaptureServiceConfig(
         worker_first=worker_first,
         source_paths=WorkerFirstServiceSourcePaths(
@@ -276,6 +294,70 @@ def _previous_awn_payload(config: RawCaptureServiceConfig) -> bytes:
     acquisition["allowed_workload_ids"] = sorted(
         [*workload_ids, "ground.awn.api"]
     )
+    return _canonical(mapping)
+
+
+def _previous_timeout_payload(config: RawCaptureServiceConfig) -> bytes:
+    """Reconstruct the exact v5 production config for one safe migration."""
+
+    mapping = config.to_mapping()
+    mapping["contract"] = "stv3-worker-raw-capture-service-config-v5"
+    timeouts = mapping.get("timeouts")
+    if not isinstance(timeouts, dict):
+        raise WorkerOnlyBootstrapError("previous timeout mapping invalid")
+    timeouts["acquisition_seconds"] = 315.0
+    return _canonical(mapping)
+
+
+def _previous_retention_claim_payload(config: RawCaptureServiceConfig) -> bytes:
+    """Reconstruct the exact former 96 GiB admission claim for migration."""
+
+    mapping = config.to_mapping()
+    retention = mapping.get("retention")
+    if not isinstance(retention, dict):
+        raise WorkerOnlyBootstrapError("previous retention mapping invalid")
+    retention["retained_payload_claim_bytes"] = (
+        _PREVIOUS_PRODUCTION_RETENTION_CLAIM_BYTES
+    )
+    return _canonical(mapping)
+
+
+def _previous_acquisition_epoch_payload(
+    config: RawCaptureServiceConfig,
+    *,
+    previous_timeout: bool = False,
+) -> bytes:
+    """Reconstruct the exact former ``source`` path without touching it."""
+
+    mapping = config.to_mapping()
+    acquisition = mapping.get("acquisition")
+    event_ingress = mapping.get("event_ingress")
+    if not isinstance(acquisition, dict) or not isinstance(event_ingress, dict):
+        raise WorkerOnlyBootstrapError("previous acquisition epoch mapping invalid")
+    paths = acquisition.get("paths")
+    blitzortung = event_ingress.get("blitzortung")
+    if not isinstance(paths, dict) or not isinstance(blitzortung, dict):
+        raise WorkerOnlyBootstrapError("previous acquisition epoch mapping invalid")
+    current_source = Path(config.source_paths.raw_store_root).parent
+    previous_source = current_source.parent / "source"
+    paths.update({
+        "capacity_ledger_db": str(previous_source / "capacity.sqlite3"),
+        "execution_receipts_db": str(previous_source / "executions.sqlite3"),
+        "raw_store_root": str(previous_source / "raw"),
+        "scheduler_db": str(previous_source / "scheduler.sqlite3"),
+    })
+    blitzortung.update({
+        "control_root": str(previous_source / "blitzortung-control"),
+        "raw_store_root": str(previous_source / "blitzortung-raw"),
+    })
+    if previous_timeout:
+        mapping["contract"] = "stv3-worker-raw-capture-service-config-v5"
+        timeouts = mapping.get("timeouts")
+        if not isinstance(timeouts, dict):
+            raise WorkerOnlyBootstrapError(
+                "previous acquisition timeout mapping invalid"
+            )
+        timeouts["acquisition_seconds"] = 315.0
     return _canonical(mapping)
 
 
@@ -374,13 +456,117 @@ def _publish_identical(
             temporary.unlink(missing_ok=True)
 
 
+def _load_existing_runtime_authority(
+    config: RawCaptureServiceConfig,
+    payload: bytes,
+) -> str | None:
+    """Validate and reuse exact immutable pins without re-auditing history.
+
+    A complete historical audit belongs to first materialization or an exact
+    configuration migration. Repeating it before every process start makes
+    restart time grow with retained calibration history and can prevent the
+    worker from ever reaching its heartbeat. Runtime construction still
+    validates the immutable authority, paths and ownership fence.
+    """
+
+    config_path = config.worker_first.paths.authority_file.parent.parent.parent
+    config_path /= CONFIG_FILENAME
+    authority_path = config.worker_first.paths.authority_file
+    if not config_path.exists() or not authority_path.exists():
+        return None
+    try:
+        existing_config = config_path.read_bytes()
+        previous_retention_claim_payload = _previous_retention_claim_payload(config)
+        previous_timeout_payload = _previous_timeout_payload(config)
+        previous_epoch_payload = _previous_acquisition_epoch_payload(config)
+        previous_epoch_timeout_payload = _previous_acquisition_epoch_payload(
+            config,
+            previous_timeout=True,
+        )
+        if (
+            config_path.is_symlink()
+            or authority_path.is_symlink()
+            or not config_path.is_file()
+            or not authority_path.is_file()
+            or existing_config not in (
+                payload,
+                previous_retention_claim_payload,
+                previous_timeout_payload,
+                previous_epoch_payload,
+                previous_epoch_timeout_payload,
+            )
+        ):
+            return None
+        authority_body = authority_path.read_bytes()
+        authority_sha256 = hashlib.sha256(authority_body).hexdigest()
+        binding = load_worker_first_authority(
+            authority_path,
+            expected_authority_sha256=authority_sha256,
+        )
+        configured_paths = {
+            "acquisition_completion_store": (
+                config.worker_first.paths.acquisition_completion_root
+            ),
+            "desired_state_store": config.worker_first.paths.desired_state_db,
+            "operational_fact_store": (
+                config.worker_first.paths.operational_fact_db
+            ),
+            "operational_snapshot_store": (
+                config.worker_first.paths.operational_snapshot_db
+            ),
+            "pipeline_output_store": config.worker_first.paths.pipeline_output_db,
+            "snapshot_outbox_store": (
+                config.worker_first.paths.snapshot_outbox_db
+            ),
+        }
+        if (
+            set(configured_paths) != set(REQUIRED_STORE_ROLES)
+            or binding.lock_path
+            != config.worker_first.paths.ownership_lock_file.resolve(strict=True)
+            or any(
+                binding.store(role).path
+                != path.resolve(strict=True)
+                for role, path in configured_paths.items()
+            )
+        ):
+            raise WorkerOnlyBootstrapError(
+                "existing bootstrap authority path differs"
+            )
+        if existing_config != payload:
+            _publish_identical(
+                config_path,
+                payload,
+                accepted_previous=(
+                    previous_retention_claim_payload,
+                    previous_timeout_payload,
+                    previous_epoch_payload,
+                    previous_epoch_timeout_payload,
+                ),
+            )
+    except WorkerOnlyBootstrapError:
+        raise
+    except (OSError, RuntimeError, WorkerFirstOwnershipError):
+        raise WorkerOnlyBootstrapError(
+            "existing bootstrap authority is invalid"
+        ) from None
+    return authority_sha256
+
+
 def materialize_worker_only_runtime(root: str | Path = DEFAULT_ROOT) -> dict[str, str]:
     config = build_worker_only_config(root)
+    payload = _canonical(config.to_mapping())
+    existing_authority_sha256 = _load_existing_runtime_authority(config, payload)
+    if existing_authority_sha256 is not None:
+        return {
+            "authority_sha256": existing_authority_sha256,
+            "config_path": str(Path(root) / CONFIG_FILENAME),
+            "config_sha256": hashlib.sha256(payload).hexdigest(),
+            "contract": CONTRACT,
+        }
     authority = initialize_worker_first_composition_authority(
         config.worker_first,
         expected_config_sha256=config.worker_first.fingerprint,
     )
-    payload = _canonical(config.to_mapping())
     original_legacy_payload = _legacy_v4_payload(_build_worker_only_config(
         root,
         raw_capacity_bytes=PRODUCTION_RAW_CAPACITY_BYTES,
@@ -392,6 +578,13 @@ def materialize_worker_only_runtime(root: str | Path = DEFAULT_ROOT) -> dict[str
         retained_payload_claim_bytes=None,
     ))
     previous_awn_payload = _previous_awn_payload(config)
+    previous_retention_claim_payload = _previous_retention_claim_payload(config)
+    previous_timeout_payload = _previous_timeout_payload(config)
+    previous_epoch_payload = _previous_acquisition_epoch_payload(config)
+    previous_epoch_timeout_payload = _previous_acquisition_epoch_payload(
+        config,
+        previous_timeout=True,
+    )
     config_path = Path(root) / CONFIG_FILENAME
     _publish_identical(
         config_path,
@@ -400,6 +593,10 @@ def materialize_worker_only_runtime(root: str | Path = DEFAULT_ROOT) -> dict[str
             original_legacy_payload,
             failed_intermediate_payload,
             previous_awn_payload,
+            previous_retention_claim_payload,
+            previous_timeout_payload,
+            previous_epoch_payload,
+            previous_epoch_timeout_payload,
         ),
         accepted_previous_check=lambda existing: (
             _catalog_membership_only_predecessor(existing, config)
@@ -435,6 +632,7 @@ __all__ = [
     "CONTRACT",
     "DEFAULT_ROOT",
     "PRODUCTION_CAPTURE_CAPACITY",
+    "PRODUCTION_ACQUISITION_EPOCH",
     "PRODUCTION_CATALOG_CAPACITY_BYTES",
     "PRODUCTION_ENTRY_CAPACITY",
     "PRODUCTION_RAW_CAPACITY_BYTES",
