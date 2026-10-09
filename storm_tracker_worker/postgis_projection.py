@@ -101,8 +101,11 @@ INSERT INTO stv3_ingest.raw_captures(
     worker_indexed_at,member_count,projector_contract,projector_version
 ) VALUES(
     %s,%s,%s,%s,%s,%s,
-    CASE WHEN %s IS NULL THEN NULL ELSE to_timestamp(%s) END,
-    to_timestamp(%s),to_timestamp(%s),to_timestamp(%s),%s,%s,%s
+    CASE WHEN %s::double precision IS NULL THEN NULL
+         ELSE to_timestamp(%s::double precision) END,
+    to_timestamp(%s::double precision),
+    to_timestamp(%s::double precision),
+    to_timestamp(%s::double precision),%s,%s,%s
 )
 ON CONFLICT(capture_id) DO NOTHING
 """
