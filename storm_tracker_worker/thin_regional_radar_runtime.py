@@ -125,13 +125,16 @@ class ThinRegionalRadarFusionCoordinator:
         for region in region_plan.regions:
             fingerprint = _input_fingerprint(region, providers)
             job = self._jobs.get(region.region_id)
-            if job is not None and job.fingerprint == fingerprint:
+            # Never replace a running fusion job. With rapid provider refreshes
+            # its fingerprint can change before the two-thread calculation
+            # completes; continually cancelling/replacing it starves the map
+            # of every completed regional raster. The next cycle schedules the
+            # newest fingerprint after ``poll`` has collected this result.
+            if job is not None:
                 continue
             completed = self._completed.get(region.region_id)
             if completed is not None and completed.fingerprint == fingerprint:
                 continue
-            if job is not None:
-                job.future.cancel()
             self._completed.pop(region.region_id, None)
             future = self._executor.submit(
                 self._fuse,
