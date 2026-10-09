@@ -76,75 +76,6 @@ class PostGISWriteResult:
     dropped_cycles: int
 
 
-_SCHEMA_STATEMENTS = (
-    "CREATE EXTENSION IF NOT EXISTS postgis",
-    """
-    CREATE TABLE IF NOT EXISTS stv3_observation(
-        observation_key text PRIMARY KEY,
-        provider_id text NOT NULL,
-        product_id text NOT NULL,
-        target_id text,
-        kind text NOT NULL,
-        value double precision NOT NULL,
-        unit text NOT NULL,
-        observed_at timestamptz NOT NULL,
-        received_at timestamptz NOT NULL,
-        quality text NOT NULL,
-        metadata jsonb NOT NULL,
-        geometry geometry(Geometry,4326) NOT NULL,
-        updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS stv3_fusion_cycle(
-        cycle_key text PRIMARY KEY,
-        evaluated_at timestamptz NOT NULL,
-        targets jsonb NOT NULL,
-        providers jsonb NOT NULL,
-        rejected jsonb NOT NULL,
-        updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS stv3_storm_cell(
-        cell_id text NOT NULL,
-        observed_at timestamptz NOT NULL,
-        provider_id text NOT NULL,
-        precipitation_rate_mm_h double precision,
-        reflectivity_dbz double precision,
-        radar_level double precision,
-        geometry geometry(Geometry,4326) NOT NULL,
-        PRIMARY KEY(cell_id,observed_at)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS stv3_track_point(
-        cell_id text NOT NULL,
-        observed_at timestamptz NOT NULL,
-        velocity_east_kmh double precision NOT NULL,
-        velocity_north_kmh double precision NOT NULL,
-        speed_kmh double precision NOT NULL,
-        heading_deg double precision,
-        position geometry(Point,4326) NOT NULL,
-        PRIMARY KEY(cell_id,observed_at)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS stv3_target_forecast(
-        target_id text NOT NULL,
-        evaluated_at timestamptz NOT NULL,
-        current_state text NOT NULL,
-        forecast_state text NOT NULL,
-        precipitation_rate_mm_h double precision,
-        eta_minutes double precision,
-        confidence double precision NOT NULL,
-        reason_code text NOT NULL,
-        contributors jsonb NOT NULL,
-        PRIMARY KEY(target_id,evaluated_at)
-    )
-    """,
-)
-
 _INSERT_OBSERVATION = """
 INSERT INTO stv3_observation(
     observation_key,provider_id,product_id,target_id,kind,value,unit,
@@ -252,8 +183,6 @@ class ThinPostGISWriter:
         }
         try:
             with connection.cursor() as cursor:
-                for statement in _SCHEMA_STATEMENTS:
-                    cursor.execute(statement)
                 for cycle, nowcast in batch:
                     for observation in cycle.observations:
                         payload = observation.as_dict()
