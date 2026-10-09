@@ -1107,8 +1107,11 @@ class WorkerOnlyEntryRuntime:
             "operational_snapshot_expected_desired_state_sha256",
             "worker_status",
             "worker_pending_jobs",
+            "worker_passages",
+            "worker_validation",
             "runtime_mode",
             "runtime_diagnostics",
+            "geojson_http_registered",
             DATA_WORKER_TECHNICAL_DIAGNOSTICS,
             DATA_WORKER_TECHNICAL_SOURCE,
         ):
