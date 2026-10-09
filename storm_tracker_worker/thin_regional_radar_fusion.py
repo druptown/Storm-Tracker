@@ -187,20 +187,14 @@ def build_regional_analysis_grid(
     if not math.isfinite(radius_m) or radius_m <= 0.0:
         raise ValueError("region_radius_invalid")
 
-    usable = [
-        min(float(field.x_resolution_m), float(field.y_resolution_m))
-        for field in fields
-        if (
-            math.isfinite(float(field.x_resolution_m))
-            and math.isfinite(float(field.y_resolution_m))
-            and field.x_resolution_m > 0.0
-            and field.y_resolution_m > 0.0
-        )
-    ]
-    resolution = max(
-        float(minimum_resolution_m),
-        min(usable) if usable else float(minimum_resolution_m),
-    )
+    # The analysis grid is a property of the region, not of whichever native
+    # radar providers happen to be current in this cycle.  Deriving the grid
+    # resolution from ``fields`` changed its identity whenever the available
+    # provider mix changed, so CellTrack correctly rejected consecutive
+    # frames as an unsupported grid handoff.  Project every provider onto one
+    # region-stable base resolution and only coarsen deterministically for the
+    # configured cell bound.
+    resolution = float(minimum_resolution_m)
     span_m = radius_m * 2.0
     width = max(1, math.ceil(span_m / resolution))
     height = width
