@@ -24,7 +24,7 @@ from .thin_ground_validation import ForecastValidation, GroundValidationRuntime
 from .thin_nowcast import StormCell, ThinNowcast, ThinNowcastRuntime
 from .thin_observation import ObservationKind
 from .thin_radar_tracking import ThinRadarTracker
-from .thin_radar_overlay import build_radar_overlay
+from .thin_radar_overlay import build_radar_overlays
 from .thin_regional_radar_fusion import RegionalFusionSummary
 from .thin_regional_radar_runtime import ThinRegionalRadarFusionCoordinator
 from .thin_postgis import PostGISWriteResult
@@ -41,7 +41,7 @@ _LOGGER = logging.getLogger(__name__)
 # contract; source observations retain their own, stricter freshness checks.
 SNAPSHOT_TTL_SECONDS = 300.0
 MAX_GEOJSON_PAYLOAD_BYTES = 900_000
-MAX_TOTAL_RADAR_OVERLAY_RUNS = 2_000
+MAX_TOTAL_RADAR_OVERLAY_RUNS = 4_000
 SNAPSHOT_REVISION_EPOCH_SECONDS = 1_577_836_800  # 2020-01-01T00:00:00Z
 SNAPSHOT_PROVIDER_IDS = {
     "kmi_aws": "ground.kmi.aws_10min",
@@ -1070,17 +1070,10 @@ class ThinOperationalRuntime:
             )
             if result.field is not None
         ]
-        per_overlay_run_budget = max(
-            1,
-            MAX_TOTAL_RADAR_OVERLAY_RUNS // max(1, len(overlay_fields)),
+        radar_overlays = build_radar_overlays(
+            overlay_fields,
+            maximum_total_runs=MAX_TOTAL_RADAR_OVERLAY_RUNS,
         )
-        radar_overlays = {
-            region_id: build_radar_overlay(
-                field,
-                maximum_runs=per_overlay_run_budget,
-            )
-            for region_id, field in overlay_fields
-        }
         target_features: list[dict[str, Any]] = []
         cell_feature_groups: list[tuple[float, str, list[dict[str, Any]]]] = []
         lightning_features: list[dict[str, Any]] = []

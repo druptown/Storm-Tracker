@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 from pyproj import Transformer
@@ -86,6 +86,53 @@ def _max_pool(levels: np.ndarray, factor: int) -> np.ndarray:
     ).max(axis=(1, 3))
 
 
+def _overlay_at_factor(
+    field: ThinRadarField,
+    source_levels: np.ndarray,
+    factor: int,
+    *,
+    rectangles: list[tuple[int, int, int, int, int]] | None = None,
+) -> dict[str, Any]:
+    levels = source_levels if factor == 1 else _max_pool(source_levels, factor)
+    if rectangles is None:
+        rectangles = _rectangles_for_levels(levels)
+
+    inverse = Transformer.from_crs(field.crs, "EPSG:4326", always_xy=True)
+    runs = []
+    for first_row, last_row, first_column, last_column, intensity in rectangles:
+        left = field.origin_x_m + first_column * factor * field.x_resolution_m
+        right = field.origin_x_m + min(
+            last_column * factor, source_levels.shape[1],
+        ) * field.x_resolution_m
+        top = field.origin_y_m - first_row * factor * field.y_resolution_m
+        bottom = field.origin_y_m - min(
+            last_row * factor, source_levels.shape[0],
+        ) * field.y_resolution_m
+        ring = []
+        for x_value, y_value in (
+            (left, top),
+            (right, top),
+            (right, bottom),
+            (left, bottom),
+            (left, top),
+        ):
+            longitude, latitude = inverse.transform(x_value, y_value)
+            # Six decimals are substantially finer than the 500 m analysis
+            # pixels and keep the shared MQTT payload compact.
+            ring.append([round(float(latitude), 6), round(float(longitude), 6)])
+        runs.append({"intensity": intensity, "ring": ring})
+
+    return {
+        "provider_id": field.provider_id,
+        "product_id": field.product_id,
+        "observed_at": float(field.observed_at),
+        "threshold_mm_h": RAIN_RATE_LEVELS_MM_H[0],
+        "downsample_factor": factor,
+        "source_shape": list(source_levels.shape),
+        "runs": runs,
+    }
+
+
 def build_radar_overlay(
     field: ThinRadarField,
     *,
@@ -111,38 +158,67 @@ def build_radar_overlay(
         levels = _max_pool(source_levels, factor)
         rectangles = _rectangles_for_levels(levels)
 
-    inverse = Transformer.from_crs(field.crs, "EPSG:4326", always_xy=True)
-    runs = []
-    for first_row, last_row, first_column, last_column, intensity in rectangles:
-        left = field.origin_x_m + first_column * factor * field.x_resolution_m
-        right = field.origin_x_m + min(
-            last_column * factor, source_levels.shape[1],
-        ) * field.x_resolution_m
-        top = field.origin_y_m - first_row * factor * field.y_resolution_m
-        bottom = field.origin_y_m - min(
-            last_row * factor, source_levels.shape[0],
-        ) * field.y_resolution_m
-        ring = []
-        for x_value, y_value in (
-            (left, top),
-            (right, top),
-            (right, bottom),
-            (left, bottom),
-            (left, top),
-        ):
-            longitude, latitude = inverse.transform(x_value, y_value)
-            ring.append([float(latitude), float(longitude)])
-        runs.append({"intensity": intensity, "ring": ring})
+    return _overlay_at_factor(
+        field,
+        source_levels,
+        factor,
+        rectangles=rectangles,
+    )
+
+
+def build_radar_overlays(
+    fields: Iterable[tuple[str, ThinRadarField]],
+    *,
+    maximum_total_runs: int = 4_000,
+) -> dict[str, dict[str, Any]]:
+    """Encode all regional overlays at one shared, minimally coarse factor.
+
+    The former equal split of the run budget caused a hard quality cliff: one
+    slightly more fragmented region was downsampled while its neighbour kept
+    native detail.  Treat the budget as a total and only coarsen every region
+    together when the combined native representation does not fit.
+    """
+
+    if maximum_total_runs < 1:
+        raise ValueError("maximum_total_runs must be at least 1")
+    prepared = tuple(
+        (region_id, field, _intensity_levels(field))
+        for region_id, field in fields
+    )
+    factor = 1
+    rectangles_by_region: dict[
+        str, list[tuple[int, int, int, int, int]]
+    ] = {}
+    while True:
+        rectangles_by_region = {
+            region_id: _rectangles_for_levels(
+                levels if factor == 1 else _max_pool(levels, factor)
+            )
+            for region_id, _field, levels in prepared
+        }
+        total = sum(len(value) for value in rectangles_by_region.values())
+        can_coarsen = any(
+            (levels.shape[0] + factor - 1) // factor > 1
+            or (levels.shape[1] + factor - 1) // factor > 1
+            for _region_id, _field, levels in prepared
+        )
+        if total <= maximum_total_runs or not can_coarsen:
+            break
+        factor *= 2
 
     return {
-        "provider_id": field.provider_id,
-        "product_id": field.product_id,
-        "observed_at": float(field.observed_at),
-        "threshold_mm_h": RAIN_RATE_LEVELS_MM_H[0],
-        "downsample_factor": factor,
-        "source_shape": list(source_levels.shape),
-        "runs": runs,
+        region_id: _overlay_at_factor(
+            field,
+            levels,
+            factor,
+            rectangles=rectangles_by_region[region_id],
+        )
+        for region_id, field, levels in prepared
     }
 
 
-__all__ = ["RAIN_RATE_LEVELS_MM_H", "build_radar_overlay"]
+__all__ = [
+    "RAIN_RATE_LEVELS_MM_H",
+    "build_radar_overlay",
+    "build_radar_overlays",
+]
