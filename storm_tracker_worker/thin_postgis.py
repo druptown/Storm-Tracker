@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping
 from .thin_fusion import FusionCycle
 from .thin_ground_validation import ForecastValidation
 from .thin_nowcast import ThinNowcast
+from .thin_regional_radar_fusion import RegionalFusionSummary
 
 
 MAX_RETRY_CYCLES = 8
@@ -94,11 +95,12 @@ ON CONFLICT(observation_key) DO UPDATE SET
 
 _INSERT_FUSION = """
 INSERT INTO stv3_fusion_cycle(
-    cycle_key,evaluated_at,targets,providers,rejected
-) VALUES(%s,to_timestamp(%s),%s::jsonb,%s::jsonb,%s::jsonb)
+    cycle_key,evaluated_at,targets,providers,rejected,regional_radar
+) VALUES(%s,to_timestamp(%s),%s::jsonb,%s::jsonb,%s::jsonb,%s::jsonb)
 ON CONFLICT(cycle_key) DO UPDATE SET
     targets=EXCLUDED.targets,providers=EXCLUDED.providers,
-    rejected=EXCLUDED.rejected,updated_at=clock_timestamp()
+    rejected=EXCLUDED.rejected,regional_radar=EXCLUDED.regional_radar,
+    updated_at=clock_timestamp()
 """
 
 _INSERT_CELL = """
@@ -202,7 +204,12 @@ class ThinPostGISWriter:
         self._settings = settings
         self._connect_factory = connect_factory
         self._queue: deque[
-            tuple[FusionCycle, ThinNowcast, tuple[ForecastValidation, ...]]
+            tuple[
+                FusionCycle,
+                ThinNowcast,
+                tuple[ForecastValidation, ...],
+                tuple[RegionalFusionSummary, ...],
+            ]
         ] = deque()
         self._lock = asyncio.Lock()
         self._dropped_cycles = 0
@@ -219,7 +226,12 @@ class ThinPostGISWriter:
     def _write_batch(
         self,
         batch: tuple[
-            tuple[FusionCycle, ThinNowcast, tuple[ForecastValidation, ...]], ...
+            tuple[
+                FusionCycle,
+                ThinNowcast,
+                tuple[ForecastValidation, ...],
+                tuple[RegionalFusionSummary, ...],
+            ], ...
         ],
     ) -> dict[str, int]:
         connection = self._connect()
@@ -236,7 +248,7 @@ class ThinPostGISWriter:
         try:
             with connection.cursor() as cursor:
                 observation_rows: list[tuple[Any, ...]] = []
-                for cycle, nowcast, _validations in batch:
+                for cycle, nowcast, _validations, _regional_radar in batch:
                     for observation in cycle.observations:
                         payload = observation.as_dict()
                         geometry = payload["geometry"] or {
@@ -271,7 +283,7 @@ class ThinPostGISWriter:
                 if observation_rows:
                     cursor.executemany(_INSERT_OBSERVATION, observation_rows)
 
-                for cycle, nowcast, validations in batch:
+                for cycle, nowcast, validations, regional_radar in batch:
                     targets = {
                         key: value.as_dict() for key, value in cycle.targets.items()
                     }
@@ -294,6 +306,13 @@ class ThinPostGISWriter:
                         _json(targets),
                         _json(providers),
                         _json(dict(cycle.rejected)),
+                        _json([
+                            summary.as_dict()
+                            for summary in sorted(
+                                regional_radar,
+                                key=lambda item: item.region_id,
+                            )
+                        ]),
                     ))
                     counts["fusion_cycles"] += 1
 
@@ -405,12 +424,19 @@ class ThinPostGISWriter:
         cycle: FusionCycle,
         nowcast: ThinNowcast,
         validations: tuple[ForecastValidation, ...] = (),
+        *,
+        regional_radar: tuple[RegionalFusionSummary, ...] = (),
     ) -> PostGISWriteResult:
         async with self._lock:
             if len(self._queue) >= MAX_RETRY_CYCLES:
                 self._queue.popleft()
                 self._dropped_cycles += 1
-            self._queue.append((cycle, nowcast, tuple(validations)))
+            self._queue.append((
+                cycle,
+                nowcast,
+                tuple(validations),
+                tuple(regional_radar),
+            ))
             batch = tuple(self._queue)
             try:
                 counts = await asyncio.to_thread(self._write_batch, batch)

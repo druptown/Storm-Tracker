@@ -19,6 +19,8 @@ from .thin_ground_validation import ForecastValidation, GroundValidationRuntime
 from .thin_nowcast import StormCell, ThinNowcast, ThinNowcastRuntime
 from .thin_observation import ObservationKind
 from .thin_radar_tracking import ThinRadarTracker
+from .thin_regional_radar_fusion import RegionalFusionSummary
+from .thin_regional_radar_runtime import ThinRegionalRadarFusionCoordinator
 from .thin_postgis import PostGISWriteResult
 from .thin_provider_catalog import PROVIDERS, build_due_requests
 from .thin_region_planner import ThinRegionPlan, ThinRegionPlanner
@@ -136,6 +138,7 @@ class ThinCycleResult:
     nowcast: ThinNowcast
     postgis: PostGISWriteResult
     validations: tuple[ForecastValidation, ...] = ()
+    regional_radar: tuple[RegionalFusionSummary, ...] = ()
 
 
 def _collection(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -170,6 +173,7 @@ class ThinOperationalRuntime:
         provider_runtime: Any,
         postgis_writer: Any | None = None,
         clock: Callable[[], float] = time.time,
+        regional_radar_coordinator: Any | None = None,
     ) -> None:
         self._providers = provider_runtime
         self._postgis = postgis_writer
@@ -185,6 +189,11 @@ class ThinOperationalRuntime:
         self._region_planner = ThinRegionPlanner()
         self._nowcast = ThinNowcastRuntime(targets={})
         self._radar_tracker = ThinRadarTracker()
+        self._regional_radar = (
+            ThinRegionalRadarFusionCoordinator(max_workers=2)
+            if regional_radar_coordinator is None
+            else regional_radar_coordinator
+        )
         self._ground_validation = GroundValidationRuntime()
         # A worker App restart must not reset revisions below the snapshot still
         # cached by Home Assistant. Seconds since a recent fixed epoch fit the
@@ -218,6 +227,37 @@ class ThinOperationalRuntime:
     def geojson_collection(self) -> dict[str, Any]:
         """Return a detached, bounded map derived from the latest nowcast."""
         return json.loads(json.dumps(self._latest_geojson, allow_nan=False))
+
+    def close(self) -> None:
+        """Release bounded background compute owned by this runtime."""
+        self._regional_radar.close()
+
+    @staticmethod
+    def _fallback_regional_summary(
+        region: Any,
+        *,
+        evaluated_at: float,
+        reason_code: str,
+    ) -> RegionalFusionSummary:
+        return RegionalFusionSummary(
+            region_id=region.region_id,
+            grid_id=None,
+            status=(
+                "onvoldoende_data"
+                if reason_code == "onvoldoende_data"
+                else "degraded"
+            ),
+            mode="fallback",
+            evaluated_at=evaluated_at,
+            field_observed_at=None,
+            contributors=(),
+            excluded={},
+            standby={},
+            reason_codes=(reason_code,),
+            coverage_fraction=0.0,
+            mean_confidence=0.0,
+            disagreement_fraction=0.0,
+        )
 
     def claim_authority(self, producer_id: str, claim_id: str) -> dict[str, Any]:
         producer = str(producer_id).strip()
@@ -379,36 +419,82 @@ class ThinOperationalRuntime:
             target_ids=tuple(item.target_id for item in active_targets),
         )
         tracked_cells: list[StormCell] = []
-        # Provider I/O is less frequent than processing. Cached, still-current
-        # native frames must keep their tracks between fetches.
-        for result in self._latest_provider_results.values():
-            for field in result.radar_fields:
-                field_maximum_age = PROVIDER_FUSION_AGE_SECONDS.get(
-                    field.provider_id,
-                    MAX_FUSION_AGE_SECONDS,
-                )
-                if not 0 <= fusion.evaluated_at - field.observed_at <= field_maximum_age:
+        self._regional_radar.submit(
+            region_plan,
+            self._latest_provider_results,
+            evaluated_at=fusion.evaluated_at,
+        )
+        completed_regional = self._regional_radar.poll()
+        pending_region_ids = self._regional_radar.pending_region_ids()
+        regional_summaries: list[RegionalFusionSummary] = []
+
+        def track_field(field: Any, targets: tuple[Any, ...]) -> None:
+            for target in targets:
+                try:
+                    self._radar_tracker.advance(field, target)
+                except (ValueError, RuntimeError):
                     continue
-                for target in active_targets:
-                    try:
-                        self._radar_tracker.advance(field, target)
-                    except (ValueError, RuntimeError):
+                for item in self._radar_tracker.tracks(field, target.target_id):
+                    speed = math.hypot(
+                        item.velocity_east_kmh, item.velocity_north_kmh,
+                    )
+                    heading = (
+                        None
+                        if speed < 0.5
+                        else math.degrees(math.atan2(
+                            item.velocity_east_kmh,
+                            item.velocity_north_kmh,
+                        )) % 360.0
+                    )
+                    tracked_cells.append(StormCell(
+                        cell_id=f"{item.provider_id}:{target.target_id}:{item.track_id}",
+                        provider_id=item.provider_id,
+                        observed_at=item.observed_at,
+                        latitude=item.latitude,
+                        longitude=item.longitude,
+                        geometry=item.geometry,
+                        precipitation_rate_mm_h=item.rain_rate_mm_h,
+                        reflectivity_dbz=None,
+                        radar_level=None,
+                        velocity_east_kmh=item.velocity_east_kmh,
+                        velocity_north_kmh=item.velocity_north_kmh,
+                        speed_kmh=speed,
+                        heading_deg=heading,
+                    ))
+
+        for region in region_plan.regions:
+            regional = completed_regional.get(region.region_id)
+            if regional is not None and regional.field is not None:
+                track_field(regional.field, region.targets)
+                regional_summaries.append(regional.summary)
+                continue
+
+            # Provider I/O is less frequent than processing. Cached,
+            # still-current native frames remain the explicit fallback while
+            # regional fusion is pending or unavailable.
+            for result in self._latest_provider_results.values():
+                for field in result.radar_fields:
+                    field_maximum_age = PROVIDER_FUSION_AGE_SECONDS.get(
+                        field.provider_id,
+                        MAX_FUSION_AGE_SECONDS,
+                    )
+                    if not 0 <= fusion.evaluated_at - field.observed_at <= field_maximum_age:
                         continue
-                    for item in self._radar_tracker.tracks(field, target.target_id):
-                        speed = math.hypot(item.velocity_east_kmh, item.velocity_north_kmh)
-                        heading = None if speed < 0.5 else math.degrees(math.atan2(item.velocity_east_kmh, item.velocity_north_kmh)) % 360.0
-                        tracked_cells.append(StormCell(
-                            cell_id=f"{item.provider_id}:{target.target_id}:{item.track_id}",
-                            provider_id=item.provider_id,
-                            observed_at=item.observed_at, latitude=item.latitude,
-                            longitude=item.longitude,
-                            geometry=item.geometry,
-                            precipitation_rate_mm_h=item.rain_rate_mm_h,
-                            reflectivity_dbz=None, radar_level=None,
-                            velocity_east_kmh=item.velocity_east_kmh,
-                            velocity_north_kmh=item.velocity_north_kmh,
-                            speed_kmh=speed, heading_deg=heading,
-                        ))
+                    track_field(field, region.targets)
+
+            if regional is not None:
+                regional_summaries.append(regional.summary)
+            else:
+                reason_code = (
+                    "fusion_pending"
+                    if region.region_id in pending_region_ids
+                    else "onvoldoende_data"
+                )
+                regional_summaries.append(self._fallback_regional_summary(
+                    region,
+                    evaluated_at=fusion.evaluated_at,
+                    reason_code=reason_code,
+                ))
         nowcast = self._nowcast.advance(
             fusion,
             tracked_cells=tuple({item.cell_id: item for item in tracked_cells}.values()) or None,
@@ -423,6 +509,7 @@ class ThinOperationalRuntime:
             nowcast,
             state=state,
             region_plan=region_plan,
+            regional_radar=tuple(regional_summaries),
         )
         if self._postgis is None:
             postgis = PostGISWriteResult(
@@ -434,7 +521,10 @@ class ThinOperationalRuntime:
             )
         else:
             postgis = await self._postgis.write_cycle(
-                fusion, nowcast, validations,
+                fusion,
+                nowcast,
+                validations,
+                regional_radar=tuple(regional_summaries),
             )
         self._revision += 1
         snapshot = self._build_snapshot(
@@ -443,6 +533,7 @@ class ThinOperationalRuntime:
             postgis,
             state=state,
             region_plan=region_plan,
+            regional_radar=tuple(regional_summaries),
         )
         return ThinCycleResult(
             snapshot=snapshot,
@@ -450,6 +541,7 @@ class ThinOperationalRuntime:
             nowcast=nowcast,
             postgis=postgis,
             validations=validations,
+            regional_radar=tuple(regional_summaries),
         )
 
     def _build_geojson(
@@ -459,6 +551,7 @@ class ThinOperationalRuntime:
         *,
         state: DesiredState | None = None,
         region_plan: ThinRegionPlan | None = None,
+        regional_radar: tuple[RegionalFusionSummary, ...] = (),
     ) -> dict[str, Any]:
         state = self._state if state is None else state
         assert state is not None
@@ -598,15 +691,22 @@ class ThinOperationalRuntime:
                 "type": "FeatureCollection",
                 "features": features,
                 "metadata": {
-                "schema_version": 1,
-                "feature_count": len(features),
-                "radar_cells_included": len(selected),
-                "radar_cells_total": total_cells,
-                "lightning_events_included": lightning_count,
-                "truncated": len(selected) < total_cells,
-                "state": "operational",
-                "builder": "thin_worker",
-                "built_at": fusion.evaluated_at,
+                    "schema_version": 1,
+                    "feature_count": len(features),
+                    "radar_cells_included": len(selected),
+                    "radar_cells_total": total_cells,
+                    "lightning_events_included": lightning_count,
+                    "truncated": len(selected) < total_cells,
+                    "state": "operational",
+                    "builder": "thin_worker",
+                    "built_at": fusion.evaluated_at,
+                    "radar_fusion": [
+                        summary.as_dict()
+                        for summary in sorted(
+                            regional_radar,
+                            key=lambda item: item.region_id,
+                        )
+                    ],
                 },
             }
 
@@ -649,6 +749,7 @@ class ThinOperationalRuntime:
         *,
         state: DesiredState,
         region_plan: ThinRegionPlan,
+        regional_radar: tuple[RegionalFusionSummary, ...] = (),
     ) -> dict[str, Any]:
         # The PostGIS projection can take longer than the snapshot TTL for a
         # large first cycle.  Start the control-plane validity window when the
@@ -734,6 +835,25 @@ class ThinOperationalRuntime:
         provider_items.sort(key=lambda item: item["provider_id"])
 
         target_items: list[dict[str, Any]] = []
+        regional_by_id = {
+            summary.region_id: summary for summary in regional_radar
+        }
+
+        def source_provider_ids(
+            values: set[str],
+            *,
+            region_id: str,
+        ) -> set[str]:
+            resolved: set[str] = set()
+            for value in values:
+                if value.startswith("fusion:"):
+                    summary = regional_by_id.get(region_id)
+                    if summary is not None:
+                        resolved.update(summary.contributors)
+                else:
+                    resolved.add(value)
+            return {_snapshot_provider_id(value) for value in resolved}
+
         region_contributors: dict[str, set[str]] = {
             region.region_id: set() for region in region_plan.regions
         }
@@ -743,10 +863,13 @@ class ThinOperationalRuntime:
                 region_plan.region_id_for(target.target_id)
                 or "region:unassigned"
             )
-            provider_ids = {_snapshot_provider_id(item) for item in result.contributors}
+            raw_provider_ids = set(result.contributors)
             if result.arrival_provider_id is not None:
-                provider_ids.add(_snapshot_provider_id(result.arrival_provider_id))
-            providers = sorted(provider_ids)
+                raw_provider_ids.add(result.arrival_provider_id)
+            providers = sorted(source_provider_ids(
+                raw_provider_ids,
+                region_id=region_id,
+            ))
             region_contributors.setdefault(region_id, set()).update(providers)
             current_is_rain = result.current_state == "regen"
             current_is_dry = result.current_state == "droog"
@@ -888,6 +1011,13 @@ class ThinOperationalRuntime:
             "providers": _collection(provider_items),
             "ui_storms": _storm_collection(storm_items),
             "map_artifact": {"artifact_handle": None, "etag": None},
+            "radar_fusion": _collection([
+                summary.as_dict()
+                for summary in sorted(
+                    regional_radar,
+                    key=lambda item: item.region_id,
+                )
+            ]),
         }
         return validate_snapshot(snapshot)
 

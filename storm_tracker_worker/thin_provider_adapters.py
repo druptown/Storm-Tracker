@@ -206,6 +206,33 @@ class ProviderStale(RuntimeError):
         self.reason_code = str(reason_code)
 
 
+def _projected_crs_in_metres(value: Any):
+    """Return an equivalent projected CRS whose coordinate unit is metres."""
+    from pyproj import CRS
+
+    source = CRS.from_user_input(value)
+    if not source.is_projected:
+        raise ValueError("radar_crs_must_be_projected")
+    if not isinstance(value, str) or "+proj=" not in value:
+        raise ValueError("radar_crs_proj_definition_required")
+    if re.search(r"(?:^|\s)\+units=[^\s]+", value):
+        metric_definition = re.sub(
+            r"(?:^|\s)\+units=[^\s]+",
+            " +units=m",
+            value,
+            count=1,
+        ).strip()
+    else:
+        metric_definition = value.strip() + " +units=m"
+    metric = CRS.from_user_input(metric_definition)
+    if not metric.axis_info or not math.isclose(
+        metric.axis_info[0].unit_conversion_factor,
+        1.0,
+    ):
+        raise ValueError("radar_crs_metre_normalization_failed")
+    return metric
+
+
 class BlockedProviderAdapter:
     """Complete provider wiring whose external data contract is unavailable."""
 
@@ -3503,12 +3530,12 @@ def _decode_knmi_rtcor(
             0.0,
         )
         echo_valid = source_valid & (rain_rate >= 0.1)
-        pixel_x_km = _attribute_number(geographic["geo_pixel_size_x"])
-        pixel_y_km = _attribute_number(geographic["geo_pixel_size_y"])
-        column_offset_km = _attribute_number(geographic["geo_column_offset"])
-        row_offset_km = _attribute_number(geographic["geo_row_offset"])
+        pixel_x_m = _attribute_number(geographic["geo_pixel_size_x"]) * 1_000.0
+        pixel_y_m = _attribute_number(geographic["geo_pixel_size_y"]) * 1_000.0
+        column_offset_m = _attribute_number(geographic["geo_column_offset"]) * 1_000.0
+        row_offset_m = _attribute_number(geographic["geo_row_offset"]) * 1_000.0
         proj4 = _attribute_text(root["geographic/map_projection"].attrs["projection_proj4_params"])
-        projected_crs = CRS.from_user_input(proj4)
+        projected_crs = _projected_crs_in_metres(proj4)
         geographic_crs = projected_crs.geodetic_crs
         if geographic_crs is None:
             raise ValueError("knmi_projection_invalid")
@@ -3518,14 +3545,14 @@ def _decode_knmi_rtcor(
         def lonlat_to_pixel(longitude: float, latitude: float) -> tuple[float, float]:
             x_value, y_value = forward.transform(longitude, latitude)
             return (
-                (y_value + row_offset_km) / pixel_y_km,
-                (x_value - column_offset_km) / pixel_x_km,
+                (y_value + row_offset_m) / pixel_y_m,
+                (x_value - column_offset_m) / pixel_x_m,
             )
 
         def pixel_to_lonlat(row: float, column: float) -> tuple[float, float]:
             return inverse.transform(
-                column_offset_km + column * pixel_x_km,
-                row * pixel_y_km - row_offset_km,
+                column_offset_m + column * pixel_x_m,
+                row * pixel_y_m - row_offset_m,
             )
 
         observations = _national_radar_observations(
@@ -3536,8 +3563,8 @@ def _decode_knmi_rtcor(
             received_at=received_at,
             lonlat_to_pixel=lonlat_to_pixel,
             pixel_to_lonlat=pixel_to_lonlat,
-            pixel_width_m=abs(pixel_x_km) * 1_000.0,
-            pixel_height_m=abs(pixel_y_km) * 1_000.0,
+            pixel_width_m=abs(pixel_x_m),
+            pixel_height_m=abs(pixel_y_m),
         )
         return ThinAdapterResult(
             observations=observations,
@@ -3546,10 +3573,10 @@ def _decode_knmi_rtcor(
                 product_id=request.product_id,
                 observed_at=observed_at,
                 crs=projected_crs.to_string(),
-                origin_x_m=column_offset_km * 1_000.0,
-                origin_y_m=-row_offset_km * 1_000.0,
-                x_resolution_m=abs(pixel_x_km) * 1_000.0,
-                y_resolution_m=abs(pixel_y_km) * 1_000.0,
+                origin_x_m=column_offset_m,
+                origin_y_m=-row_offset_m,
+                x_resolution_m=abs(pixel_x_m),
+                y_resolution_m=abs(pixel_y_m),
                 rain_rate_mm_h=rain_rate,
                 valid_mask=source_valid,
             ),),

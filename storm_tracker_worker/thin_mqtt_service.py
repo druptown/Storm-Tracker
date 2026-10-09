@@ -213,6 +213,9 @@ class ThinMqttService:
             task.cancel()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
+        close_runtime = getattr(self.runtime, "close", None)
+        if callable(close_runtime):
+            close_runtime()
         self._heartbeat_stop.set()
         if self._heartbeat_thread is not None:
             self._heartbeat_thread.join(timeout=2.0)

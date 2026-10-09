@@ -157,8 +157,6 @@ def _footprint_geometry(
     pixels: tuple[tuple[int, int], ...],
     grid: AnalysisGrid,
     inverse: Transformer,
-    *,
-    coordinate_scale: float,
 ) -> dict[str, Any]:
     """Merge equal horizontal pixel runs into exact raster rectangles."""
 
@@ -212,10 +210,7 @@ def _footprint_geometry(
             (left, top), (right, top), (right, bottom),
             (left, bottom), (left, top),
         ):
-            longitude, latitude = inverse.transform(
-                x_value * coordinate_scale,
-                y_value * coordinate_scale,
-            )
+            longitude, latitude = inverse.transform(x_value, y_value)
             ring.append([float(longitude), float(latitude)])
         polygons.append([ring])
     return {"type": "MultiPolygon", "coordinates": polygons}
@@ -261,11 +256,8 @@ class ThinRadarTracker:
                 continue
             estimate = state.estimate(track.track_id)
             x_m, y_m = estimate.x_m, estimate.y_m
-            if field.provider_id == "knmi_radar":
-                x_m, y_m = x_m / 1_000.0, y_m / 1_000.0
             longitude, latitude = inverse.transform(x_m, y_m)
             hierarchy = state.hierarchy(track.track_id)
-            coordinate_scale = 0.001 if field.provider_id == "knmi_radar" else 1.0
             tracks.append(RadarTrack(
                 track_id=track.track_id,
                 provider_id=field.provider_id,
@@ -278,7 +270,6 @@ class ThinRadarTracker:
                     hierarchy.footprint_pixels,
                     state.last_frame.grid,
                     inverse,
-                    coordinate_scale=coordinate_scale,
                 ),
             ))
         return tuple(tracks)
@@ -301,12 +292,6 @@ def build_target_radar_frame(
     target_x_m, target_y_m = transformer.transform(
         float(target.longitude), float(target.latitude)
     )
-    # KNMI's native CRS reports kilometres.  Its retained grid is converted
-    # to metres at decode time, so project target coordinates need the same
-    # scale conversion before applying the generic grid math.
-    if field.provider_id == "knmi_radar":
-        target_x_m *= 1_000.0
-        target_y_m *= 1_000.0
     height, width = field.rain_rate_mm_h.shape
     radius_m = float(target.observation_radius_km) * 1_000.0
     requested_width = min(width, max(1, math.ceil(2.0 * radius_m / field.x_resolution_m)))
