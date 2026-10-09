@@ -28,6 +28,7 @@ PASSAGE_ALGORITHM_VERSION = "scientific-passage-v1"
 PASSAGE_POLICY_VERSION = "candidate_policy_v1"
 AUTO_DISCOVERY_GROUND_PROVIDERS = frozenset({
     "kmi_aws",
+    "meteolux",
     "metar",
     "netatmo",
     "wunderground",

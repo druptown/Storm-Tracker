@@ -27,6 +27,7 @@ PROVIDER_FUSION_AGE_SECONDS = {
     "metoffice_radar": 20 * 60,
     "rainviewer": 20 * 60,
     "geosphere": 90 * 60,
+    "meteolux": 10 * 60,
 }
 MAX_FUTURE_SKEW_SECONDS = 30
 _GROUND_KINDS = frozenset({
@@ -163,6 +164,9 @@ def fuse_observations(
                     MAX_FUSION_AGE_SECONDS,
                 )
             )
+            maximum_age = min(maximum_age, PROVIDER_FUSION_AGE_SECONDS.get(
+                observation.provider_id, maximum_age,
+            ))
             if age > maximum_age:
                 rejected.setdefault(str(provider_id), set()).add("stale")
                 continue

@@ -44,7 +44,7 @@ ITALIAMETEO_DPC_HISTORICAL_CATALOG_ENDPOINT = (
     "https://meteohub.agenziaitaliameteo.it/api/datasets/"
     "radar_sri_dpc/opendata"
 )
-METEOLUX_WEATHER_ENDPOINT = "https://metapi.ana.lu/api/v1/metapp/weather"
+METEOLUX_WEATHER_ENDPOINT = "https://metapi.ana.lu/api/v1/hvd/observations"
 OPERA_LISTING_ENDPOINT = "https://s3.waw3-1.cloudferro.com/openradar-24h/"
 OPERA_OBJECT_BASE = "https://s3.waw3-1.cloudferro.com/openradar-24h"
 METAR_ENDPOINT = "https://aviationweather.gov/api/data/metar"
@@ -1276,7 +1276,7 @@ class ItaliaMeteoDpcHistoricalCatalogAdapter:
 
 
 class MeteoLuxValidationAdapter:
-    """Validate MeteoLux location guidance without inventing data semantics."""
+    """Official Findel ground observations, never app forecasts at a target."""
 
     def __init__(self, *, endpoint: str = METEOLUX_WEATHER_ENDPOINT) -> None:
         self._endpoint = endpoint
@@ -1288,52 +1288,87 @@ class MeteoLuxValidationAdapter:
         *,
         now: float,
     ) -> tuple[NormalizedObservation, ...]:
-        del now
-        for target in request.targets:
-            payload = await fetcher.get_json(
-                self._endpoint,
-                params={
-                    "langcode": "en",
-                    "lat": f"{target.latitude:.5f}",
-                    "long": f"{target.longitude:.5f}",
-                },
-                maximum_bytes=4 * 1024 * 1024,
-            )
-            if not isinstance(payload, Mapping):
-                raise ValueError("meteolux_payload_invalid")
-            city = payload.get("city")
-            forecast = payload.get("forecast")
-            current = (
-                forecast.get("current")
-                if isinstance(forecast, Mapping)
-                else None
-            )
-            if (
-                not isinstance(city, Mapping)
-                or not isinstance(current, Mapping)
-                or current.get("type") != "current"
-                or not isinstance(current.get("temperature"), Mapping)
-                or not isinstance(current.get("wind"), Mapping)
-                or "rain" not in current
-            ):
-                raise ValueError("meteolux_current_invalid")
-            try:
-                datetime.fromisoformat(current.get("date"))
-                city_latitude = float(city.get("lat"))
-                city_longitude = float(city.get("long"))
-            except (TypeError, ValueError):
-                raise ValueError("meteolux_current_invalid") from None
-            if (
-                not math.isfinite(city_latitude)
-                or not math.isfinite(city_longitude)
-                or not -90.0 <= city_latitude <= 90.0
-                or not -180.0 <= city_longitude <= 180.0
-            ):
-                raise ValueError("meteolux_current_invalid")
-        # The endpoint does not declare units/accumulation intervals for its
-        # display strings. Until that semantic contract is public, it proves
-        # availability only and must not enter quantitative fusion.
-        return ()
+        base = self._endpoint.rsplit("/", 1)[0]
+        station_payload = await fetcher.get_json(
+            f"{base}/stations/LUX0000001", maximum_bytes=512 * 1024,
+        )
+        station = station_payload.get("data") if isinstance(station_payload, Mapping) else None
+        coordinates = station.get("location") if isinstance(station, Mapping) else None
+        if (not isinstance(station, Mapping) or station.get("id") != "LUX0000001"
+                or not isinstance(coordinates, list) or len(coordinates) != 2):
+            raise ValueError("meteolux_station_invalid")
+        longitude, latitude = map(_optional_float, coordinates)
+        if (latitude is None or longitude is None or not -90 <= latitude <= 90
+                or not -180 <= longitude <= 180):
+            raise ValueError("meteolux_station_invalid")
+        targets = tuple(target for target in request.targets if _haversine_km(
+            latitude, longitude, target.latitude, target.longitude,
+        ) <= request.ground_radius_km)
+        if not targets:
+            return ()
+        payload = await fetcher.get_json(self._endpoint, maximum_bytes=512 * 1024)
+        metadata_payload = await fetcher.get_json(
+            f"{self._endpoint}/metadata", maximum_bytes=512 * 1024,
+        )
+        if not isinstance(payload, Mapping) or not isinstance(payload.get("data"), list):
+            raise ValueError("meteolux_payload_invalid")
+        try:
+            date = datetime.fromisoformat(str(payload.get("timestamp")).replace("Z", "+00:00"))
+            if date.tzinfo is None:
+                raise ValueError
+            observed_at = date.timestamp()
+        except (ValueError, TypeError):
+            raise ValueError("meteolux_timestamp_invalid") from None
+        if now - observed_at > 600 or observed_at - now > 60:
+            raise ProviderStale("meteolux_observations_stale")
+        if not isinstance(metadata_payload, Mapping) or not isinstance(metadata_payload.get("data"), list):
+            raise ValueError("meteolux_metadata_invalid")
+        metadata_by_id = {item.get("id"): item for item in metadata_payload["data"] if isinstance(item, Mapping)}
+        values = {item.get("id"): item.get("value") for item in payload["data"] if isinstance(item, Mapping)}
+        specs = (
+            ("srr", ObservationKind.RAIN_ACCUMULATION, "mm", "mm", "rain_accumulation", 60),
+            ("spsl", ObservationKind.PRESSURE, "hPa", "hPa", "pressure", 60),
+            ("st", ObservationKind.TEMPERATURE, "degC", "°C", "temperature", 60),
+            ("su", ObservationKind.RELATIVE_HUMIDITY, "%", "%", "relative_humidity", 60),
+            ("s2ff_rwymd0", ObservationKind.WIND_SPEED, "m/s", "m/s", "wind_speed", 120),
+            ("s2dd_rwymd0", ObservationKind.WIND_DIRECTION, "degrees", "°", "wind_direction", 120),
+            ("s2ffgust_rwymd0", ObservationKind.WIND_SPEED, "m/s", "m/s", "wind_gust", 120),
+        )
+        observations = []
+        for field, kind, source_unit, unit, measurement, window in specs:
+            value = _optional_float(values.get(field))
+            if value is None:
+                continue
+            semantic = metadata_by_id.get(field, {})
+            if (semantic.get("unit") != source_unit or semantic.get("timeResolution") != "PT1M"
+                    or semantic.get("dataType") != "realtime"):
+                raise ValueError("meteolux_metadata_invalid")
+            if semantic.get("qualityCode") != 0:
+                continue
+            metadata = {"station_id": "LUX0000001", "measurement": measurement,
+                        "source_parameter": field, "source_unit": source_unit,
+                        "source_quality_code": 0, "averaging_window_seconds": window}
+            if field == "srr":
+                metadata["accumulation_window_seconds"] = 60
+            if field == "spsl":
+                metadata["pressure_reference"] = "mean_sea_level_QFF"
+            if field == "s2ffgust_rwymd0":
+                metadata["gust_sampling_seconds"] = 3
+            for target in targets:
+                common = dict(provider_id=request.provider_id, product_id=request.product_id,
+                              target_id=target.target_id, observed_at=observed_at, received_at=now,
+                              latitude=latitude, longitude=longitude, geometry=_point(longitude, latitude),
+                              quality=ObservationQuality.GOOD, maximum_age_seconds=600)
+                observations.append(NormalizedObservation.create(
+                    **common, kind=kind, value=value, unit=unit, metadata=metadata,
+                ))
+                if field == "srr":
+                    observations.append(NormalizedObservation.create(
+                        **common, kind=ObservationKind.RAIN_RATE, value=value * 60, unit="mm/h",
+                        metadata={**metadata, "measurement": "rain_rate",
+                                  "rate_semantics": "one_minute_accumulation_equivalent"},
+                    ))
+        return tuple(observations)
 
 
 _KMI_COLORS = (
