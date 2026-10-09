@@ -867,6 +867,7 @@ class ThinOperationalRuntime:
                     velocity_north_kmh=item.velocity_north_kmh,
                     speed_kmh=speed,
                     heading_deg=heading,
+                    motion_ready=item.motion_ready,
                 ))
 
         for region in region_plan.regions:
@@ -1080,11 +1081,16 @@ class ThinOperationalRuntime:
                     "radar_level": cell.radar_level,
                     "speed_kmh": cell.speed_kmh,
                     "heading_deg": cell.heading_deg,
+                    "motion_ready": cell.motion_ready,
                     "provider_id": cell.provider_id,
                     "observed_at": cell.observed_at,
                 },
             }]
-            if cell.heading_deg is None or cell.speed_kmh < 0.5:
+            if (
+                not cell.motion_ready
+                or cell.heading_deg is None
+                or cell.speed_kmh < 0.5
+            ):
                 cell_feature_groups.append((
                     float(cell.reflectivity_dbz or -100.0),
                     cell.cell_id,
@@ -1490,12 +1496,12 @@ class ThinOperationalRuntime:
             "state": "active",
             "diagnostic_quality_percent": None,
             "diagnostic_quality_kind": None,
-            "motion_speed_kmh": cell.speed_kmh,
-            "motion_heading_deg": cell.heading_deg,
+            "motion_speed_kmh": cell.speed_kmh if cell.motion_ready else None,
+            "motion_heading_deg": cell.heading_deg if cell.motion_ready else None,
             "max_dbz": cell.reflectivity_dbz,
             "area_km2": None,
             "product_valid_at": cell.observed_at,
-            "reason_codes": [],
+            "reason_codes": [] if cell.motion_ready else ["motion_not_ready"],
         } for cell in nowcast.storm_cells]
         storm_items.sort(key=lambda item: item["storm_id"])
 

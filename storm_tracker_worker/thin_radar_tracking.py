@@ -150,6 +150,7 @@ class RadarTrack:
     rain_rate_mm_h: float
     velocity_east_kmh: float
     velocity_north_kmh: float
+    motion_ready: bool
     geometry: dict[str, Any]
 
 
@@ -258,6 +259,13 @@ class ThinRadarTracker:
             x_m, y_m = estimate.x_m, estimate.y_m
             longitude, latitude = inverse.transform(x_m, y_m)
             hierarchy = state.hierarchy(track.track_id)
+            motion_ready = bool(
+                track.lifecycle_state == "confirmed"
+                and track.sample_count >= 2
+                and track.latest_detection.valid_at == state.last_frame.valid_at
+                and estimate.latest_interval_vx_m_s is not None
+                and estimate.latest_interval_vy_m_s is not None
+            )
             tracks.append(RadarTrack(
                 track_id=track.track_id,
                 provider_id=field.provider_id,
@@ -266,6 +274,7 @@ class ThinRadarTracker:
                 rain_rate_mm_h=float(hierarchy.maximum_value),
                 velocity_east_kmh=estimate.vx_m_s * 3.6,
                 velocity_north_kmh=estimate.vy_m_s * 3.6,
+                motion_ready=motion_ready,
                 geometry=_footprint_geometry(
                     hierarchy.footprint_pixels,
                     state.last_frame.grid,

@@ -37,6 +37,7 @@ class StormCell:
     velocity_north_kmh: float
     speed_kmh: float
     heading_deg: float | None
+    motion_ready: bool
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -53,6 +54,7 @@ class StormCell:
             "velocity_north_kmh": self.velocity_north_kmh,
             "speed_kmh": self.speed_kmh,
             "heading_deg": self.heading_deg,
+            "motion_ready": self.motion_ready,
         }
 
 
@@ -298,6 +300,11 @@ class ThinNowcastRuntime:
                 north_kmh = track.vy_m_s * 3.6
                 heading = track.heading_deg
                 claimed.add(previous.cell_id)
+            motion_ready = bool(
+                previous is not None
+                and explicit_id is not None
+                and previous.cell_id == f"{observation.provider_id}:{explicit_id}"
+            )
             cells.append(StormCell(
                 cell_id=cell_id,
                 provider_id=observation.provider_id,
@@ -324,6 +331,7 @@ class ThinNowcastRuntime:
                 velocity_north_kmh=north_kmh,
                 speed_kmh=math.hypot(east_kmh, north_kmh),
                 heading_deg=heading,
+                motion_ready=motion_ready,
             ))
             frames.append(current)
 
@@ -349,6 +357,7 @@ class ThinNowcastRuntime:
             passages = tuple(
                 passage
                 for cell in cells
+                if cell.motion_ready
                 if (passage := forecast_target_passage(
                     cell=cell,
                     target_id=target_id,
