@@ -1,8 +1,8 @@
 {
   "kind": "recovered_archive_source",
   "component": "worker",
-  "version": "1.18.6",
-  "source_id": "031c95357f2b1862bb69490c34a60dad8d833f07999ee4ad86bb1012455f0952",
+  "version": "1.18.7",
+  "source_id": "457ecb8a7d11c7d21d89d4269536e9a3908e5a731d651fb378acb3edab61bd06",
   "recovered_on": "2026-10-09",
   "files": [
     {
@@ -32,7 +32,7 @@
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "9a6a44f1fb74efcb1ad51f172320f38f3fe3335d0cb9791bc8221629f646df49",
+      "sha256": "3860aa21a34fd7676bc9224010b8d28e35b9e57b117e7583b1b63f1440208821",
       "size": 63
     },
     {
@@ -272,7 +272,7 @@
     {
       "path": "config.yaml",
       "mode": 420,
-      "sha256": "a241ed755b60f3ce69baeff81205cba51c4ba188d4c9a64a116d68909756e926",
+      "sha256": "be20cbf2090598715058cd83ecbb5e34cab83c0af4d6a023273660833182f197",
       "size": 2697
     },
     {
@@ -1028,8 +1028,8 @@
     {
       "path": "thin_mqtt_service.py",
       "mode": 420,
-      "sha256": "00aa20bab2705e2daa3bec7655897d118f4b0e3312284aaa564c9c3dfb4cacb3",
-      "size": 14895
+      "sha256": "a86498a404725c46b33cb1826a99cc8ae5cfecaf92ba0c4c5bce61562144c687",
+      "size": 15503
     },
     {
       "path": "thin_nowcast.py",
@@ -1484,12 +1484,16 @@
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_worker_v1.18.6_deploy.tar.gz",
-      "archive_sha256": "a186a04bb855bfb225cbe633694a7d640d6a6ec26d6bc936366c6984f4bbde4e",
-      "bytes": 2311598,
+      "filename": "storm_tracker_worker_v1.18.7_deploy.tar.gz",
+      "archive_sha256": "3320466843b774426bddff06c8685435e0a26fb1b8ea6ade14fd0689868bf969",
+      "bytes": 2311698,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.116_worker_v1.18.6_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.117_worker_v1.18.7_evidence.json",
+          "archive_and_source_match": true
+        },
+        {
+          "manifest": "storm_tracker_release_v1.14.118_worker_v1.18.7_evidence.json",
           "archive_and_source_match": true
         }
       ]

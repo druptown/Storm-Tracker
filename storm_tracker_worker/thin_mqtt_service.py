@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import signal
+import threading
 import time
 from typing import Any
 
@@ -30,7 +31,7 @@ from .tracking_core.operational_snapshot import encode_control_envelope
 
 
 _LOGGER = logging.getLogger(__name__)
-WORKER_VERSION = "1.18.6"
+WORKER_VERSION = "1.18.7"
 
 
 class ThinMqttService:
@@ -54,6 +55,8 @@ class ThinMqttService:
         self._stop = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: threading.Thread | None = None
         self._job_results: dict[str, dict[str, Any]] = {}
         self._last_snapshot_revision = 0
         self._last_error: str | None = None
@@ -80,6 +83,21 @@ class ThinMqttService:
             },
         ))
 
+    def _publish_heartbeat(self) -> None:
+        self.client.publish(
+            topic(self.topic_root, "worker/status"),
+            self._heartbeat("degraded" if self._last_error else "online"),
+            qos=1,
+            retain=True,
+        )
+
+    def _run_heartbeat_thread(self) -> None:
+        while not self._heartbeat_stop.wait(self.heartbeat_seconds):
+            try:
+                self._publish_heartbeat()
+            except Exception:
+                _LOGGER.exception("Publiceren van workerheartbeat mislukt")
+
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
         self.client.on_message = self._on_message
@@ -97,6 +115,13 @@ class ThinMqttService:
                 keepalive=60,
             )
         self.client.loop_start()
+        self._heartbeat_stop.clear()
+        self._heartbeat_thread = threading.Thread(
+            target=self._run_heartbeat_thread,
+            name="thin-heartbeat",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
         if self.lightning_feed is not None:
             self.lightning_feed.update_targets(self.runtime.targets)
             self.lightning_feed.start()
@@ -108,7 +133,6 @@ class ThinMqttService:
         )
         self.client.subscribe(topic(self.topic_root, "jobs/request"), qos=1)
         self._tasks = [
-            asyncio.create_task(self._heartbeat_loop(), name="thin-heartbeat"),
             asyncio.create_task(self._cycle_loop(), name="thin-cycle"),
         ]
         if self.runtime.has_state:
@@ -128,6 +152,7 @@ class ThinMqttService:
             successful = str(reason_code).lower() in {"0", "success"}
         if successful:
             client.subscribe(topic(self.topic_root, "jobs/request"), qos=1)
+            self._publish_heartbeat()
 
     async def stop(self) -> None:
         self._stop.set()
@@ -136,6 +161,10 @@ class ThinMqttService:
             task.cancel()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._heartbeat_stop.set()
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join(timeout=2.0)
+            self._heartbeat_thread = None
         if self.lightning_feed is not None:
             self.lightning_feed.stop()
         self.client.publish(
@@ -146,18 +175,6 @@ class ThinMqttService:
         )
         self.client.loop_stop()
         self.client.disconnect()
-
-    async def _heartbeat_loop(self) -> None:
-        while not self._stop.is_set():
-            await asyncio.sleep(self.heartbeat_seconds)
-            if self._stop.is_set():
-                break
-            self.client.publish(
-                topic(self.topic_root, "worker/status"),
-                self._heartbeat("degraded" if self._last_error else "online"),
-                qos=1,
-                retain=True,
-            )
 
     async def _cycle_loop(self) -> None:
         while not self._stop.is_set():
