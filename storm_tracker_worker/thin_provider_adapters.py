@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import os
+from pathlib import Path
 import tarfile
 import time
 import xml.etree.ElementTree as ET
@@ -327,6 +328,32 @@ def _component_polygon_geometry(
     }
     # Keep filled cells on the right at vertices where two loops touch.
     turn_rank = {1: 0, 0: 1, 3: 2, 2: 3}
+
+    def split_repeated_vertices(
+        closed_ring: list[tuple[int, int]],
+    ) -> list[list[tuple[int, int]]]:
+        """Separate a hole that touches its shell at one grid vertex."""
+
+        pending = [closed_ring]
+        separated: list[list[tuple[int, int]]] = []
+        while pending:
+            candidate = pending.pop()
+            seen: dict[tuple[int, int], int] = {}
+            for index, point in enumerate(candidate[:-1]):
+                previous_index = seen.get(point)
+                if previous_index is None:
+                    seen[point] = index
+                    continue
+                first = candidate[previous_index:index + 1]
+                second = candidate[:previous_index + 1] + candidate[index + 1:]
+                if len(first) < 4 or len(second) < 4:
+                    raise ValueError("radar_component_contour_invalid")
+                pending.extend((first, second))
+                break
+            else:
+                separated.append(candidate)
+        return separated
+
     unused = set(edges)
     rings: list[list[tuple[int, int]]] = []
     while unused:
@@ -361,20 +388,21 @@ def _component_polygon_geometry(
             if len(ring) > len(edges) + 1:
                 raise ValueError("radar_component_contour_invalid")
 
-        simplified: list[tuple[int, int]] = []
-        for index, current in enumerate(ring[:-1]):
-            previous = ring[index - 1 if index else -2]
-            following = ring[(index + 1) % (len(ring) - 1)]
-            if (
-                previous[0] == current[0] == following[0]
-                or previous[1] == current[1] == following[1]
-            ):
-                continue
-            simplified.append(current)
-        if len(simplified) < 3:
-            raise ValueError("radar_component_contour_invalid")
-        simplified.append(simplified[0])
-        rings.append(simplified)
+        for simple_ring in split_repeated_vertices(ring):
+            simplified: list[tuple[int, int]] = []
+            for index, current in enumerate(simple_ring[:-1]):
+                previous = simple_ring[index - 1 if index else -2]
+                following = simple_ring[(index + 1) % (len(simple_ring) - 1)]
+                if (
+                    previous[0] == current[0] == following[0]
+                    or previous[1] == current[1] == following[1]
+                ):
+                    continue
+                simplified.append(current)
+            if len(simplified) < 3:
+                raise ValueError("radar_component_contour_invalid")
+            simplified.append(simplified[0])
+            rings.append(simplified)
 
     def signed_area(ring: list[tuple[int, int]]) -> float:
         return sum(
@@ -999,6 +1027,7 @@ class NetatmoOAuthTokenProvider:
         refresh_token: str | None = None,
         endpoint: str = NETATMO_TOKEN_ENDPOINT,
         monotonic: Callable[[], float] = time.monotonic,
+        refresh_token_state_path: str | Path | None = None,
     ) -> None:
         self._fetcher = fetcher
         self._client_id = client_id or os.getenv("STV3_NETATMO_CLIENT_ID")
@@ -1006,11 +1035,30 @@ class NetatmoOAuthTokenProvider:
         self._refresh_token = refresh_token or os.getenv("STV3_NETATMO_REFRESH_TOKEN")
         self._endpoint = endpoint
         self._monotonic = monotonic
+        raw_state_path = (
+            refresh_token_state_path
+            if refresh_token_state_path is not None
+            else os.getenv("STV3_NETATMO_TOKEN_STATE")
+        )
+        self._refresh_token_state_path = (
+            None if not raw_state_path else Path(raw_state_path)
+        )
+        if self._refresh_token_state_path is not None:
+            try:
+                state = json.loads(
+                    self._refresh_token_state_path.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError):
+                state = None
+            persisted = state.get("refresh_token") if isinstance(state, Mapping) else None
+            if isinstance(persisted, str) and persisted.strip():
+                self._refresh_token = persisted.strip()
         self._access_token: str | None = None
         self._expires_at = 0.0
 
     async def get_access_token(self) -> str | None:
-        if self._access_token and self._monotonic() < self._expires_at:
+        now = self._monotonic()
+        if self._access_token and now < self._expires_at:
             return self._access_token
         if not all((self._client_id, self._client_secret, self._refresh_token)):
             return None
@@ -1028,9 +1076,44 @@ class NetatmoOAuthTokenProvider:
         if not isinstance(token, str) or not token.strip():
             raise ValueError("netatmo_token_response_invalid")
         expires_in = _optional_float(payload.get("expires_in")) if isinstance(payload, Mapping) else None
+        rotated_refresh_token = (
+            payload.get("refresh_token") if isinstance(payload, Mapping) else None
+        )
+        if (
+            isinstance(rotated_refresh_token, str)
+            and rotated_refresh_token.strip()
+            and rotated_refresh_token.strip() != self._refresh_token
+        ):
+            self._refresh_token = rotated_refresh_token.strip()
+            self._persist_refresh_token()
         self._access_token = token.strip()
-        self._expires_at = self._monotonic() + max(60.0, (expires_in or 3600.0) - 30.0)
+        self._expires_at = now + max(60.0, (expires_in or 3600.0) - 30.0)
         return self._access_token
+
+    def _persist_refresh_token(self) -> None:
+        path = self._refresh_token_state_path
+        if path is None or not self._refresh_token:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + ".tmp")
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            0o600,
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump({"refresh_token": self._refresh_token}, stream)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            path.chmod(0o600)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 _NETATMO_RES_TYPES: dict[str, tuple[ObservationKind, str]] = {

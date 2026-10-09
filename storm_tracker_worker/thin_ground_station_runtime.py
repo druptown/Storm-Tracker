@@ -19,7 +19,6 @@ GROUND_CAPABILITIES = (
     "pressure",
     "wind_speed",
     "wind_direction",
-    "temperature",
 )
 
 

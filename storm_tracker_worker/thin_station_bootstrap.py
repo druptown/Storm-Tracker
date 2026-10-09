@@ -37,6 +37,51 @@ class DiscoveryPage:
     response_bytes: int
 
 
+class TileSubdivisionRequired(RuntimeError):
+    """The provider cannot return a trustworthy complete result for a tile."""
+
+
+class RetryableDiscoveryError(RuntimeError):
+    """Transient provider failure that must not complete a discovery tile."""
+
+    def __init__(self, reason_code: str, *, retry_after_seconds: float) -> None:
+        super().__init__(reason_code)
+        retry_after = _finite(retry_after_seconds, "discovery_retry_after")
+        if retry_after < 0.0:
+            raise ValueError("discovery_retry_after_invalid")
+        self.retry_after_seconds = retry_after
+
+
+def subdivide_geographic_tile(
+    tile: GeographicTile,
+) -> tuple[GeographicTile, GeographicTile, GeographicTile, GeographicTile]:
+    """Split one tile into four deterministic, gap-free children."""
+
+    middle_latitude = (tile.south + tile.north) / 2.0
+    middle_longitude = (tile.west + tile.east) / 2.0
+    children = (
+        (tile.south, middle_latitude, tile.west, middle_longitude),
+        (tile.south, middle_latitude, middle_longitude, tile.east),
+        (middle_latitude, tile.north, tile.west, middle_longitude),
+        (middle_latitude, tile.north, middle_longitude, tile.east),
+    )
+    return tuple(
+        GeographicTile(
+            tile_id="_".join((
+                _tile_component("s", south),
+                _tile_component("n", north),
+                _tile_component("w", west),
+                _tile_component("e", east),
+            )),
+            south=south,
+            north=north,
+            west=west,
+            east=east,
+        )
+        for south, north, west, east in children
+    )  # type: ignore[return-value]
+
+
 @dataclass(frozen=True, slots=True)
 class BootstrapBudget:
     maximum_calls: int
@@ -141,6 +186,18 @@ def geographic_tiles(
             longitude = tile_east
         latitude = tile_north
     return tuple(result)
+
+
+def world_netatmo_tiles() -> tuple[GeographicTile, ...]:
+    """Return the deterministic one-degree public Netatmo world inventory."""
+
+    return geographic_tiles(
+        south=-85.0,
+        north=85.0,
+        west=-180.0,
+        east=180.0,
+        tile_degrees=1.0,
+    )
 
 
 _METAR_CAPABILITIES = (
@@ -293,6 +350,7 @@ class StationCatalogBootstrap:
         source: BootstrapSource,
         clock: Callable[[], float] = time.time,
         minimum_call_interval_seconds: float = 0.0,
+        minimum_tile_degrees: float = 0.03125,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         interval = _finite(
@@ -301,10 +359,14 @@ class StationCatalogBootstrap:
         )
         if interval < 0.0:
             raise ValueError("bootstrap_minimum_call_interval_seconds_invalid")
+        minimum_tile = _finite(minimum_tile_degrees, "bootstrap_minimum_tile_degrees")
+        if minimum_tile <= 0.0 or minimum_tile > 10.0:
+            raise ValueError("bootstrap_minimum_tile_degrees_invalid")
         self._repository = repository
         self._source = source
         self._clock = clock
         self._minimum_call_interval_seconds = interval
+        self._minimum_tile_degrees = minimum_tile
         self._sleep = sleep
 
     async def run(
@@ -319,26 +381,60 @@ class StationCatalogBootstrap:
         stations_written = 0
         completed_tiles = 0
         skipped_tiles = 0
-        completed_ids: set[str] = set()
         status = "complete"
-        for tile in inventory:
+
+        async def process(tile: GeographicTile) -> bool:
+            nonlocal calls, response_bytes, stations_written
+            nonlocal completed_tiles, skipped_tiles, status
             checkpoint = self._repository.load_checkpoint(
                 self._source.provider_id, tile.tile_id,
             )
             if checkpoint is not None and checkpoint.completed:
                 skipped_tiles += 1
-                completed_ids.add(tile.tile_id)
-                continue
+                return True
             cursor = None if checkpoint is None else checkpoint.resume_cursor
             station_count = 0 if checkpoint is None else checkpoint.station_count
             while True:
                 if calls >= budget.maximum_calls or response_bytes >= budget.maximum_bytes:
                     status = "budget_exhausted"
-                    break
+                    return False
                 if calls and self._minimum_call_interval_seconds:
                     await self._sleep(self._minimum_call_interval_seconds)
-                page = await self._source.discover(tile, cursor=cursor)
                 calls += 1
+                try:
+                    page = await self._source.discover(tile, cursor=cursor)
+                except RetryableDiscoveryError as error:
+                    await self._sleep(error.retry_after_seconds)
+                    continue
+                except TileSubdivisionRequired:
+                    latitude_span = tile.north - tile.south
+                    longitude_span = tile.east - tile.west
+                    if min(latitude_span, longitude_span) / 2.0 < self._minimum_tile_degrees:
+                        raise ValueError("netatmo_minimum_tile_still_incomplete")
+                    children = subdivide_geographic_tile(tile)
+                    for child in children:
+                        if not await process(child):
+                            return False
+                    child_counts = tuple(
+                        self._repository.load_checkpoint(
+                            self._source.provider_id, child.tile_id,
+                        )
+                        for child in children
+                    )
+                    station_count = sum(
+                        item.station_count for item in child_counts
+                        if item is not None and item.completed
+                    )
+                    self._repository.save_checkpoint(DiscoveryCheckpoint(
+                        provider_id=self._source.provider_id,
+                        tile_id=tile.tile_id,
+                        cursor=None,
+                        completed=True,
+                        station_count=station_count,
+                        updated_at=float(self._clock()),
+                    ))
+                    completed_tiles += 1
+                    return True
                 response_bytes += page.response_bytes
                 stations_written += self._repository.upsert_stations(page.stations)
                 station_count += len({item.station_key for item in page.stations})
@@ -353,12 +449,18 @@ class StationCatalogBootstrap:
                 self._repository.save_checkpoint(checkpoint)
                 if page.completed:
                     completed_tiles += 1
-                    completed_ids.add(tile.tile_id)
-                    break
+                    return True
                 cursor = page.next_cursor
+
+        root_completion: dict[str, bool] = {}
+        for tile in inventory:
+            root_completion[tile.tile_id] = await process(tile)
             if status == "budget_exhausted":
                 break
-        remaining = sum(1 for item in inventory if item.tile_id not in completed_ids)
+        remaining = sum(
+            1 for item in inventory
+            if not root_completion.get(item.tile_id, False)
+        )
         return BootstrapReport(
             provider_id=self._source.provider_id,
             status=status,
@@ -404,13 +506,15 @@ class NetatmoTileSource:
         self,
         *,
         fetch_json: Callable[..., Awaitable[Any]],
-        access_token: str,
+        access_token: str | None = None,
+        access_token_provider: Callable[[], Awaitable[str | None]] | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
-        if not access_token:
+        if not access_token and access_token_provider is None:
             raise ValueError("netatmo_access_token_missing")
         self._fetch_json = fetch_json
         self._access_token = access_token
+        self._access_token_provider = access_token_provider
         self._clock = clock
 
     async def discover(
@@ -418,18 +522,42 @@ class NetatmoTileSource:
     ) -> DiscoveryPage:
         if cursor is not None:
             raise ValueError("netatmo_cursor_unsupported")
-        payload = await self._fetch_json(
-            NETATMO_PUBLIC_DATA_URL,
-            params={
-                "lat_ne": f"{tile.north:.5f}",
-                "lon_ne": f"{tile.east:.5f}",
-                "lat_sw": f"{tile.south:.5f}",
-                "lon_sw": f"{tile.west:.5f}",
-                "filter": "true",
-            },
-            headers={"Authorization": f"Bearer {self._access_token}"},
-            maximum_bytes=16 * 1024 * 1024,
-        )
+        token = self._access_token
+        if self._access_token_provider is not None:
+            token = await self._access_token_provider()
+        if not token:
+            raise ValueError("netatmo_access_token_missing")
+        try:
+            payload = await self._fetch_json(
+                NETATMO_PUBLIC_DATA_URL,
+                params={
+                    "lat_ne": f"{tile.north:.5f}",
+                    "lon_ne": f"{tile.east:.5f}",
+                    "lat_sw": f"{tile.south:.5f}",
+                    "lon_sw": f"{tile.west:.5f}",
+                    "filter": "true",
+                },
+                headers={"Authorization": f"Bearer {token}"},
+                maximum_bytes=16 * 1024 * 1024,
+            )
+        except RuntimeError as error:
+            reason = str(error)
+            if reason == "http_status_503":
+                raise TileSubdivisionRequired("netatmo_http_503") from error
+            if reason in {
+                "http_status_408",
+                "http_status_425",
+                "http_status_429",
+                "http_status_500",
+                "http_status_502",
+                "http_status_504",
+            }:
+                retry_after = 60.0 if reason == "http_status_429" else 30.0
+                raise RetryableDiscoveryError(
+                    reason.replace("http_status_", "netatmo_http_"),
+                    retry_after_seconds=retry_after,
+                ) from error
+            raise
         encoded_size = len(json.dumps(payload, separators=(",", ":")).encode())
         return DiscoveryPage(
             stations=parse_netatmo_public_stations(
@@ -441,6 +569,96 @@ class NetatmoTileSource:
         )
 
 
+class NetatmoWorldCatalogRunner:
+    """One-time world catalog traversal with a durable completion marker."""
+
+    COMPLETION_TILE_ID = "netatmo-world-global-1deg-v1"
+
+    def __init__(
+        self,
+        *,
+        repository: BootstrapRepository,
+        source: BootstrapSource,
+        tiles: Iterable[GeographicTile] | None = None,
+        minimum_call_interval_seconds: float = 10.0,
+        minimum_tile_degrees: float = 0.03125,
+        clock: Callable[[], float] = time.time,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self._repository = repository
+        self._source = source
+        self._tiles = tuple(world_netatmo_tiles() if tiles is None else tiles)
+        self._minimum_call_interval_seconds = minimum_call_interval_seconds
+        self._minimum_tile_degrees = minimum_tile_degrees
+        self._clock = clock
+        self._sleep = sleep
+
+    async def run(self, *, budget: BootstrapBudget) -> BootstrapReport:
+        marker = self._repository.load_checkpoint(
+            self._source.provider_id,
+            self.COMPLETION_TILE_ID,
+        )
+        if marker is not None and marker.completed:
+            return BootstrapReport(
+                provider_id=self._source.provider_id,
+                status="already_complete",
+                calls=0,
+                response_bytes=0,
+                stations_written=0,
+                completed_tiles=0,
+                skipped_tiles=len(self._tiles),
+                remaining_tiles=0,
+            )
+        start_index = 0
+        if marker is not None and marker.cursor is not None:
+            try:
+                start_index = int(marker.cursor)
+            except ValueError as error:
+                raise ValueError("netatmo_world_cursor_invalid") from error
+        if not 0 <= start_index <= len(self._tiles):
+            raise ValueError("netatmo_world_cursor_invalid")
+        report = await StationCatalogBootstrap(
+            repository=self._repository,
+            source=self._source,
+            clock=self._clock,
+            minimum_call_interval_seconds=self._minimum_call_interval_seconds,
+            minimum_tile_degrees=self._minimum_tile_degrees,
+            sleep=self._sleep,
+        ).run(self._tiles[start_index:], budget=budget)
+        next_index = start_index
+        while next_index < len(self._tiles):
+            checkpoint = self._repository.load_checkpoint(
+                self._source.provider_id,
+                self._tiles[next_index].tile_id,
+            )
+            if checkpoint is None or not checkpoint.completed:
+                break
+            next_index += 1
+        complete = next_index == len(self._tiles)
+        cumulative_count = (
+            (marker.station_count if marker is not None else 0)
+            + report.stations_written
+        )
+        self._repository.save_checkpoint(DiscoveryCheckpoint(
+            provider_id=self._source.provider_id,
+            tile_id=self.COMPLETION_TILE_ID,
+            cursor=None if complete else str(next_index),
+            completed=complete,
+            station_count=cumulative_count,
+            updated_at=float(self._clock()),
+        ))
+        return BootstrapReport(
+            provider_id=report.provider_id,
+            status="complete" if complete else report.status,
+            calls=report.calls,
+            response_bytes=report.response_bytes,
+            stations_written=report.stations_written,
+            completed_tiles=report.completed_tiles,
+            skipped_tiles=report.skipped_tiles,
+            remaining_tiles=len(self._tiles) - next_index,
+        )
+
+
 __all__ = [
     "BootstrapBudget",
     "BootstrapReport",
@@ -449,10 +667,15 @@ __all__ = [
     "METAR_STATION_CACHE_URL",
     "NETATMO_PUBLIC_DATA_URL",
     "NetatmoTileSource",
+    "NetatmoWorldCatalogRunner",
+    "RetryableDiscoveryError",
     "SinglePageSource",
     "StationCatalogBootstrap",
+    "TileSubdivisionRequired",
     "geographic_tiles",
     "load_wunderground_seed_stations",
     "parse_metar_station_cache",
     "parse_netatmo_public_stations",
+    "subdivide_geographic_tile",
+    "world_netatmo_tiles",
 ]
