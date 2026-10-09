@@ -12,6 +12,7 @@ import xml.etree.ElementTree as ET
 from typing import Any, Mapping, Protocol
 
 from .thin_observation import (
+    MAX_GROUND_SOURCE_AGE_SECONDS,
     NormalizedObservation,
     ObservationKind,
     ObservationQuality,
@@ -357,6 +358,7 @@ def _decode_opera_targets(
     received_at: float,
 ) -> tuple[NormalizedObservation, ...]:
     import h5py
+    import numpy as np
     from pyproj import CRS, Transformer
 
     observations: list[NormalizedObservation] = []
@@ -385,9 +387,15 @@ def _decode_opera_targets(
             f"T{time_value[:2]}:{time_value[2:4]}:{time_value[4:6]}+00:00",
             fallback=received_at,
         )
+        projected_crs = CRS.from_user_input(str(projdef))
         transformer = Transformer.from_crs(
             CRS.from_epsg(4326),
-            CRS.from_user_input(str(projdef)),
+            projected_crs,
+            always_xy=True,
+        )
+        inverse_transformer = Transformer.from_crs(
+            projected_crs,
+            CRS.from_epsg(4326),
             always_xy=True,
         )
         for target in request.targets:
@@ -422,6 +430,160 @@ def _decode_opera_targets(
                 geometry=_point(target.longitude, target.latitude),
                 metadata={"quality_index": quality_index},
             ))
+
+        # Tracking needs echo geometry around the targets, not only a value at
+        # the target coordinate. Reduce the 1-km raster to 5-km blocks before
+        # component labelling; this bounds CPU/memory while preserving useful
+        # storm motion. Each regional component is emitted once with no target
+        # id, so it can feed the map/tracker without biasing target fusion.
+        spatial: dict[tuple[int, int], NormalizedObservation] = {}
+        block_size = max(1, int(round(5_000.0 / max(xscale, yscale))))
+        for target in request.targets:
+            center_x, center_y = transformer.transform(target.longitude, target.latitude)
+            center_column = math.floor(center_x / xscale)
+            center_row = math.floor(-center_y / yscale)
+            radius_columns = max(1, math.ceil(target.observation_radius_km * 1_000.0 / xscale))
+            radius_rows = max(1, math.ceil(target.observation_radius_km * 1_000.0 / yscale))
+            column0 = max(0, center_column - radius_columns)
+            column1 = min(radar.shape[1], center_column + radius_columns + 1)
+            row0 = max(0, center_row - radius_rows)
+            row1 = min(radar.shape[0], center_row + radius_rows + 1)
+            if column0 >= column1 or row0 >= row1:
+                continue
+
+            raw_slice = np.asarray(radar[row0:row1, column0:column1], dtype=float)
+            quality_slice = np.asarray(quality[row0:row1, column0:column1], dtype=float)
+            valid = (
+                np.isfinite(raw_slice)
+                & (raw_slice != nodata)
+                & (raw_slice != undetect)
+            )
+            dbz_slice = np.where(valid, raw_slice * gain + offset, -np.inf)
+            height, width = dbz_slice.shape
+            padded_height = math.ceil(height / block_size) * block_size
+            padded_width = math.ceil(width / block_size) * block_size
+            padded_dbz = np.full((padded_height, padded_width), -np.inf, dtype=float)
+            padded_quality = np.zeros((padded_height, padded_width), dtype=float)
+            padded_dbz[:height, :width] = dbz_slice
+            padded_quality[:height, :width] = np.where(valid, quality_slice, 0.0)
+            pooled_dbz = padded_dbz.reshape(
+                padded_height // block_size,
+                block_size,
+                padded_width // block_size,
+                block_size,
+            ).max(axis=(1, 3))
+            pooled_quality = padded_quality.reshape(
+                padded_height // block_size,
+                block_size,
+                padded_width // block_size,
+                block_size,
+            ).max(axis=(1, 3))
+            mask = pooled_dbz >= 8.0
+            visited = np.zeros(mask.shape, dtype=bool)
+            for seed_row, seed_column in np.argwhere(mask):
+                seed_row = int(seed_row)
+                seed_column = int(seed_column)
+                if visited[seed_row, seed_column]:
+                    continue
+                stack = [(seed_row, seed_column)]
+                visited[seed_row, seed_column] = True
+                component: list[tuple[int, int]] = []
+                while stack:
+                    component_row, component_column = stack.pop()
+                    component.append((component_row, component_column))
+                    for delta_row in (-1, 0, 1):
+                        for delta_column in (-1, 0, 1):
+                            if delta_row == delta_column == 0:
+                                continue
+                            neighbour_row = component_row + delta_row
+                            neighbour_column = component_column + delta_column
+                            if not (
+                                0 <= neighbour_row < mask.shape[0]
+                                and 0 <= neighbour_column < mask.shape[1]
+                                and mask[neighbour_row, neighbour_column]
+                                and not visited[neighbour_row, neighbour_column]
+                            ):
+                                continue
+                            visited[neighbour_row, neighbour_column] = True
+                            stack.append((neighbour_row, neighbour_column))
+
+                component_rows = [item[0] for item in component]
+                component_columns = [item[1] for item in component]
+                mean_row = sum(component_rows) / len(component_rows)
+                mean_column = sum(component_columns) / len(component_columns)
+                pixel_x = column0 + (mean_column + 0.5) * block_size
+                pixel_y = row0 + (mean_row + 0.5) * block_size
+                longitude, latitude = inverse_transformer.transform(
+                    pixel_x * xscale,
+                    -pixel_y * yscale,
+                )
+                minimum_column = column0 + min(component_columns) * block_size
+                maximum_column = min(
+                    radar.shape[1],
+                    column0 + (max(component_columns) + 1) * block_size,
+                )
+                minimum_row = row0 + min(component_rows) * block_size
+                maximum_row = min(
+                    radar.shape[0],
+                    row0 + (max(component_rows) + 1) * block_size,
+                )
+                corners = []
+                for pixel_column, pixel_row in (
+                    (minimum_column, minimum_row),
+                    (maximum_column, minimum_row),
+                    (maximum_column, maximum_row),
+                    (minimum_column, maximum_row),
+                    (minimum_column, minimum_row),
+                ):
+                    corner_lon, corner_lat = inverse_transformer.transform(
+                        pixel_column * xscale,
+                        -pixel_row * yscale,
+                    )
+                    corners.append([corner_lon, corner_lat])
+                maximum_dbz = max(
+                    float(pooled_dbz[item_row, item_column])
+                    for item_row, item_column in component
+                )
+                mean_quality = sum(
+                    float(pooled_quality[item_row, item_column])
+                    for item_row, item_column in component
+                ) / len(component)
+                deduplication_key = (round(latitude * 100), round(longitude * 100))
+                candidate = NormalizedObservation.create(
+                    provider_id=request.provider_id,
+                    product_id=request.product_id,
+                    target_id=None,
+                    kind=ObservationKind.REFLECTIVITY,
+                    value=maximum_dbz,
+                    unit="dBZ",
+                    observed_at=observed_at,
+                    received_at=received_at,
+                    latitude=latitude,
+                    longitude=longitude,
+                    quality=(
+                        ObservationQuality.GOOD
+                        if mean_quality >= 0.5
+                        else ObservationQuality.SUSPECT
+                    ),
+                    geometry={"type": "Polygon", "coordinates": [corners]},
+                    metadata={
+                        "quality_index": mean_quality,
+                        "spatial_cell": True,
+                        "block_count": len(component),
+                        "block_size_m": block_size * max(xscale, yscale),
+                    },
+                )
+                previous = spatial.get(deduplication_key)
+                if previous is None or candidate.value > previous.value:
+                    spatial[deduplication_key] = candidate
+
+        observations.extend(
+            sorted(
+                spatial.values(),
+                key=lambda item: item.value,
+                reverse=True,
+            )[:256]
+        )
     return tuple(observations)
 
 
@@ -473,7 +635,8 @@ class MetarAdapter:
         payload = await fetcher.get_json(
             self._endpoint,
             params={
-                "bbox": f"{west:.3f},{south:.3f},{east:.3f},{north:.3f}",
+                # Aviation Weather documents bbox as lat0,lon0,lat1,lon1.
+                "bbox": f"{south:.3f},{west:.3f},{north:.3f},{east:.3f}",
                 "format": "json",
                 "hours": "1",
             },
@@ -507,6 +670,7 @@ class MetarAdapter:
                     "quality": ObservationQuality.GOOD,
                     "geometry": _point(longitude, latitude),
                     "metadata": {"station_id": station_id},
+                    "maximum_age_seconds": MAX_GROUND_SOURCE_AGE_SECONDS,
                 }
                 temperature = _optional_float(station.get("temp"))
                 pressure = _optional_float(station.get("altim"))
@@ -587,6 +751,11 @@ class NetatmoAdapter:
 class BlitzortungAdapter:
     def __init__(self, *, maximum_events: int = 20_000) -> None:
         self._events: deque[tuple[float, float, float, float]] = deque(maxlen=maximum_events)
+        self._transport_connected = False
+
+    def set_transport_state(self, connected: bool) -> None:
+        """Expose the public MQTT transport state to provider health."""
+        self._transport_connected = bool(connected)
 
     def feed_message(self, raw: bytes, *, received_at: float) -> None:
         try:
@@ -607,6 +776,8 @@ class BlitzortungAdapter:
             self._events.append((observed_at, float(received_at), latitude, longitude))
 
     async def fetch(self, request, fetcher, *, now):
+        if not self._transport_connected:
+            raise ProviderBlocked("transport_unavailable")
         while self._events and now - self._events[0][0] > 15 * 60:
             self._events.popleft()
         observations: list[NormalizedObservation] = []

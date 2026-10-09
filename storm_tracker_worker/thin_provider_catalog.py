@@ -9,9 +9,6 @@ from typing import Mapping
 from .desired_state import DesiredState, Target
 
 
-MAX_POSITION_AGE_SECONDS = 15 * 60
-
-
 @dataclass(frozen=True, slots=True)
 class CoverageBox:
     south: float
@@ -83,11 +80,15 @@ PROVIDERS: tuple[ThinProviderSpec, ...] = (
 )
 
 
-def _target_is_current(target: Target, now: float) -> bool:
-    if not target.available or target.position_observed_at is None:
-        return False
-    age = now - target.position_observed_at
-    return -30.0 <= age <= MAX_POSITION_AGE_SECONDS
+def _target_is_usable(target: Target) -> bool:
+    """Keep valid available coordinates usable while a person is stationary.
+
+    Home Assistant trackers commonly retain an unchanged position timestamp for
+    hours or days.  That timestamp describes the last movement, not the expiry
+    of the coordinates, so provider acquisition must not be suppressed by it.
+    """
+
+    return target.available
 
 
 def build_due_requests(
@@ -104,10 +105,8 @@ def build_due_requests(
     if not math.isfinite(now_value) or now_value < 0.0:
         raise ValueError("now must be a finite non-negative timestamp")
 
-    current_targets = tuple(
-        target for target in state.targets if _target_is_current(target, now_value)
-    )
-    if not current_targets:
+    usable_targets = tuple(target for target in state.targets if _target_is_usable(target))
+    if not usable_targets:
         return ()
 
     requests: list[ThinProviderRequest] = []
@@ -121,7 +120,7 @@ def build_due_requests(
             if elapsed < spec.cadence_seconds:
                 continue
         targets = tuple(
-            target for target in current_targets if spec.applies_to(target)
+            target for target in usable_targets if spec.applies_to(target)
         )
         if not targets:
             continue
