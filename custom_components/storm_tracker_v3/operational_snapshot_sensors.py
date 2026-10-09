@@ -54,6 +54,7 @@ _UNDETECT_RADAR_OBSERVATION_REASON = (
     "certified_undetect_radar_sample_dry_claim_withheld"
 )
 _ZERO_RADAR_OBSERVATION_STATE = "geen_positieve_neerslag_waargenomen"
+WORKER_STATUS_UPDATE_EVENT = f"{DOMAIN}_worker_status_update"
 
 WORKER_ONLY_PROVIDER_IDS = (
     "ground.awn.authorized_devices",
@@ -449,7 +450,18 @@ class SnapshotOnlySensorEntity(SensorEntity):
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         self.async_on_remove(self._hub.attach(self))
+        if self._description.kind == _KIND_WORKER:
+            self.async_on_remove(self.hass.bus.async_listen(
+                WORKER_STATUS_UPDATE_EVENT,
+                self._handle_worker_status_update,
+            ))
         self._refresh_from_snapshot(write_state=False)
+
+    @callback
+    def _handle_worker_status_update(self, _event: Any) -> None:
+        """Refresh live worker diagnostics between snapshot publications."""
+
+        self._refresh_from_snapshot(write_state=True)
 
     def _project(self) -> SnapshotSensorView:
         description = self._description
