@@ -29,7 +29,11 @@ from .operational_fact_revision import (
     OperationalFactKind,
     validate_committed_operational_revision,
 )
-from .raw_artifacts import RawArtifactStore
+from .raw_artifacts import (
+    NATIVE_CAPTURE_STAGE,
+    NATIVE_REPRESENTATION,
+    RawArtifactStore,
+)
 from .tracking_core.operational_snapshot import (
     canonical_json_bytes,
     validate_snapshot,
@@ -38,6 +42,15 @@ from .tracking_core.operational_snapshot import (
 
 CONTRACT = "stv3-openmeteo-operational-guidance-v1"
 SOURCE_ID = "model.openmeteo.region"
+PUBLIC_CAPTURE_PRODUCT = "openmeteo_forecast_native_unverified_exact_capture"
+PUBLIC_RESPONSE_PRODUCT = "openmeteo_forecast_native_unverified_response_bytes"
+PUBLIC_RESPONSE_ROLE = "response_bytes"
+PUBLIC_RESPONSE_CONTENT_TYPE = "application/octet-stream"
+PUBLIC_COLLECTOR = "storm_tracker_public_source_exact_raw"
+PUBLIC_COLLECTOR_VERSION = "public-source-exact-raw-v1"
+PUBLIC_PROVENANCE_KIND = "openmeteo_unverified_response_v1"
+PUBLIC_ENDPOINT_HOST = "api.open-meteo.com"
+PUBLIC_ENDPOINT_PATH = "/v1/forecast"
 CURRENT_REASON = "openmeteo_model_current_precipitation"
 NO_CURRENT_REASON = "openmeteo_model_no_current_precipitation"
 THREAT_REASON = "openmeteo_model_precipitation_guidance"
@@ -53,6 +66,111 @@ _CERTIFICATE_SHA256 = hashlib.sha256(CONTRACT.encode("ascii")).hexdigest()
 
 class OpenMeteoOperationalGuidanceError(ValueError):
     """Retained model bytes cannot safely support operational guidance."""
+
+
+def _is_sha256(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _public_capture_payload(
+    *,
+    capture: Any,
+    receipts: Mapping[str, Any],
+    payloads: Mapping[str, bytes],
+    query_count: int,
+) -> tuple[Any, bytes]:
+    """Validate and unwrap the exact live public-source Open-Meteo capture."""
+
+    if (
+        capture.provider != "openmeteo"
+        or capture.product != PUBLIC_CAPTURE_PRODUCT
+        or capture.product_timestamp is not None
+        or set(receipts) != {PUBLIC_RESPONSE_ROLE}
+        or set(payloads) != {PUBLIC_RESPONSE_ROLE}
+    ):
+        raise OpenMeteoOperationalGuidanceError("public_capture_contract_invalid")
+    receipt = receipts[PUBLIC_RESPONSE_ROLE]
+    payload = payloads[PUBLIC_RESPONSE_ROLE]
+    if (
+        receipt.provider != "openmeteo"
+        or receipt.product != PUBLIC_RESPONSE_PRODUCT
+        or receipt.content_type != PUBLIC_RESPONSE_CONTENT_TYPE
+        or not receipt.fetch_id.endswith(":response_bytes")
+        or not capture.fetch_id.endswith(":capture")
+        or receipt.fetch_id.removesuffix(":response_bytes")
+        != capture.fetch_id.removesuffix(":capture")
+        or len(payload) != receipt.size_bytes
+        or hashlib.sha256(payload).hexdigest() != receipt.content_sha256
+    ):
+        raise OpenMeteoOperationalGuidanceError("public_response_contract_invalid")
+
+    provenance = receipt.provenance
+    fixed = {
+        "access_class": "public_anonymous_no_secret",
+        "capture_stage": NATIVE_CAPTURE_STAGE,
+        "collector": PUBLIC_COLLECTOR,
+        "collector_version": PUBLIC_COLLECTOR_VERSION,
+        "content_encoding": "identity",
+        "endpoint_host": PUBLIC_ENDPOINT_HOST,
+        "endpoint_path": PUBLIC_ENDPOINT_PATH,
+        "legal_advice": False,
+        "operational_admission": False,
+        "parse_attempted": False,
+        "provider_rights_claim": False,
+        "provenance_kind": PUBLIC_PROVENANCE_KIND,
+        "query_count": query_count,
+        "representation": NATIVE_REPRESENTATION,
+        "reported_media_type": "application/json",
+        "response_status": 200,
+        "retention_right_claim": False,
+        "semantic_status": "unverified",
+        "weather_state": "unknown",
+    }
+    if any(provenance.get(key) != value for key, value in fixed.items()):
+        raise OpenMeteoOperationalGuidanceError("public_response_provenance_invalid")
+    if any(
+        not _is_sha256(provenance.get(key))
+        for key in (
+            "final_url_sha256",
+            "request_sha256",
+            "response_headers_sha256",
+            "transport_sha256",
+        )
+    ):
+        raise OpenMeteoOperationalGuidanceError("public_response_provenance_invalid")
+    declared_length = provenance.get("declared_length")
+    if declared_length is not None and declared_length != receipt.size_bytes:
+        raise OpenMeteoOperationalGuidanceError("public_response_provenance_invalid")
+    transport = {
+        "content_sha256": receipt.content_sha256,
+        "declared_length": declared_length,
+        "final_url_sha256": provenance["final_url_sha256"],
+        "received_at": receipt.received_at,
+        "reported_media_type": provenance["reported_media_type"],
+        "request_sha256": provenance["request_sha256"],
+        "response_headers_sha256": provenance["response_headers_sha256"],
+        "size_bytes": receipt.size_bytes,
+        "status": provenance["response_status"],
+        "transport_contract": "stv3-public-source-https-transport-v1",
+    }
+    transport_sha256 = _sha(transport)
+    if transport_sha256 != provenance["transport_sha256"]:
+        raise OpenMeteoOperationalGuidanceError("public_response_transport_invalid")
+    expected_upstream = (
+        f"{PUBLIC_ENDPOINT_HOST}{PUBLIC_ENDPOINT_PATH}"
+        f"|request={provenance['request_sha256']}"
+        f"|transport={transport_sha256}|content={receipt.content_sha256}"
+    )
+    expected_capture_upstream = (
+        f"{PUBLIC_CAPTURE_PRODUCT}|request={provenance['request_sha256']}"
+        f"|transport={transport_sha256}|content={receipt.content_sha256}"
+    )
+    if (
+        receipt.upstream_id != expected_upstream
+        or capture.upstream_capture_id != expected_capture_upstream
+    ):
+        raise OpenMeteoOperationalGuidanceError("public_response_identity_invalid")
+    return receipt, payload
 
 
 def _finite(value: object, label: str, *, maximum: float) -> float:
@@ -154,22 +272,31 @@ def decode_openmeteo_guidance(
     if bundle is None:
         raise OpenMeteoOperationalGuidanceError("capture_receipt_unavailable")
     capture, receipts, payloads = bundle
-    if (
-        capture.provider != "openmeteo"
-        or capture.product != OPENMETEO_CAPTURE_PRODUCT
-        or set(receipts) != {"response_json"}
-        or set(payloads) != {"response_json"}
-    ):
-        raise OpenMeteoOperationalGuidanceError("capture_contract_invalid")
-    receipt = receipts["response_json"]
-    if (
-        receipt.provider != "openmeteo"
-        or receipt.product != OPENMETEO_RESPONSE_PRODUCT
-        or receipt.content_type != "application/json"
-    ):
-        raise OpenMeteoOperationalGuidanceError("response_receipt_invalid")
+    if capture.product == PUBLIC_CAPTURE_PRODUCT:
+        receipt, payload = _public_capture_payload(
+            capture=capture,
+            receipts=receipts,
+            payloads=payloads,
+            query_count=len(target_ids),
+        )
+    else:
+        if (
+            capture.provider != "openmeteo"
+            or capture.product != OPENMETEO_CAPTURE_PRODUCT
+            or set(receipts) != {"response_json"}
+            or set(payloads) != {"response_json"}
+        ):
+            raise OpenMeteoOperationalGuidanceError("capture_contract_invalid")
+        receipt = receipts["response_json"]
+        payload = payloads["response_json"]
+        if (
+            receipt.provider != "openmeteo"
+            or receipt.product != OPENMETEO_RESPONSE_PRODUCT
+            or receipt.content_type != "application/json"
+        ):
+            raise OpenMeteoOperationalGuidanceError("response_receipt_invalid")
     items = decode_verified_openmeteo_response(
-        payloads["response_json"],
+        payload,
         query_count=len(target_ids),
     )
     observations: list[OpenMeteoTargetGuidance] = []

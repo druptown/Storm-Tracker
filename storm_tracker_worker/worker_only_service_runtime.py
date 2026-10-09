@@ -155,6 +155,11 @@ _SAFE_FAILURE_REASON_CODES = frozenset({
     "worker_only_output_unavailable",
     "worker_only_snapshot_output_not_ready",
     "worker_only_status_invalid",
+    "public_capture_contract_invalid",
+    "public_response_contract_invalid",
+    "public_response_identity_invalid",
+    "public_response_provenance_invalid",
+    "public_response_transport_invalid",
 }) | frozenset(
     f"existing_raw_capture_fetch_suffix_drift_"
     f"{source.source_id.replace('.', '_')}_{shape}"
@@ -1408,14 +1413,17 @@ class WorkerOnlyServiceRuntime:
             }
             self._model_guidance_errors.pop(OPENMETEO_SOURCE_ID, None)
             self._increment("model_guidance_successes")
-        except Exception:
+        except Exception as error:
             self._model_guidance.clear()
             self._model_guidance_errors[OPENMETEO_SOURCE_ID] = (
                 "model_guidance_decode_failed"
             )
             self._increment("model_guidance_failures")
             _LOGGER.error(
-                "Worker-only Open-Meteo guidance decode fail-closed"
+                "Worker-only Open-Meteo guidance decode fail-closed: "
+                "class=%s reason=%s",
+                type(error).__name__,
+                _safe_failure_reason(error),
             )
 
     async def _refresh_model_guidance_for_desired(self, desired) -> None:
