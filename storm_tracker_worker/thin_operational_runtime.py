@@ -838,9 +838,31 @@ class ThinOperationalRuntime:
                 ),
             )
             try:
-                self._radar_tracker.advance(field, scope)
-            except (ValueError, RuntimeError):
+                transition = self._radar_tracker.advance(field, scope)
+            except (ValueError, RuntimeError) as error:
+                _LOGGER.warning(
+                    "Radartracking geweigerd: provider=%s regio=%s "
+                    "observed_at=%s raster=%sx%s fout=%s",
+                    getattr(field, "provider_id", "unknown"),
+                    region.region_id,
+                    getattr(field, "observed_at", "unknown"),
+                    getattr(field, "width", "unknown"),
+                    getattr(field, "height", "unknown"),
+                    error,
+                )
                 return
+            if transition is not None and transition.status != "advanced":
+                _LOGGER.warning(
+                    "Radartracking venster geweigerd: provider=%s regio=%s "
+                    "observed_at=%s detecties=%d kandidaatverbindingen=%d "
+                    "redenen=%s",
+                    getattr(field, "provider_id", "unknown"),
+                    region.region_id,
+                    getattr(field, "observed_at", "unknown"),
+                    len(transition.detection_frame.detections),
+                    transition.candidate_edge_count,
+                    ",".join(transition.reason_codes),
+                )
             for item in self._radar_tracker.tracks(field, scope.target_id):
                 speed = math.hypot(
                     item.velocity_east_kmh, item.velocity_north_kmh,
