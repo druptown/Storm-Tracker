@@ -1,0 +1,345 @@
+"""Direct MQTT shell for the thin operational runtime."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import signal
+import time
+from typing import Any
+
+from .protocol import decode, encode, envelope, job_payload, topic
+from .thin_operational_runtime import ThinOperationalRuntime
+from .thin_postgis import ThinPostGISSettings, ThinPostGISWriter
+from .thin_provider_adapters import (
+    AioHttpFetcher,
+    DwdRadolanAdapter,
+    KmiRadarAdapter,
+    KnmiRadarAdapter,
+    MetarAdapter,
+    NetatmoAdapter,
+    OpenMeteoAdapter,
+    OperaRadarAdapter,
+)
+from .thin_provider_runtime import ThinProviderRuntime
+from .tracking_core.operational_snapshot import encode_control_envelope
+
+
+_LOGGER = logging.getLogger(__name__)
+WORKER_VERSION = "1.18.0"
+
+
+class ThinMqttService:
+    def __init__(
+        self,
+        *,
+        client: Any,
+        runtime: ThinOperationalRuntime,
+        topic_root: str = "storm_tracker/v1",
+        heartbeat_seconds: float = 10.0,
+        cycle_seconds: float = 60.0,
+    ) -> None:
+        self.client = client
+        self.runtime = runtime
+        self.topic_root = topic_root.rstrip("/")
+        self.heartbeat_seconds = max(2.0, float(heartbeat_seconds))
+        self.cycle_seconds = max(2.0, float(cycle_seconds))
+        self._wake = asyncio.Event()
+        self._stop = asyncio.Event()
+        self._tasks: list[asyncio.Task] = []
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._job_results: dict[str, dict[str, Any]] = {}
+        self._last_snapshot_revision = 0
+        self._last_error: str | None = None
+        self._last_cycle_summary: tuple[Any, ...] | None = None
+
+    def _heartbeat(self, state: str = "online") -> bytes:
+        return encode(envelope(
+            "worker_status",
+            state=state,
+            worker_version=WORKER_VERSION,
+            runtime_mode="thin_operational",
+            job_admission_open=state != "offline",
+            queue_depth=0,
+            failed_jobs=0 if self._last_error is None else 1,
+            compute_profile=os.getenv("STV3_COMPUTE_PROFILE", "dedicated_nas_fast"),
+            cpu_limit_percent=int(os.getenv("STV3_CPU_LIMIT_PERCENT", "200")),
+            worker_nice=int(os.getenv("STV3_WORKER_NICE", "0")),
+            cpu_threads=2,
+            provider_cycle_seconds=self.cycle_seconds,
+            operational_snapshot_runtime={
+                "snapshot_revision": self._last_snapshot_revision,
+                "snapshot_transport_state": "current" if self._last_snapshot_revision else "waiting",
+            },
+        ))
+
+    async def start(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        self.client.on_message = self._on_message
+        self.client.on_connect = self._on_connect
+        self.client.will_set(
+            topic(self.topic_root, "worker/status"),
+            self._heartbeat("offline"),
+            qos=1,
+            retain=True,
+        )
+        if hasattr(self.client, "connect_async"):
+            self.client.connect_async(
+                os.getenv("STV3_MQTT_HOST", "core-mosquitto"),
+                int(os.getenv("STV3_MQTT_PORT", "1883")),
+                keepalive=60,
+            )
+        self.client.loop_start()
+        self.client.publish(
+            topic(self.topic_root, "worker/status"),
+            self._heartbeat("online"),
+            qos=1,
+            retain=True,
+        )
+        self.client.subscribe(topic(self.topic_root, "jobs/request"), qos=1)
+        self._tasks = [
+            asyncio.create_task(self._heartbeat_loop(), name="thin-heartbeat"),
+            asyncio.create_task(self._cycle_loop(), name="thin-cycle"),
+        ]
+        if self.runtime.has_state:
+            self._wake.set()
+
+    def _on_connect(
+        self,
+        client: Any,
+        userdata: Any,
+        flags: Any,
+        reason_code: Any,
+        properties: Any = None,
+    ) -> None:
+        try:
+            successful = int(reason_code) == 0
+        except (TypeError, ValueError):
+            successful = str(reason_code).lower() in {"0", "success"}
+        if successful:
+            client.subscribe(topic(self.topic_root, "jobs/request"), qos=1)
+
+    async def stop(self) -> None:
+        self._stop.set()
+        self._wake.set()
+        for task in self._tasks:
+            task.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        self.client.publish(
+            topic(self.topic_root, "worker/status"),
+            self._heartbeat("offline"),
+            qos=1,
+            retain=True,
+        )
+        self.client.loop_stop()
+        self.client.disconnect()
+
+    async def _heartbeat_loop(self) -> None:
+        while not self._stop.is_set():
+            await asyncio.sleep(self.heartbeat_seconds)
+            if self._stop.is_set():
+                break
+            self.client.publish(
+                topic(self.topic_root, "worker/status"),
+                self._heartbeat("degraded" if self._last_error else "online"),
+                qos=1,
+                retain=True,
+            )
+
+    async def _cycle_loop(self) -> None:
+        while not self._stop.is_set():
+            if not self.runtime.has_state:
+                self._wake.clear()
+                await self._wake.wait()
+                continue
+            self._wake.clear()
+            try:
+                result = await self.runtime.run_cycle()
+                payload = encode_control_envelope(result.snapshot)
+                self._last_snapshot_revision = int(result.snapshot["revision"])
+                self._last_error = None
+                provider_items = result.snapshot.get("providers", {}).get("items", [])
+                provider_summary = tuple(
+                    sorted(
+                        (
+                            str(item.get("provider_id")),
+                            str(item.get("state")),
+                            ",".join(str(code) for code in item.get("reason_codes", [])),
+                        )
+                        for item in provider_items
+                        if isinstance(item, dict)
+                    )
+                )
+                cycle_summary = (
+                    len(result.fusion.observations),
+                    provider_summary,
+                    result.postgis.status,
+                    result.postgis.last_error_code,
+                )
+                if cycle_summary != self._last_cycle_summary:
+                    _LOGGER.info(
+                        "Dunne cyclus: observaties=%d providers=%s postgis=%s fout=%s",
+                        cycle_summary[0],
+                        provider_summary,
+                        result.postgis.status,
+                        result.postgis.last_error_code,
+                    )
+                    self._last_cycle_summary = cycle_summary
+                self.client.publish(
+                    topic(self.topic_root, "operational/snapshot"),
+                    payload,
+                    qos=1,
+                    retain=True,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self._last_error = type(error).__name__
+                _LOGGER.exception("Dunne operationele cyclus mislukt")
+            try:
+                await asyncio.wait_for(self._wake.wait(), timeout=self.cycle_seconds)
+            except TimeoutError:
+                pass
+
+    def _on_message(self, client: Any, userdata: Any, message: Any) -> None:
+        if self._loop is None:
+            return
+        payload = bytes(message.payload)
+        incoming_topic = str(message.topic)
+        self._loop.call_soon_threadsafe(
+            lambda: asyncio.create_task(self.handle_message(incoming_topic, payload))
+        )
+
+    async def handle_message(self, incoming_topic: str, payload: bytes | str) -> None:
+        if incoming_topic != topic(self.topic_root, "jobs/request"):
+            return
+        request: dict[str, Any] | None = None
+        try:
+            request = decode(payload)
+            if request.get("message_type") != "job_request":
+                raise ValueError("invalid_message_type")
+            job_id = str(request["job_id"])
+            job_type = str(request["job_type"])
+            if float(request["deadline"]) <= time.time():
+                raise TimeoutError("deadline_exceeded")
+            cached = self._job_results.get(job_id)
+            if cached is not None:
+                self._publish_job_status(cached)
+                return
+            values = job_payload(request)
+            if job_type == "desired_state_claim":
+                result = self.runtime.claim_authority(
+                    str(values["producer_id"]), str(values["claim_id"])
+                )
+            elif job_type == "desired_state_snapshot":
+                result = self.runtime.desired_state_snapshot()
+            elif job_type == "desired_state_apply":
+                result = self.runtime.apply_desired_state(values["desired_state"])
+                self._wake.set()
+            elif job_type == "ping":
+                result = {"pong": True}
+            else:
+                raise ValueError("unknown_job_type")
+            status = envelope(
+                "job_status",
+                worker_id="thin-operational",
+                job_id=job_id,
+                job_type=job_type,
+                state="completed",
+                result=result,
+            )
+        except Exception as error:
+            job_id = str(request.get("job_id", "invalid")) if request else "invalid"
+            job_type = str(request.get("job_type", "invalid")) if request else "invalid"
+            status = envelope(
+                "job_status",
+                worker_id="thin-operational",
+                job_id=job_id,
+                job_type=job_type,
+                state="failed",
+                error=type(error).__name__,
+            )
+        self._job_results[job_id] = status
+        if len(self._job_results) > 256:
+            self._job_results.pop(next(iter(self._job_results)))
+        self._publish_job_status(status)
+
+    def _publish_job_status(self, status: dict[str, Any]) -> None:
+        self.client.publish(
+            topic(self.topic_root, f"jobs/{status['job_id']}/status"),
+            encode(status),
+            qos=1,
+            retain=False,
+        )
+
+
+def _build_runtime() -> ThinOperationalRuntime:
+    adapters = {
+        "kmi_radar": KmiRadarAdapter(
+            forecast_url=os.getenv("STV3_KMI_FORECAST_URL") or None,
+            access_enabled=bool(os.getenv("STV3_KMI_FORECAST_URL")),
+        ),
+        "opera_radar": OperaRadarAdapter(),
+        "knmi_radar": KnmiRadarAdapter(),
+        "dwd_radolan": DwdRadolanAdapter(),
+        "open_meteo": OpenMeteoAdapter(),
+        "metar": MetarAdapter(),
+        "netatmo": NetatmoAdapter(),
+    }
+    provider_runtime = ThinProviderRuntime(
+        adapters=adapters,
+        fetcher=AioHttpFetcher(),
+        max_parallel=8,
+        timeout_seconds=45.0,
+        retries=1,
+    )
+    settings = ThinPostGISSettings.from_environment()
+    writer = ThinPostGISWriter(settings) if settings is not None else None
+    return ThinOperationalRuntime(
+        provider_runtime=provider_runtime,
+        postgis_writer=writer,
+    )
+
+
+async def _async_main() -> None:
+    import paho.mqtt.client as mqtt
+
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
+    username = os.getenv("STV3_MQTT_USERNAME", "")
+    if username:
+        client.username_pw_set(username, os.getenv("STV3_MQTT_PASSWORD", ""))
+    if os.getenv("STV3_MQTT_TLS", "false").lower() in {"1", "true", "yes", "on"}:
+        client.tls_set()
+    service = ThinMqttService(
+        client=client,
+        runtime=_build_runtime(),
+        heartbeat_seconds=float(os.getenv("STV3_HEARTBEAT_SECONDS", "10")),
+        cycle_seconds=float(os.getenv("STV3_PROVIDER_CYCLE_SECONDS", "60")),
+    )
+    await service.start()
+    stopped = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(signum, stopped.set)
+        except NotImplementedError:
+            pass
+    await stopped.wait()
+    await service.stop()
+
+
+def main() -> None:
+    logging.basicConfig(
+        level=getattr(logging, os.getenv("STV3_LOG_LEVEL", "INFO").upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    asyncio.run(_async_main())
+
+
+if __name__ == "__main__":
+    main()
+
+
+__all__ = ["ThinMqttService", "main"]

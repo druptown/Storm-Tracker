@@ -1,0 +1,409 @@
+"""Direct PostGIS persistence for normalized observations and nowcasts."""
+
+from __future__ import annotations
+
+import asyncio
+from collections import deque
+from dataclasses import dataclass, field
+import hashlib
+import json
+import os
+from types import MappingProxyType
+from typing import Any, Callable, Mapping
+
+from .thin_fusion import FusionCycle
+from .thin_nowcast import ThinNowcast
+
+
+MAX_RETRY_CYCLES = 8
+
+
+@dataclass(frozen=True, slots=True)
+class ThinPostGISSettings:
+    host: str
+    port: int
+    database: str
+    user: str
+    password: str = field(repr=False)
+    sslmode: str = "disable"
+    connect_timeout: int = 3
+
+    @classmethod
+    def from_environment(
+        cls,
+        environment: Mapping[str, str] | None = None,
+    ) -> "ThinPostGISSettings | None":
+        values = os.environ if environment is None else environment
+        if str(values.get("STV3_POSTGIS_ENABLED", "false")).lower() not in {
+            "1", "true", "yes", "on"
+        }:
+            return None
+        host = str(values.get("STV3_POSTGIS_HOST", "")).strip()
+        database = str(values.get("STV3_POSTGIS_DATABASE", "")).strip()
+        user = str(values.get("STV3_POSTGIS_USER", "")).strip()
+        password = str(values.get("STV3_POSTGIS_PASSWORD", ""))
+        if not all((host, database, user, password)):
+            raise ValueError("postgis_config_incomplete")
+        return cls(
+            host=host,
+            port=int(values.get("STV3_POSTGIS_PORT", "5432")),
+            database=database,
+            user=user,
+            password=password,
+            sslmode=str(values.get("STV3_POSTGIS_SSLMODE", "disable")),
+            connect_timeout=int(values.get("STV3_POSTGIS_CONNECT_TIMEOUT", "3")),
+        )
+
+    def connect_kwargs(self) -> dict[str, Any]:
+        return {
+            "host": self.host,
+            "port": self.port,
+            "dbname": self.database,
+            "user": self.user,
+            "password": self.password,
+            "sslmode": self.sslmode,
+            "connect_timeout": self.connect_timeout,
+            "application_name": "storm_tracker_thin_runtime",
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PostGISWriteResult:
+    status: str
+    last_error_code: str | None
+    written_rows: Mapping[str, int]
+    queued_cycles: int
+    dropped_cycles: int
+
+
+_SCHEMA_STATEMENTS = (
+    "CREATE EXTENSION IF NOT EXISTS postgis",
+    """
+    CREATE TABLE IF NOT EXISTS stv3_observation(
+        observation_key text PRIMARY KEY,
+        provider_id text NOT NULL,
+        product_id text NOT NULL,
+        target_id text,
+        kind text NOT NULL,
+        value double precision NOT NULL,
+        unit text NOT NULL,
+        observed_at timestamptz NOT NULL,
+        received_at timestamptz NOT NULL,
+        quality text NOT NULL,
+        metadata jsonb NOT NULL,
+        geometry geometry(Geometry,4326) NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS stv3_fusion_cycle(
+        cycle_key text PRIMARY KEY,
+        evaluated_at timestamptz NOT NULL,
+        targets jsonb NOT NULL,
+        providers jsonb NOT NULL,
+        rejected jsonb NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS stv3_storm_cell(
+        cell_id text NOT NULL,
+        observed_at timestamptz NOT NULL,
+        provider_id text NOT NULL,
+        precipitation_rate_mm_h double precision,
+        reflectivity_dbz double precision,
+        radar_level double precision,
+        geometry geometry(Geometry,4326) NOT NULL,
+        PRIMARY KEY(cell_id,observed_at)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS stv3_track_point(
+        cell_id text NOT NULL,
+        observed_at timestamptz NOT NULL,
+        velocity_east_kmh double precision NOT NULL,
+        velocity_north_kmh double precision NOT NULL,
+        speed_kmh double precision NOT NULL,
+        heading_deg double precision,
+        position geometry(Point,4326) NOT NULL,
+        PRIMARY KEY(cell_id,observed_at)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS stv3_target_forecast(
+        target_id text NOT NULL,
+        evaluated_at timestamptz NOT NULL,
+        current_state text NOT NULL,
+        forecast_state text NOT NULL,
+        precipitation_rate_mm_h double precision,
+        eta_minutes double precision,
+        confidence double precision NOT NULL,
+        reason_code text NOT NULL,
+        contributors jsonb NOT NULL,
+        PRIMARY KEY(target_id,evaluated_at)
+    )
+    """,
+)
+
+_INSERT_OBSERVATION = """
+INSERT INTO stv3_observation(
+    observation_key,provider_id,product_id,target_id,kind,value,unit,
+    observed_at,received_at,quality,metadata,geometry
+) VALUES(
+    %s,%s,%s,%s,%s,%s,%s,
+    to_timestamp(%s),to_timestamp(%s),%s,%s::jsonb,
+    ST_SetSRID(ST_GeomFromGeoJSON(%s),4326)
+)
+ON CONFLICT(observation_key) DO UPDATE SET
+    value=EXCLUDED.value, quality=EXCLUDED.quality,
+    metadata=EXCLUDED.metadata, geometry=EXCLUDED.geometry,
+    updated_at=clock_timestamp()
+"""
+
+_INSERT_FUSION = """
+INSERT INTO stv3_fusion_cycle(
+    cycle_key,evaluated_at,targets,providers,rejected
+) VALUES(%s,to_timestamp(%s),%s::jsonb,%s::jsonb,%s::jsonb)
+ON CONFLICT(cycle_key) DO UPDATE SET
+    targets=EXCLUDED.targets,providers=EXCLUDED.providers,
+    rejected=EXCLUDED.rejected,updated_at=clock_timestamp()
+"""
+
+_INSERT_CELL = """
+INSERT INTO stv3_storm_cell(
+    cell_id,observed_at,provider_id,precipitation_rate_mm_h,
+    reflectivity_dbz,radar_level,geometry
+) VALUES(%s,to_timestamp(%s),%s,%s,%s,%s,
+    ST_SetSRID(ST_GeomFromGeoJSON(%s),4326))
+ON CONFLICT(cell_id,observed_at) DO UPDATE SET
+    precipitation_rate_mm_h=EXCLUDED.precipitation_rate_mm_h,
+    reflectivity_dbz=EXCLUDED.reflectivity_dbz,
+    radar_level=EXCLUDED.radar_level,geometry=EXCLUDED.geometry
+"""
+
+_INSERT_TRACK = """
+INSERT INTO stv3_track_point(
+    cell_id,observed_at,velocity_east_kmh,velocity_north_kmh,
+    speed_kmh,heading_deg,position
+) VALUES(%s,to_timestamp(%s),%s,%s,%s,%s,
+    ST_SetSRID(ST_GeomFromGeoJSON(%s),4326))
+ON CONFLICT(cell_id,observed_at) DO UPDATE SET
+    velocity_east_kmh=EXCLUDED.velocity_east_kmh,
+    velocity_north_kmh=EXCLUDED.velocity_north_kmh,
+    speed_kmh=EXCLUDED.speed_kmh,heading_deg=EXCLUDED.heading_deg,
+    position=EXCLUDED.position
+"""
+
+_INSERT_FORECAST = """
+INSERT INTO stv3_target_forecast(
+    target_id,evaluated_at,current_state,forecast_state,
+    precipitation_rate_mm_h,eta_minutes,confidence,reason_code,contributors
+) VALUES(%s,to_timestamp(%s),%s,%s,%s,%s,%s,%s,%s::jsonb)
+ON CONFLICT(target_id,evaluated_at) DO UPDATE SET
+    current_state=EXCLUDED.current_state,
+    forecast_state=EXCLUDED.forecast_state,
+    precipitation_rate_mm_h=EXCLUDED.precipitation_rate_mm_h,
+    eta_minutes=EXCLUDED.eta_minutes,confidence=EXCLUDED.confidence,
+    reason_code=EXCLUDED.reason_code,contributors=EXCLUDED.contributors
+"""
+
+
+def _json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _sha(value: Any) -> str:
+    return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+
+
+class ThinPostGISWriter:
+    def __init__(
+        self,
+        settings: ThinPostGISSettings,
+        *,
+        connect_factory: Callable[..., Any] | None = None,
+    ) -> None:
+        self._settings = settings
+        self._connect_factory = connect_factory
+        self._queue: deque[tuple[FusionCycle, ThinNowcast]] = deque()
+        self._lock = asyncio.Lock()
+        self._dropped_cycles = 0
+        self._last_error_code: str | None = None
+        self._last_written_rows: dict[str, int] = {}
+
+    def _connect(self):
+        factory = self._connect_factory
+        if factory is None:
+            import psycopg
+            factory = psycopg.connect
+        return factory(**self._settings.connect_kwargs())
+
+    def _write_batch(
+        self,
+        batch: tuple[tuple[FusionCycle, ThinNowcast], ...],
+    ) -> dict[str, int]:
+        connection = self._connect()
+        counts = {
+            "observations": 0,
+            "fusion_cycles": 0,
+            "storm_cells": 0,
+            "track_points": 0,
+            "target_forecasts": 0,
+        }
+        try:
+            with connection.cursor() as cursor:
+                for statement in _SCHEMA_STATEMENTS:
+                    cursor.execute(statement)
+                for cycle, nowcast in batch:
+                    for observation in cycle.observations:
+                        payload = observation.as_dict()
+                        geometry = payload["geometry"] or {
+                            "type": "Point",
+                            "coordinates": [observation.longitude, observation.latitude],
+                        }
+                        identity = {
+                            "provider_id": observation.provider_id,
+                            "product_id": observation.product_id,
+                            "target_id": observation.target_id,
+                            "kind": observation.kind.value,
+                            "observed_at": observation.observed_at,
+                            "latitude": observation.latitude,
+                            "longitude": observation.longitude,
+                        }
+                        cursor.execute(_INSERT_OBSERVATION, (
+                            _sha(identity),
+                            observation.provider_id,
+                            observation.product_id,
+                            observation.target_id,
+                            observation.kind.value,
+                            observation.value,
+                            observation.unit,
+                            observation.observed_at,
+                            observation.received_at,
+                            observation.quality.value,
+                            _json(payload["metadata"]),
+                            _json(geometry),
+                        ))
+                        counts["observations"] += 1
+
+                    targets = {
+                        key: value.as_dict() for key, value in cycle.targets.items()
+                    }
+                    providers = {
+                        key: {
+                            "ready": value.ready,
+                            "status": value.status,
+                            "reason_code": value.reason_code,
+                            "observation_count": len(value.observations),
+                        }
+                        for key, value in cycle.providers.items()
+                    }
+                    cycle_key = _sha({
+                        "evaluated_at": cycle.evaluated_at,
+                        "targets": sorted(cycle.targets),
+                    })
+                    cursor.execute(_INSERT_FUSION, (
+                        cycle_key,
+                        cycle.evaluated_at,
+                        _json(targets),
+                        _json(providers),
+                        _json(dict(cycle.rejected)),
+                    ))
+                    counts["fusion_cycles"] += 1
+
+                    for cell in nowcast.storm_cells:
+                        cell_payload = cell.as_dict()
+                        geometry_json = _json(cell_payload["geometry"])
+                        cursor.execute(_INSERT_CELL, (
+                            cell.cell_id,
+                            cell.observed_at,
+                            cell.provider_id,
+                            cell.precipitation_rate_mm_h,
+                            cell.reflectivity_dbz,
+                            cell.radar_level,
+                            geometry_json,
+                        ))
+                        counts["storm_cells"] += 1
+                        cursor.execute(_INSERT_TRACK, (
+                            cell.cell_id,
+                            cell.observed_at,
+                            cell.velocity_east_kmh,
+                            cell.velocity_north_kmh,
+                            cell.speed_kmh,
+                            cell.heading_deg,
+                            _json({
+                                "type": "Point",
+                                "coordinates": [cell.longitude, cell.latitude],
+                            }),
+                        ))
+                        counts["track_points"] += 1
+
+                    for target_id, forecast in nowcast.target_results.items():
+                        cursor.execute(_INSERT_FORECAST, (
+                            target_id,
+                            nowcast.evaluated_at,
+                            forecast.current_state,
+                            forecast.forecast_state,
+                            forecast.precipitation_rate_mm_h,
+                            forecast.eta_minutes,
+                            forecast.confidence,
+                            forecast.reason_code,
+                            _json(list(forecast.contributors)),
+                        ))
+                        counts["target_forecasts"] += 1
+            connection.commit()
+            return counts
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    async def write_cycle(
+        self,
+        cycle: FusionCycle,
+        nowcast: ThinNowcast,
+    ) -> PostGISWriteResult:
+        async with self._lock:
+            if len(self._queue) >= MAX_RETRY_CYCLES:
+                self._queue.popleft()
+                self._dropped_cycles += 1
+            self._queue.append((cycle, nowcast))
+            batch = tuple(self._queue)
+            try:
+                counts = await asyncio.to_thread(self._write_batch, batch)
+            except Exception:
+                self._last_error_code = "postgis_unavailable"
+                return PostGISWriteResult(
+                    status="degraded",
+                    last_error_code=self._last_error_code,
+                    written_rows=MappingProxyType({}),
+                    queued_cycles=len(self._queue),
+                    dropped_cycles=self._dropped_cycles,
+                )
+            self._queue.clear()
+            self._last_error_code = None
+            self._last_written_rows = counts
+            return PostGISWriteResult(
+                status="current",
+                last_error_code=None,
+                written_rows=MappingProxyType(dict(counts)),
+                queued_cycles=0,
+                dropped_cycles=self._dropped_cycles,
+            )
+
+    def diagnostics(self) -> dict[str, Any]:
+        return {
+            "status": "degraded" if self._last_error_code else "current",
+            "last_error_code": self._last_error_code,
+            "queued_cycles": len(self._queue),
+            "dropped_cycles": self._dropped_cycles,
+            "last_written_rows": dict(self._last_written_rows),
+        }
+
+__all__ = [
+    "MAX_RETRY_CYCLES",
+    "PostGISWriteResult",
+    "ThinPostGISSettings",
+    "ThinPostGISWriter",
+]

@@ -360,6 +360,18 @@ case "${STV3_RUNTIME_MODE}" in
     # none of these values enters MQTT, a job payload or a diagnostic.
     unset STV3_JOB_RECEIPT_DB
     ;;
+  thin_operational)
+    if [[ -n "${STV3_WORKER_FIRST_CONFIG_PATH}" ||
+      -n "${STV3_WORKER_FIRST_CONFIG_SHA256}" ||
+      -n "${STV3_WORKER_FIRST_AUTHORITY_SHA256}" ]]; then
+      bashio::log.fatal "Ongeldige worker-runtimeconfiguratie"
+      exit 1
+    fi
+    unset STV3_WORKER_FIRST_CONFIG_PATH
+    unset STV3_WORKER_FIRST_CONFIG_SHA256
+    unset STV3_WORKER_FIRST_AUTHORITY_SHA256
+    unset STV3_JOB_RECEIPT_DB
+    ;;
   *)
     bashio::log.fatal "Ongeldige worker-runtimeconfiguratie"
     exit 1
@@ -387,9 +399,19 @@ fi
 bashio::log.info \
   "Worker-CPU-set ${STV3_WORKER_CPU_SET}; minstens een fysieke core blijft vrij voor HA/Z2M"
 
-exec nice -n "${STV3_WORKER_NICE}" \
-  taskset --cpu-list "${STV3_WORKER_CPU_SET}" \
-  /opt/storm-tracker/bin/python \
-  -m storm_tracker_worker.cpu_limited_launcher \
-  --limit "${STV3_CPU_LIMIT_PERCENT}" \
-  -- /opt/storm-tracker/bin/python -m storm_tracker_worker.service
+if [[ "${STV3_RUNTIME_MODE}" == "thin_operational" ]]; then
+  exec nice -n "${STV3_WORKER_NICE}" \
+    taskset --cpu-list "${STV3_WORKER_CPU_SET}" \
+    /opt/storm-tracker/bin/python \
+    -m storm_tracker_worker.cpu_limited_launcher \
+    --limit "${STV3_CPU_LIMIT_PERCENT}" \
+    -- /opt/storm-tracker/bin/python \
+    -m storm_tracker_worker.thin_mqtt_service
+else
+  exec nice -n "${STV3_WORKER_NICE}" \
+    taskset --cpu-list "${STV3_WORKER_CPU_SET}" \
+    /opt/storm-tracker/bin/python \
+    -m storm_tracker_worker.cpu_limited_launcher \
+    --limit "${STV3_CPU_LIMIT_PERCENT}" \
+    -- /opt/storm-tracker/bin/python -m storm_tracker_worker.service
+fi
