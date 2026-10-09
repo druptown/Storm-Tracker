@@ -26,7 +26,14 @@ from .thin_satellite_adapters import (
     NoaaErrAdapter,
 )
 from .thin_ground_station_runtime import GroundStationRuntime
-from .thin_postgis import ThinPostGISSettings, ThinPostGISWriter
+from .thin_postgis import (
+    PASSAGE_ALGORITHM_VERSION,
+    PASSAGE_POLICY_VERSION,
+    ThinPostGISSettings,
+    ThinPostGISWriter,
+    _forecast_issue_id,
+    _passage_id,
+)
 from .thin_provider_adapters import (
     AemetRadarAdapter,
     AioHttpFetcher,
@@ -58,6 +65,97 @@ from .tracking_core.operational_snapshot import encode_control_envelope
 
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _passage_bracket(lower_at: Any, upper_at: Any) -> dict[str, float] | None:
+    if lower_at is None or upper_at is None:
+        return None
+    return {"lower_at": float(lower_at), "upper_at": float(upper_at)}
+
+
+def _build_passages_contract(nowcast: Any) -> dict[str, Any]:
+    """Build the bounded, lossless passage result contract."""
+
+    passages = tuple(nowcast.target_passages[:256])
+    fingerprints_by_target: dict[str, tuple[str, ...]] = {}
+    for target_id in {str(item.target_id) for item in passages}:
+        fingerprints_by_target[target_id] = tuple(sorted({
+            str(item.field_fingerprint)
+            for item in passages
+            if str(item.target_id) == target_id
+            and item.field_fingerprint is not None
+        }))
+    items: list[dict[str, Any]] = []
+    for passage in passages:
+        target_id = str(passage.target_id)
+        calculated_issue_id = _forecast_issue_id(
+            target_id=target_id,
+            issued_at=float(nowcast.evaluated_at),
+            algorithm_version=PASSAGE_ALGORITHM_VERSION,
+            policy_version=PASSAGE_POLICY_VERSION,
+            region_revision_id=None,
+            input_fingerprints=fingerprints_by_target[target_id],
+        )
+        issue_id = getattr(passage, "forecast_issue_id", None) or calculated_issue_id
+        system_id = str(passage.passage_system_id or passage.cell_id)
+        entry_bracket = _passage_bracket(
+            passage.entry_bracket_lower_at,
+            passage.entry_bracket_upper_at,
+        )
+        exit_bracket = _passage_bracket(
+            passage.exit_bracket_lower_at,
+            passage.exit_bracket_upper_at,
+        )
+        scenario_outcome = (
+            "horizon_censored" if passage.right_censored
+            else "coverage_censored" if passage.coverage_censored
+            else "hit"
+        )
+        items.append({
+            "forecast_issue_id": issue_id,
+            "passage_id": getattr(passage, "passage_id", None) or _passage_id(
+                issue_id, system_id, passage.interval_ordinal,
+            ),
+            "target_id": target_id,
+            "passage_system_id": system_id,
+            "cell_id": str(passage.cell_id),
+            "provider_id": str(passage.provider_id),
+            "interval_ordinal": int(passage.interval_ordinal),
+            "status": str(passage.passage_status),
+            "entry_at": passage.entry_at,
+            "exit_at": passage.exit_at,
+            "entry_bracket": entry_bracket,
+            "exit_bracket": exit_bracket,
+            "left_censored": bool(passage.left_censored),
+            "right_censored": bool(passage.right_censored),
+            "coverage_censored": bool(passage.coverage_censored),
+            "method": str(passage.method),
+            "predicted_mean_intensity_mm_h": (
+                passage.predicted_intensity_mm_h
+            ),
+            "predicted_peak_intensity_mm_h": passage.peak_intensity_mm_h,
+            "quantity": passage.quantity,
+            "unit": passage.unit,
+            "policy_label": "provisional_unvalidated",
+            "validation_label": "unvalidated",
+            "scenario_outcomes": [{
+                "scenario_id": "admitted_motion",
+                "outcome": scenario_outcome,
+                "entry_bracket": entry_bracket,
+                "exit_bracket": exit_bracket,
+            }],
+            "provenance": {
+                "algorithm_version": PASSAGE_ALGORITHM_VERSION,
+                "policy_version": PASSAGE_POLICY_VERSION,
+                "field_fingerprint": passage.field_fingerprint,
+            },
+        })
+    return {
+        "schema_version": 2,
+        "evaluated_at": float(nowcast.evaluated_at),
+        "items": items,
+        "overflow_count": max(0, len(nowcast.target_passages) - 256),
+    }
 
 WORKER_TECHNICAL_SOURCE_CONTRACT = (
     "stv3-worker-technical-diagnostics-source-v1"
@@ -405,24 +503,12 @@ class ThinMqttService:
                     retain=True,
                 )
                 self._last_snapshot_published_at = time.time()
-                passages_payload = json.dumps({
-                    "schema_version": 1,
-                    "evaluated_at": result.nowcast.evaluated_at,
-                    "items": [{
-                        "target_id": item.target_id,
-                        "cell_id": item.cell_id,
-                        "provider_id": item.provider_id,
-                        "entry_at": item.entry_at,
-                        "exit_at": item.exit_at,
-                        "method": item.method,
-                        "predicted_intensity_mm_h": item.predicted_intensity_mm_h,
-                        "fallback_reason": item.fallback_reason,
-                        "horizon_clipped": item.horizon_clipped,
-                    } for item in result.nowcast.target_passages[:256]],
-                    "overflow_count": max(
-                        0, len(result.nowcast.target_passages) - 256,
-                    ),
-                }, allow_nan=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+                passages_payload = json.dumps(
+                    _build_passages_contract(result.nowcast),
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
                 self.client.publish(
                     topic(self.topic_root, "operational/passages"),
                     passages_payload,

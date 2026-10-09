@@ -8,7 +8,9 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 from .thin_fusion import FusionCycle
-from .thin_footprint_forecast import TargetPassage, forecast_target_passage
+from .thin_footprint_forecast import TargetPassage, forecast_target_passages
+from .thin_provider_adapters import ThinRadarField
+from .thin_passage_state import PassageEvidence, PassageStateRegistry
 from .thin_observation import NormalizedObservation, ObservationKind
 from .tracking_core.engine.cell_track import (
     CellDetection,
@@ -47,6 +49,10 @@ class StormCell:
     motion_agreement_angle_deg: float | None = None
     region_id: str | None = None
     mean_precipitation_rate_mm_h: float | None = None
+    radar_field: ThinRadarField | None = None
+    footprint_pixels: tuple[tuple[int, int], ...] = ()
+    lineage_status: str = "unknown"
+    predecessor_system_ids: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -72,6 +78,8 @@ class StormCell:
             "motion_agreement_angle_deg": self.motion_agreement_angle_deg,
             "region_id": self.region_id,
             "mean_precipitation_rate_mm_h": self.mean_precipitation_rate_mm_h,
+            "lineage_status": self.lineage_status,
+            "predecessor_system_ids": list(self.predecessor_system_ids),
         }
 
 
@@ -94,6 +102,8 @@ class TargetNowcast:
     target_latitude: float | None = None
     target_longitude: float | None = None
     target_accuracy_km: float = 0.0
+    passage_system_id: str | None = None
+    passage_status: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -114,6 +124,8 @@ class TargetNowcast:
             "target_latitude": self.target_latitude,
             "target_longitude": self.target_longitude,
             "target_accuracy_km": self.target_accuracy_km,
+            "passage_system_id": self.passage_system_id,
+            "passage_status": self.passage_status,
         }
 
 
@@ -197,6 +209,7 @@ class ThinNowcastRuntime:
         self._previous_cells: tuple[_CellFrame, ...] = ()
         self._latest: ThinNowcast | None = None
         self._held_arrivals: dict[str, tuple[float, TargetNowcast]] = {}
+        self._passage_states = PassageStateRegistry()
         self._sequence = 0
 
     def update_targets(
@@ -393,9 +406,8 @@ class ThinNowcastRuntime:
                     or (fused.radar_level is not None and fused.radar_level > 0.0)
                 )
             )
-            raining = bool(
-                rain_rate > 0.0 if rain_rate is not None else has_echo
-            )
+            # Reflectivity alone is an echo, not validated near-surface rain.
+            raining = bool(rain_rate is not None and rain_rate > 0.0)
             target_region_id = self._target_region_ids.get(target_id)
             eligible_cells = tuple(
                 cell
@@ -406,23 +418,54 @@ class ThinNowcastRuntime:
                     or cell.region_id == target_region_id
                 )
             )
-            passages = tuple(
-                passage
-                for cell in eligible_cells
-                if cell.motion_ready
-                if (passage := forecast_target_passage(
+            passages_list: list[TargetPassage] = []
+            for cell in eligible_cells:
+                if not cell.motion_ready:
+                    continue
+                cell_passages = forecast_target_passages(
                     cell=cell,
                     target_id=target_id,
                     target_latitude=target_latitude,
                     target_longitude=target_longitude,
                     evaluated_at=cycle.evaluated_at,
                     accuracy_buffer_km=accuracy_buffer_km,
-                )) is not None
-            )
+                )
+                if not cell_passages:
+                    continue
+                alias = (
+                    cell_passages[0].passage_system_id or cell.cell_id
+                )
+                snapshot = self._passage_states.advance(PassageEvidence(
+                    target_id=target_id,
+                    passage_system_id=alias,
+                    radar_valid_at=cell.observed_at,
+                    evaluated_at=cycle.evaluated_at,
+                    field_fingerprint=(
+                        cell_passages[0].field_fingerprint
+                        or f"legacy:{cell.provider_id}:{cell.observed_at}"
+                    ),
+                    outcome="support",
+                    complete_corridor=False,
+                    passage_ids=tuple(
+                        f"{alias}:{item.interval_ordinal}"
+                        for item in cell_passages
+                    ),
+                    lineage_status=cell.lineage_status,
+                ))
+                passages_list.extend(
+                    replace(item, passage_status=snapshot.status)
+                    for item in cell_passages
+                )
+            passages = tuple(passages_list)
             target_passages.extend(passages)
             arrival = min(
                 passages,
-                key=lambda item: (item.entry_at, item.exit_at, item.cell_id),
+                key=lambda item: (
+                    item.entry_at,
+                    float("inf") if item.exit_at is None else item.exit_at,
+                    item.cell_id,
+                    item.interval_ordinal,
+                ),
                 default=None,
             )
             held_result = None
@@ -440,18 +483,30 @@ class ThinNowcastRuntime:
                     <= MAX_REGION_HANDOFF_FORECAST_HOLD_SECONDS
                 )
                 not_finished = (
-                    candidate.exit_at is not None
-                    and cycle.evaluated_at <= candidate.exit_at
-                )
-                new_motion_available = any(
-                    cell.motion_ready for cell in eligible_cells
+                    candidate.exit_at is None
+                    or cycle.evaluated_at <= candidate.exit_at
                 )
                 if (
                     same_position
                     and still_fresh
                     and not_finished
-                    and not new_motion_available
                 ):
+                    if candidate.passage_system_id is not None:
+                        snapshot = self._passage_states.advance(PassageEvidence(
+                            target_id=target_id,
+                            passage_system_id=candidate.passage_system_id,
+                            radar_valid_at=cycle.evaluated_at,
+                            evaluated_at=cycle.evaluated_at,
+                            field_fingerprint="unusable-current-cycle",
+                            outcome="unusable",
+                            complete_corridor=False,
+                            passage_ids=(),
+                            lineage_status="unknown",
+                        ))
+                        candidate = replace(
+                            candidate, passage_status=snapshot.status,
+                        )
+                        self._held_arrivals[target_id] = (held_at, candidate)
                     held_result = candidate
                 else:
                     self._held_arrivals.pop(target_id, None)
@@ -545,6 +600,24 @@ class ThinNowcastRuntime:
                 target_latitude=target_latitude,
                 target_longitude=target_longitude,
                 target_accuracy_km=accuracy_buffer_km,
+                passage_system_id=(
+                    None
+                    if source_arrival is None
+                    else (
+                        arrival.passage_system_id
+                        if arrival is not None
+                        else held_result.passage_system_id
+                    )
+                ),
+                passage_status=(
+                    None
+                    if source_arrival is None
+                    else (
+                        arrival.passage_status
+                        if arrival is not None
+                        else held_result.passage_status
+                    )
+                ),
             )
             target_results[target_id] = result
             if arrival is not None:

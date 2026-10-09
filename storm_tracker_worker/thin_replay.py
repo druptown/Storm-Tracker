@@ -12,6 +12,15 @@ from typing import Any, Callable, Iterable, Mapping
 from .thin_footprint_forecast import TargetPassage, forecast_target_passage
 from .thin_ground_validation import ForecastValidation, validate_passages
 from .thin_observation import NormalizedObservation, ObservationKind, ObservationQuality
+from .thin_passage_verification import (
+    PassageForecastEvidence,
+    PassageReferenceEvidence,
+    PassageVerificationReport,
+    RadarForecastIssue,
+    TemporalRadarReference,
+    build_temporal_radar_reference,
+    verify_passages_by_event,
+)
 from .tracking_core.engine.motion_consensus import (
     MotionVectorCandidate,
     select_motion_consensus,
@@ -78,6 +87,15 @@ def run_motion_admission_replay() -> dict[str, Any]:
             },
         },
     }
+
+
+def verify_immutable_passage_issues(
+    forecasts: Iterable[PassageForecastEvidence],
+    references: Iterable[PassageReferenceEvidence],
+) -> PassageVerificationReport:
+    """Offline-only event aggregation for immutable passage issues."""
+
+    return verify_passages_by_event(forecasts, references)
 
 
 @dataclass(frozen=True, slots=True)
@@ -785,6 +803,10 @@ __all__ = [
     "ReplayReport",
     "RadarForecastVerification",
     "ReplayRepository",
+    "RadarForecastIssue",
+    "TemporalRadarReference",
+    "build_temporal_radar_reference",
     "run_replay",
+    "verify_immutable_passage_issues",
     "verify_radar_forecasts",
 ]

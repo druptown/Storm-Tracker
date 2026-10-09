@@ -7,6 +7,13 @@ import math
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from .thin_passage_forecast import (
+    AdvectionMotion,
+    PassageForecastPolicy,
+    PassageTarget,
+    advect_labelled_qpe,
+)
+
 
 MAX_CELL_AGE_SECONDS = 15 * 60.0
 DEFAULT_HORIZON_SECONDS = 2 * 60 * 60.0
@@ -20,7 +27,7 @@ class TargetPassage:
     cell_id: str
     provider_id: str
     entry_at: float
-    exit_at: float
+    exit_at: float | None
     method: str
     predicted_intensity_mm_h: float | None
     footprint: Mapping[str, Any]
@@ -32,9 +39,25 @@ class TargetPassage:
     motion_reason_codes: tuple[str, ...] = ()
     motion_supporting_methods: tuple[str, ...] = ()
     motion_agreement_angle_deg: float | None = None
+    entry_bracket_lower_at: float | None = None
+    entry_bracket_upper_at: float | None = None
+    exit_bracket_lower_at: float | None = None
+    exit_bracket_upper_at: float | None = None
+    left_censored: bool = False
+    right_censored: bool = False
+    coverage_censored: bool = False
+    interval_ordinal: int = 0
+    peak_intensity_mm_h: float | None = None
+    quantity: str | None = None
+    unit: str | None = None
+    field_fingerprint: str | None = None
+    passage_system_id: str | None = None
+    passage_status: str = "candidate"
+    forecast_issue_id: str | None = None
+    passage_id: str | None = None
 
     def __post_init__(self) -> None:
-        if self.exit_at < self.entry_at:
+        if self.exit_at is not None and self.exit_at < self.entry_at:
             raise ValueError("passage_exit_precedes_entry")
 
 
@@ -263,7 +286,7 @@ def _centerline_interval(
     return entry, clipped_exit, exit_time > horizon_seconds
 
 
-def forecast_target_passage(
+def _forecast_legacy_target_passage(
     *,
     cell: Any,
     target_id: str,
@@ -364,4 +387,130 @@ def forecast_target_passage(
     )
 
 
-__all__ = ["TargetPassage", "forecast_target_passage"]
+def forecast_target_passages(
+    *,
+    cell: Any,
+    target_id: str,
+    target_latitude: float,
+    target_longitude: float,
+    evaluated_at: float,
+    horizon_seconds: float = DEFAULT_HORIZON_SECONDS,
+    accuracy_buffer_km: float = 0.0,
+    centerline_radius_km: float = DEFAULT_CENTERLINE_RADIUS_KM,
+    forecast_step_seconds: float = 60.0,
+) -> tuple[TargetPassage, ...]:
+    radar_field = getattr(cell, "radar_field", None)
+    labelled_pixels = tuple(getattr(cell, "footprint_pixels", ()))
+    if (
+        radar_field is not None
+        and labelled_pixels
+        and bool(getattr(cell, "motion_ready", False))
+    ):
+        predecessor_ids = tuple(getattr(cell, "predecessor_system_ids", ()))
+        passage_system_id = (
+            predecessor_ids[0]
+            if getattr(cell, "lineage_status", "unknown") == "continued"
+            and len(predecessor_ids) == 1
+            else str(cell.cell_id)
+        )
+        intervals = advect_labelled_qpe(
+            radar_field,
+            labelled_pixels,
+            AdvectionMotion(
+                float(cell.velocity_east_kmh) / 3.6,
+                float(cell.velocity_north_kmh) / 3.6,
+                "candidate_policy_v1",
+            ),
+            PassageTarget(
+                str(target_id),
+                float(target_latitude),
+                float(target_longitude),
+                max(0.0, float(accuracy_buffer_km)),
+            ),
+            evaluated_at=float(evaluated_at),
+            policy=PassageForecastPolicy(
+                horizon_seconds=float(horizon_seconds),
+                step_seconds=float(forecast_step_seconds),
+            ),
+        )
+        return tuple(
+            TargetPassage(
+                target_id=str(target_id),
+                evaluated_at=float(evaluated_at),
+                cell_id=str(cell.cell_id),
+                provider_id=str(cell.provider_id),
+                entry_at=(
+                    float(evaluated_at)
+                    if interval.left_censored
+                    else (
+                        interval.entry_bracket.lower_at
+                        + interval.entry_bracket.upper_at
+                    ) / 2.0
+                ),
+                exit_at=(
+                    None
+                    if interval.exit_bracket is None
+                    else (
+                        interval.exit_bracket.lower_at
+                        + interval.exit_bracket.upper_at
+                    ) / 2.0
+                ),
+                method=interval.method,
+                predicted_intensity_mm_h=interval.mean_intensity_mm_h,
+                peak_intensity_mm_h=interval.peak_intensity_mm_h,
+                footprint=MappingProxyType(dict(cell.geometry)),
+                horizon_clipped=interval.right_censored,
+                motion_status=str(getattr(cell, "motion_status", "indeterminate")),
+                motion_confidence=str(getattr(cell, "motion_confidence", "indeterminate")),
+                motion_method=getattr(cell, "motion_method", None),
+                motion_reason_codes=tuple(getattr(cell, "motion_reason_codes", ())),
+                motion_supporting_methods=tuple(getattr(cell, "motion_supporting_methods", ())),
+                motion_agreement_angle_deg=getattr(cell, "motion_agreement_angle_deg", None),
+                entry_bracket_lower_at=(
+                    None if interval.entry_bracket is None
+                    else interval.entry_bracket.lower_at
+                ),
+                entry_bracket_upper_at=(
+                    None if interval.entry_bracket is None
+                    else interval.entry_bracket.upper_at
+                ),
+                exit_bracket_lower_at=(
+                    None if interval.exit_bracket is None
+                    else interval.exit_bracket.lower_at
+                ),
+                exit_bracket_upper_at=(
+                    None if interval.exit_bracket is None
+                    else interval.exit_bracket.upper_at
+                ),
+                left_censored=interval.left_censored,
+                right_censored=interval.right_censored,
+                coverage_censored=interval.coverage_censored,
+                interval_ordinal=interval.interval_ordinal,
+                quantity=interval.quantity,
+                unit=interval.unit,
+                field_fingerprint=interval.field_fingerprint,
+                passage_system_id=passage_system_id,
+            )
+            for interval in intervals
+        )
+    legacy = _forecast_legacy_target_passage(
+        cell=cell,
+        target_id=target_id,
+        target_latitude=target_latitude,
+        target_longitude=target_longitude,
+        evaluated_at=evaluated_at,
+        horizon_seconds=horizon_seconds,
+        accuracy_buffer_km=accuracy_buffer_km,
+        centerline_radius_km=centerline_radius_km,
+    )
+    return () if legacy is None else (legacy,)
+
+
+def forecast_target_passage(**kwargs: Any) -> TargetPassage | None:
+    passages = forecast_target_passages(**kwargs)
+    return passages[0] if passages else None
+
+
+__all__ = [
+    "TargetPassage", "forecast_target_passage", "forecast_target_passages",
+]

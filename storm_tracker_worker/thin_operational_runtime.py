@@ -27,7 +27,13 @@ from .thin_radar_tracking import ThinRadarTracker
 from .thin_radar_overlay import build_radar_overlays
 from .thin_regional_radar_fusion import RegionalFusionSummary
 from .thin_regional_radar_runtime import ThinRegionalRadarFusionCoordinator
-from .thin_postgis import PostGISWriteResult
+from .thin_postgis import (
+    PASSAGE_ALGORITHM_VERSION,
+    PASSAGE_POLICY_VERSION,
+    PostGISWriteResult,
+    _forecast_issue_id,
+    _passage_id,
+)
 from .thin_provider_catalog import PROVIDERS, build_due_requests
 from .thin_region_planner import ThinRegionPlan, ThinRegionPlanner
 from .tracking_core.operational_snapshot import MAX_UI_STORM_SUMMARIES, validate_snapshot
@@ -851,7 +857,8 @@ class ThinOperationalRuntime:
                     error,
                 )
                 return
-            if transition is not None and transition.status != "advanced":
+            transition_status = getattr(transition, "status", "advanced")
+            if transition is not None and transition_status != "advanced":
                 _LOGGER.warning(
                     "Radartracking venster geweigerd: provider=%s regio=%s "
                     "observed_at=%s detecties=%d kandidaatverbindingen=%d "
@@ -911,6 +918,16 @@ class ThinOperationalRuntime:
                         item.rain_rate_mm_h
                         if getattr(item, "mean_rain_rate_mm_h", None) is None
                         else item.mean_rain_rate_mm_h
+                    ),
+                    radar_field=getattr(item, "radar_field", None),
+                    footprint_pixels=tuple(
+                        getattr(item, "footprint_pixels", ())
+                    ),
+                    lineage_status=str(
+                        getattr(item, "lineage_status", "unknown")
+                    ),
+                    predecessor_system_ids=tuple(
+                        getattr(item, "predecessor_system_ids", ())
                     ),
                 ))
 
@@ -991,6 +1008,43 @@ class ThinOperationalRuntime:
             nowcast = self._nowcast.advance(
                 replace(fusion, observations=fallback_observations),
                 tracked_cells=None if fallback_observations else (),
+            )
+        fingerprints_by_target = {
+            target_id: tuple(sorted({
+                item.field_fingerprint
+                for item in nowcast.target_passages
+                if item.target_id == target_id
+                and item.field_fingerprint is not None
+            }))
+            for target_id in {
+                item.target_id for item in nowcast.target_passages
+            }
+        }
+        identified_passages = []
+        for passage in nowcast.target_passages:
+            region_revision_id = region_plan.region_revision_id_for(
+                passage.target_id
+            )
+            issue_id = _forecast_issue_id(
+                target_id=passage.target_id,
+                issued_at=nowcast.evaluated_at,
+                algorithm_version=PASSAGE_ALGORITHM_VERSION,
+                policy_version=PASSAGE_POLICY_VERSION,
+                region_revision_id=region_revision_id,
+                input_fingerprints=fingerprints_by_target[passage.target_id],
+            )
+            system_id = passage.passage_system_id or passage.cell_id
+            identified_passages.append(replace(
+                passage,
+                forecast_issue_id=issue_id,
+                passage_id=_passage_id(
+                    issue_id, system_id, passage.interval_ordinal,
+                ),
+            ))
+        if identified_passages:
+            nowcast = replace(
+                nowcast,
+                target_passages=tuple(identified_passages),
             )
         validations = self._ground_validation.advance(
             nowcast.target_passages,
@@ -1449,7 +1503,7 @@ class ThinOperationalRuntime:
                 # empirically calibrated probability. Keep the nullable
                 # probability pair empty until calibration data exists.
                 probability = calibration = None
-                passage = "expected"
+                passage = result.passage_status or "candidate"
             elif result.forecast_state == "geen_dreiging" and providers:
                 threat_state, threat_freshness = "none", "current"
                 track_id = probability = calibration = None

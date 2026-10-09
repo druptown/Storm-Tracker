@@ -1,8 +1,8 @@
 {
   "kind": "recovered_archive_source",
   "component": "worker",
-  "version": "1.18.88",
-  "source_id": "cbc8849e58dc6bacf681431df12095034bd46fc447b1538462f4199edb0a0f23",
+  "version": "1.18.89",
+  "source_id": "c19be30ee62e59ee949624daaf9bd9bf8809d733cb0a473bf6a58b278775f37f",
   "recovered_on": "2026-10-09",
   "files": [
     {
@@ -32,7 +32,7 @@
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "24f09accadbd0864c18bb6a59759b2ad3e65fc1dcbdd0ce6dd45d482776cd104",
+      "sha256": "c3750655ad421715c99b1807bb658786606f5f810e33edd37bf2d632f58aa3ad",
       "size": 64
     },
     {
@@ -272,7 +272,7 @@
     {
       "path": "config.yaml",
       "mode": 420,
-      "sha256": "7520f59c178b2f433286ebdae43d626a8141ecc513ef3e1a2105a639ea380cfb",
+      "sha256": "18e995298ef23293d19e7559af71ae610e986f74109ddcf2d6697fde31cf0656",
       "size": 2669
     },
     {
@@ -786,6 +786,12 @@
       "size": 450
     },
     {
+      "path": "postgis_migrations/0008_scientific_passage_forecast.sql",
+      "mode": 420,
+      "sha256": "a6a15dd59bde6ace66ef89af4ea2ba859054a92aa91cafe2435dd928c43ef861",
+      "size": 2474
+    },
+    {
       "path": "postgis_projection.py",
       "mode": 420,
       "sha256": "69c244d018facbeaf0cbd01cedee1f09dcf44508c99bb5b91c6f2d0dc7edf86e",
@@ -1064,8 +1070,8 @@
     {
       "path": "thin_footprint_forecast.py",
       "mode": 420,
-      "sha256": "5fb3bed96324b756b604a7117ad8ad48a682cf33373c679356e529df8b370094",
-      "size": 12164
+      "sha256": "68ca8cc108acdb40e31b37d34856aba581f9ab96b4d184651feb2c7d7f67bd0a",
+      "size": 18052
     },
     {
       "path": "thin_fusion.py",
@@ -1088,14 +1094,14 @@
     {
       "path": "thin_mqtt_service.py",
       "mode": 420,
-      "sha256": "653863d64ce61bc85bd656f8aff2b9da2397fea5bb44c1c3cff3e3ab63faa322",
-      "size": 28143
+      "sha256": "3dca7c11dab56fed5f59890fcb1cfbbe969820bbae161831edff2e187e0db2cf",
+      "size": 31305
     },
     {
       "path": "thin_nowcast.py",
       "mode": 420,
-      "sha256": "5dc15d64d6cfe74e7b1b97b07ee526a5e85f986ee58bffdcecb8149c2a6843f0",
-      "size": 23931
+      "sha256": "857eb50e71bdeef676e0e4bdbfbe8cf0e74ccacf8b836325d3473589cf52cafb",
+      "size": 27376
     },
     {
       "path": "thin_observation.py",
@@ -1106,14 +1112,32 @@
     {
       "path": "thin_operational_runtime.py",
       "mode": 420,
-      "sha256": "83bc17bed3aefbc6104641ebb5f798c44a1e71ec9f348d5a4cc1d2cde8904a41",
-      "size": 63113
+      "sha256": "964d3c119f2b1ab566c5a28db84d9d784a209fe49a3b24e0d5926c6a2ebb0ebc",
+      "size": 65280
+    },
+    {
+      "path": "thin_passage_forecast.py",
+      "mode": 420,
+      "sha256": "be36147bca68b8a4fe7a32f018765ac3d30d555acb1cb1696d3a58221196becb",
+      "size": 9894
+    },
+    {
+      "path": "thin_passage_state.py",
+      "mode": 420,
+      "sha256": "557e8e945f28ce33e03279ac22634c9b5ab2fcc1d992e072f102d76c8c38f86a",
+      "size": 8272
+    },
+    {
+      "path": "thin_passage_verification.py",
+      "mode": 420,
+      "sha256": "c0d22139fea8048a49d52dc41ccd125a3eb7da8e0af09e8dafa8804514c2c84a",
+      "size": 10671
     },
     {
       "path": "thin_postgis.py",
       "mode": 420,
-      "sha256": "eef02a230ec4a2147faa5d8786d9c1bb3280e535333782fc5c7d8c5bd0e817a2",
-      "size": 46867
+      "sha256": "997252efc04372a0ad8097f6e3b0d77591d82fd7c2e7f17541d3d4a4acb7f63c",
+      "size": 54909
     },
     {
       "path": "thin_postgis_station_migration.py",
@@ -1124,8 +1148,8 @@
     {
       "path": "thin_provider_adapters.py",
       "mode": 420,
-      "sha256": "ca79d65c6a48c75f7d0f41d02ff55ce3eb97e3a5b13168f727c3d62c2af22c38",
-      "size": 153115
+      "sha256": "7e4e08a390cbf12dc89423d906baeb32ac660cd4e65b3b0897bad8ef6fa2d138",
+      "size": 158802
     },
     {
       "path": "thin_provider_catalog.py",
@@ -1148,8 +1172,8 @@
     {
       "path": "thin_radar_tracking.py",
       "mode": 420,
-      "sha256": "e321c906412e0004b952bf76e96843355911b863dc89a927c01230a10f949096",
-      "size": 19145
+      "sha256": "31d810d9ba258023f6574923b926b48216430e9645f413bdf9d31cac4978a629",
+      "size": 21271
     },
     {
       "path": "thin_region_planner.py",
@@ -1160,8 +1184,8 @@
     {
       "path": "thin_regional_radar_fusion.py",
       "mode": 420,
-      "sha256": "029c140ea456bfe3cfd0bd0811c6bcf50c9357363c45898f8ecf4a30170c334a",
-      "size": 26175
+      "sha256": "54133174a013f5945bb6c1690841b9e78d55cb3aab3af2133389371a67c11776",
+      "size": 27433
     },
     {
       "path": "thin_regional_radar_runtime.py",
@@ -1172,8 +1196,8 @@
     {
       "path": "thin_replay.py",
       "mode": 420,
-      "sha256": "ffdd53bfe3c6dfc95eac7370dc167e325079a756b40d34c59177445a63ec285b",
-      "size": 31302
+      "sha256": "207e6af0fc4fb36186488cbd211765ca69cfddd1958a33e53c8d6ee6e64d559d",
+      "size": 31990
     },
     {
       "path": "thin_satellite_adapters.py",
@@ -1198,6 +1222,12 @@
       "mode": 420,
       "sha256": "7d98051514928c1d3fdeaed3b07abc2cabaa5f4c0c19b732dd211603dc18eb36",
       "size": 4297
+    },
+    {
+      "path": "thin_system_motion.py",
+      "mode": 420,
+      "sha256": "d019c9a829e8fa0e8d2cbb949fc95236b497322ed1b52c2b4de449f7640f97a6",
+      "size": 6093
     },
     {
       "path": "tracking.py",
@@ -1298,8 +1328,8 @@
     {
       "path": "tracking_core/engine/forecast_verification.py",
       "mode": 420,
-      "sha256": "184b35393cc6969e2a198dd9e41e472c6b1081efa7a541b184c6e7b6a3df14ac",
-      "size": 64577
+      "sha256": "80b7df877d656cbb7f8f3eedb8274dec00003904528d77a0a58dd0550dede1d2",
+      "size": 64871
     },
     {
       "path": "tracking_core/engine/global_assignment.py",
@@ -1520,8 +1550,8 @@
     {
       "path": "tracking_core/operational_snapshot.py",
       "mode": 420,
-      "sha256": "8de55b9b0bc20bdc883dbbb12eda23c0ce02435cde96ccf873b211ab6df9093d",
-      "size": 65256
+      "sha256": "a9dff040bd29a257b61ba064e272ecf64907a4aa80ce288ffe5771d3b3af80c1",
+      "size": 65352
     },
     {
       "path": "validation_corpus.py",
@@ -1622,12 +1652,12 @@
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_worker_v1.18.88_deploy.tar.gz",
-      "archive_sha256": "1bd1c93ebcec4065a03a7f89f20ae77526a737854b8c7d5482ab43730f16c78c",
-      "bytes": 2406363,
+      "filename": "storm_tracker_worker_v1.18.89_deploy.tar.gz",
+      "archive_sha256": "f5a393008f21821654b93ad52b40d349cc9376e2dd20004142179f7e376a33f8",
+      "bytes": 2419699,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.153_worker_v1.18.88_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.154_worker_v1.18.89_evidence.json",
           "archive_and_source_match": true
         }
       ]

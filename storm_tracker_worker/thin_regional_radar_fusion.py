@@ -12,7 +12,7 @@ from typing import Iterable, Mapping
 import numpy as np
 from pyproj import CRS, Transformer
 
-from .thin_provider_adapters import ThinRadarField
+from .thin_provider_adapters import RadarFieldIdentity, ThinRadarField
 from .thin_provider_runtime import ProviderResult
 from .thin_region_planner import ThinAcquisitionRegion
 from .thin_fusion import (
@@ -515,6 +515,9 @@ def fuse_regional_radar_fields(
             continue
         matching_fields.sort(key=lambda field: field.observed_at, reverse=True)
         field = matching_fields[0]
+        if not field.is_quantitative_precipitation:
+            excluded[provider_id] = "quantity_not_quantitative_precipitation"
+            continue
         age = evaluated - float(field.observed_at)
         maximum_age = float(PROVIDER_FUSION_AGE_SECONDS.get(
             provider_id, MAX_FUSION_AGE_SECONDS,
@@ -684,6 +687,35 @@ def fuse_regional_radar_fields(
         for layer in layers
         if layer.provider_id in selected_provider_ids
     )
+    selected_fields = tuple(
+        candidate for candidate in candidates
+        if candidate.provider_id in selected_provider_ids
+    )
+    fused_identity = RadarFieldIdentity.create(
+        provider_id=f"fusion:{region.region_id}",
+        quantity="precipitation_rate",
+        unit="mm/h",
+        quality_kind="fused_validity_and_confidence",
+        processing_version="regional-fusion-v1",
+        source_composition=contributors,
+        canonical_valid_at=field_observed_at,
+        received_at=max(
+            item.identity.received_at for item in selected_fields
+            if item.identity is not None
+        ),
+        available_at=max(
+            item.identity.available_at for item in selected_fields
+            if item.identity is not None
+        ),
+        crs=grid.crs,
+        origin_x_m=grid.origin_x_m,
+        origin_y_m=grid.origin_y_m,
+        x_resolution_m=grid.x_resolution_m,
+        y_resolution_m=grid.y_resolution_m,
+        values=fused_values,
+        valid_mask=fused_valid,
+        grid_id=grid.grid_id,
+    )
     field = ThinRadarField(
         provider_id=f"fusion:{region.region_id}",
         product_id="regional-rain-rate",
@@ -695,6 +727,7 @@ def fuse_regional_radar_fields(
         y_resolution_m=grid.y_resolution_m,
         rain_rate_mm_h=fused_values,
         valid_mask=fused_valid,
+        identity=fused_identity,
     )
     summary = RegionalFusionSummary(
         region_id=region.region_id,

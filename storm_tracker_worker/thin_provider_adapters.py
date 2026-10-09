@@ -128,6 +128,124 @@ _KNMI_DOWNLOAD_HOST_SUFFIXES = (
 )
 
 
+def _radar_grid_id(
+    *,
+    crs: str,
+    origin_x_m: float,
+    origin_y_m: float,
+    x_resolution_m: float,
+    y_resolution_m: float,
+    shape: tuple[int, int],
+) -> str:
+    payload = json.dumps(
+        {
+            "crs": crs,
+            "origin_x_m": float(origin_x_m),
+            "origin_y_m": float(origin_y_m),
+            "x_resolution_m": float(x_resolution_m),
+            "y_resolution_m": float(y_resolution_m),
+            "shape": [int(shape[0]), int(shape[1])],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "radar-grid:" + hashlib.sha256(payload).hexdigest()
+
+
+def _radar_content_fingerprint(values: Any, valid_mask: Any) -> str:
+    import numpy as np
+
+    digest = hashlib.sha256()
+    normalized_values = np.asarray(values, dtype="<f8", order="C")
+    normalized_mask = np.asarray(valid_mask, dtype=np.uint8, order="C")
+    digest.update(str(normalized_values.shape).encode("ascii"))
+    digest.update(normalized_values.tobytes(order="C"))
+    digest.update(normalized_mask.tobytes(order="C"))
+    return digest.hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class RadarFieldIdentity:
+    """Scientific identity and issue-time provenance for one radar raster."""
+
+    quantity: str
+    unit: str
+    quality_kind: str
+    processing_version: str
+    source_composition: tuple[str, ...]
+    canonical_valid_at: float
+    received_at: float
+    available_at: float
+    grid_id: str
+    content_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if not all((
+            self.quantity,
+            self.unit,
+            self.quality_kind,
+            self.processing_version,
+            self.grid_id,
+        )):
+            raise ValueError("radar_field_provenance_invalid")
+        if not self.source_composition or any(
+            not value for value in self.source_composition
+        ):
+            raise ValueError("radar_field_source_composition_invalid")
+        if not all(math.isfinite(value) for value in (
+            self.canonical_valid_at,
+            self.received_at,
+            self.available_at,
+        )):
+            raise ValueError("radar_field_provenance_time_invalid")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.content_fingerprint):
+            raise ValueError("radar_field_content_fingerprint_invalid")
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        provider_id: str,
+        quantity: str,
+        unit: str,
+        quality_kind: str,
+        processing_version: str,
+        source_composition: tuple[str, ...] | None,
+        canonical_valid_at: float,
+        received_at: float,
+        available_at: float,
+        crs: str,
+        origin_x_m: float,
+        origin_y_m: float,
+        x_resolution_m: float,
+        y_resolution_m: float,
+        values: Any,
+        valid_mask: Any,
+        grid_id: str | None = None,
+    ) -> "RadarFieldIdentity":
+        return cls(
+            quantity=quantity,
+            unit=unit,
+            quality_kind=quality_kind,
+            processing_version=processing_version,
+            source_composition=(provider_id,)
+            if source_composition is None
+            else tuple(source_composition),
+            canonical_valid_at=float(canonical_valid_at),
+            received_at=float(received_at),
+            available_at=float(available_at),
+            grid_id=grid_id or _radar_grid_id(
+                crs=crs,
+                origin_x_m=origin_x_m,
+                origin_y_m=origin_y_m,
+                x_resolution_m=x_resolution_m,
+                y_resolution_m=y_resolution_m,
+                shape=tuple(values.shape),
+            ),
+            content_fingerprint=_radar_content_fingerprint(values, valid_mask),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class ThinRadarField:
     """Decoded native radar data held in memory for the current work cycle."""
@@ -142,6 +260,7 @@ class ThinRadarField:
     y_resolution_m: float
     rain_rate_mm_h: Any
     valid_mask: Any
+    identity: RadarFieldIdentity | None = None
 
     def __post_init__(self) -> None:
         import numpy as np
@@ -166,6 +285,55 @@ class ThinRadarField:
             raise ValueError("radar_field_empty")
         if not np.all(np.isfinite(self.rain_rate_mm_h[self.valid_mask])):
             raise ValueError("radar_field_valid_values_nonfinite")
+        identity = self.identity
+        if identity is None:
+            identity = RadarFieldIdentity.create(
+                provider_id=self.provider_id,
+                quantity="precipitation_rate",
+                unit="mm/h",
+                quality_kind="source_valid_mask",
+                processing_version="legacy-decoder-v1",
+                source_composition=(self.provider_id,),
+                canonical_valid_at=self.observed_at,
+                received_at=self.observed_at,
+                available_at=self.observed_at,
+                crs=self.crs,
+                origin_x_m=self.origin_x_m,
+                origin_y_m=self.origin_y_m,
+                x_resolution_m=self.x_resolution_m,
+                y_resolution_m=self.y_resolution_m,
+                values=self.rain_rate_mm_h,
+                valid_mask=self.valid_mask,
+            )
+            object.__setattr__(self, "identity", identity)
+        elif not math.isclose(
+            identity.canonical_valid_at,
+            self.observed_at,
+            rel_tol=0.0,
+            abs_tol=1e-6,
+        ):
+            raise ValueError("radar_field_canonical_time_mismatch")
+
+    @property
+    def is_quantitative_precipitation(self) -> bool:
+        assert self.identity is not None
+        return (
+            self.identity.quantity.casefold()
+            in {"precipitation_rate", "rain_rate", "qpe_rate"}
+            and self.identity.unit.casefold().replace(" ", "")
+            in {"mm/h", "mmh-1", "mmhr-1"}
+        )
+
+    @property
+    def motion_compatibility_key(self) -> tuple[object, ...]:
+        assert self.identity is not None
+        return (
+            self.identity.quantity.casefold(),
+            self.identity.unit.casefold().replace(" ", ""),
+            self.identity.grid_id,
+            self.identity.processing_version,
+            self.identity.source_composition,
+        )
 
 
 @dataclass(frozen=True, slots=True, eq=False)

@@ -23,6 +23,9 @@ from .thin_station_measurement import (
 
 
 MAX_RETRY_CYCLES = 8
+MAX_FORECAST_METADATA_BYTES = 64 * 1024
+PASSAGE_ALGORITHM_VERSION = "scientific-passage-v1"
+PASSAGE_POLICY_VERSION = "candidate_policy_v1"
 AUTO_DISCOVERY_GROUND_PROVIDERS = frozenset({
     "kmi_aws",
     "metar",
@@ -391,6 +394,16 @@ ON CONFLICT(target_id,evaluated_at) DO UPDATE SET
     region_revision_id=EXCLUDED.region_revision_id
 """
 
+_INSERT_FORECAST_ISSUE = """
+INSERT INTO stv3_target_forecast_issue(
+    forecast_issue_id,target_id,issued_at,algorithm_version,policy_version,
+    region_revision_id,input_fingerprints,forecast_metadata
+) VALUES(
+    %s,%s,to_timestamp(%s),%s,%s,%s,%s::jsonb,%s::jsonb
+)
+ON CONFLICT(forecast_issue_id) DO NOTHING
+"""
+
 _INSERT_TARGET_POSITION = """
 INSERT INTO stv3_target_position(
     target_id,observed_at,position,accuracy_km
@@ -416,6 +429,24 @@ ON CONFLICT(target_id,evaluated_at,cell_id) DO UPDATE SET
     predicted_intensity_mm_h=EXCLUDED.predicted_intensity_mm_h,
     footprint=EXCLUDED.footprint,metadata=EXCLUDED.metadata,
     region_revision_id=EXCLUDED.region_revision_id
+"""
+
+_INSERT_PASSAGE_ISSUE = """
+INSERT INTO stv3_target_passage_issue(
+    passage_id,forecast_issue_id,target_id,passage_system_id,
+    interval_ordinal,status,entry_at,exit_at,
+    entry_bracket_lower_at,entry_bracket_upper_at,
+    exit_bracket_lower_at,exit_bracket_upper_at,
+    left_censored,right_censored,coverage_censored,
+    predicted_mean_intensity_mm_h,predicted_peak_intensity_mm_h,
+    quantity,unit,footprint,metadata
+) VALUES(
+    %s,%s,%s,%s,%s,%s,to_timestamp(%s),to_timestamp(%s),
+    to_timestamp(%s),to_timestamp(%s),to_timestamp(%s),to_timestamp(%s),
+    %s,%s,%s,%s,%s,%s,%s,
+    ST_SetSRID(ST_GeomFromGeoJSON(%s),4326),%s::jsonb
+)
+ON CONFLICT(passage_id) DO NOTHING
 """
 
 _INSERT_VALIDATION = """
@@ -460,6 +491,44 @@ def _sha(value: Any) -> str:
     return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
 
 
+def _bounded_json(value: Any) -> str:
+    payload = _json(value)
+    if len(payload.encode("utf-8")) >= MAX_FORECAST_METADATA_BYTES:
+        raise ValueError("forecast_metadata_too_large")
+    return payload
+
+
+def _forecast_issue_id(
+    *,
+    target_id: str,
+    issued_at: float,
+    algorithm_version: str,
+    policy_version: str,
+    region_revision_id: str | None,
+    input_fingerprints: tuple[str, ...],
+) -> str:
+    return "forecast-issue:" + _sha({
+        "target_id": target_id,
+        "issued_at": float(issued_at),
+        "algorithm_version": algorithm_version,
+        "policy_version": policy_version,
+        "region_revision_id": region_revision_id,
+        "input_fingerprints": sorted(set(input_fingerprints)),
+    })
+
+
+def _passage_id(
+    forecast_issue_id: str,
+    passage_system_id: str,
+    interval_ordinal: int,
+) -> str:
+    return "passage:" + _sha({
+        "forecast_issue_id": forecast_issue_id,
+        "passage_system_id": passage_system_id,
+        "interval_ordinal": int(interval_ordinal),
+    })
+
+
 def _track_motion_metadata(cell: Any) -> dict[str, Any]:
     """Return the auditable admission decision for every tracked cell."""
 
@@ -500,6 +569,20 @@ def _passage_metadata(passage: Any) -> dict[str, Any]:
             passage.motion_supporting_methods
         ),
         "motion_agreement_angle_deg": passage.motion_agreement_angle_deg,
+        "entry_bracket_lower_at": passage.entry_bracket_lower_at,
+        "entry_bracket_upper_at": passage.entry_bracket_upper_at,
+        "exit_bracket_lower_at": passage.exit_bracket_lower_at,
+        "exit_bracket_upper_at": passage.exit_bracket_upper_at,
+        "left_censored": passage.left_censored,
+        "right_censored": passage.right_censored,
+        "coverage_censored": passage.coverage_censored,
+        "interval_ordinal": passage.interval_ordinal,
+        "peak_intensity_mm_h": passage.peak_intensity_mm_h,
+        "quantity": passage.quantity,
+        "unit": passage.unit,
+        "field_fingerprint": passage.field_fingerprint,
+        "passage_system_id": passage.passage_system_id,
+        "passage_status": passage.passage_status,
     }
 
 
@@ -671,8 +754,10 @@ class ThinPostGISWriter:
             "storm_cells": 0,
             "track_points": 0,
             "target_forecasts": 0,
+            "forecast_issues": 0,
             "target_positions": 0,
             "target_passages": 0,
+            "passage_issues": 0,
             "forecast_validations": 0,
         }
         try:
@@ -1043,6 +1128,13 @@ class ThinPostGISWriter:
                         ))
                         counts["track_points"] += 1
 
+                    passages_by_target: dict[str, list[Any]] = {}
+                    for passage in nowcast.target_passages:
+                        passages_by_target.setdefault(
+                            passage.target_id, []
+                        ).append(passage)
+                    issue_ids: dict[str, str] = {}
+
                     for target_id, forecast in nowcast.target_results.items():
                         target_region_revision_id = (
                             None
@@ -1062,6 +1154,50 @@ class ThinPostGISWriter:
                             target_region_revision_id,
                         ))
                         counts["target_forecasts"] += 1
+                        target_passages = passages_by_target.get(target_id, [])
+                        input_fingerprints = tuple(sorted({
+                            passage.field_fingerprint
+                            for passage in target_passages
+                            if passage.field_fingerprint
+                        }))
+                        calculated_issue_id = _forecast_issue_id(
+                            target_id=target_id,
+                            issued_at=nowcast.evaluated_at,
+                            algorithm_version=PASSAGE_ALGORITHM_VERSION,
+                            policy_version=PASSAGE_POLICY_VERSION,
+                            region_revision_id=target_region_revision_id,
+                            input_fingerprints=input_fingerprints,
+                        )
+                        supplied_issue_ids = {
+                            item.forecast_issue_id
+                            for item in target_passages
+                            if item.forecast_issue_id is not None
+                        }
+                        if len(supplied_issue_ids) > 1:
+                            raise ValueError("passage_forecast_issue_conflict")
+                        issue_id = next(
+                            iter(supplied_issue_ids), calculated_issue_id
+                        )
+                        if (
+                            supplied_issue_ids
+                            and issue_id != calculated_issue_id
+                        ):
+                            raise ValueError("passage_forecast_issue_mismatch")
+                        issue_ids[target_id] = issue_id
+                        cursor.execute(_INSERT_FORECAST_ISSUE, (
+                            issue_id,
+                            target_id,
+                            nowcast.evaluated_at,
+                            PASSAGE_ALGORITHM_VERSION,
+                            PASSAGE_POLICY_VERSION,
+                            target_region_revision_id,
+                            _bounded_json(list(input_fingerprints)),
+                            _bounded_json({
+                                "schema_version": 1,
+                                "forecast": forecast.as_dict(),
+                            }),
+                        ))
+                        counts["forecast_issues"] += 1
                         if (
                             forecast.target_latitude is not None
                             and forecast.target_longitude is not None
@@ -1083,20 +1219,65 @@ class ThinPostGISWriter:
                                 passage.target_id
                             )
                         )
-                        cursor.execute(_INSERT_PASSAGE, (
+                        issue_id = issue_ids[passage.target_id]
+                        passage_system_id = (
+                            passage.passage_system_id or passage.cell_id
+                        )
+                        calculated_passage_id = _passage_id(
+                            issue_id,
+                            passage_system_id,
+                            passage.interval_ordinal,
+                        )
+                        passage_id = (
+                            passage.passage_id or calculated_passage_id
+                        )
+                        if passage_id != calculated_passage_id:
+                            raise ValueError("passage_id_mismatch")
+                        passage_metadata = _passage_metadata(passage)
+                        cursor.execute(_INSERT_PASSAGE_ISSUE, (
+                            passage_id,
+                            issue_id,
                             passage.target_id,
-                            passage.evaluated_at,
-                            passage.cell_id,
-                            passage.provider_id,
+                            passage_system_id,
+                            passage.interval_ordinal,
+                            passage.passage_status,
                             passage.entry_at,
                             passage.exit_at,
-                            passage.method,
+                            passage.entry_bracket_lower_at,
+                            passage.entry_bracket_upper_at,
+                            passage.exit_bracket_lower_at,
+                            passage.exit_bracket_upper_at,
+                            passage.left_censored,
+                            passage.right_censored,
+                            passage.coverage_censored,
                             passage.predicted_intensity_mm_h,
+                            passage.peak_intensity_mm_h,
+                            passage.quantity,
+                            passage.unit,
                             _json(dict(passage.footprint)),
-                            _json(_passage_metadata(passage)),
-                            passage_region_revision_id,
+                            _bounded_json(passage_metadata),
                         ))
-                        counts["target_passages"] += 1
+                        counts["passage_issues"] += 1
+                        if (
+                            passage.exit_at is not None
+                            and not passage.left_censored
+                            and not passage.right_censored
+                            and not passage.coverage_censored
+                        ):
+                            cursor.execute(_INSERT_PASSAGE, (
+                                passage.target_id,
+                                passage.evaluated_at,
+                                passage.cell_id,
+                                passage.provider_id,
+                                passage.entry_at,
+                                passage.exit_at,
+                                passage.method,
+                                passage.predicted_intensity_mm_h,
+                                _json(dict(passage.footprint)),
+                                _bounded_json(passage_metadata),
+                                passage_region_revision_id,
+                            ))
+                            counts["target_passages"] += 1
 
                     for validation in validations:
                         validation_region_revision_id = (
