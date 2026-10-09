@@ -29,7 +29,11 @@ from .raw_artifacts import RawArtifactCaptureReceipt
 
 
 METHOD = "worker_verified_raw_capture_cycle_assembler_v1"
-DEFAULT_FRESHNESS_SECONDS = 10 * 60
+# DWD RADOLAN RV is normally published several minutes behind its nominal
+# product timestamp.  The proven legacy integration accepts those frames for
+# 15 minutes; a 10-minute floor made freshly downloaded RV captures stale
+# before worker-only quantitative processing could use them.
+DEFAULT_FRESHNESS_SECONDS = 15 * 60
 MAX_FRESHNESS_SECONDS = 24 * 60 * 60
 _REASON = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _SHA = re.compile(r"^[0-9a-f]{64}$")

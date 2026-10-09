@@ -1,8 +1,8 @@
 {
   "kind": "recovered_archive_source",
   "component": "worker",
-  "version": "1.17.58",
-  "source_id": "285a3c18409e86a41d649dce063077eb0d8ed7d055a8a53c4d5c3bad80f34802",
+  "version": "1.17.59",
+  "source_id": "cfd482082632331fb5c8c7f4fa44a21a97ce9b5ed6a596fdff5bb8e73df57d08",
   "recovered_on": "2026-10-09",
   "files": [
     {
@@ -32,7 +32,7 @@
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "6553dca85e187487bb2463eee535a1ebef02d851386c2abe216a2239513681fb",
+      "sha256": "728c658b522a33b6c8f6bfebdc37c1633fa0bf399f69be488227e540b1dd04b6",
       "size": 64
     },
     {
@@ -272,7 +272,7 @@
     {
       "path": "config.yaml",
       "mode": 420,
-      "sha256": "ae180b4e9f636913a892216b96dbc90cadef30322a6f42717a6e932b75ce4a39",
+      "sha256": "a6b62d558485985414b6817f4b9ad059159fe4fa93c9e9ff5c0fef4de6c90d1c",
       "size": 2662
     },
     {
@@ -548,8 +548,8 @@
     {
       "path": "multi_source_cycle_assembler.py",
       "mode": 420,
-      "sha256": "9fa598c14e37f1e59f48587ac26c9a896c562905b2d05c27d06046c89f205fa1",
-      "size": 10918
+      "sha256": "76b06e2d3c60924238fd062b0775ae88400bbd9d10cad92e871ba3807068fd4f",
+      "size": 11204
     },
     {
       "path": "multi_source_ground_facts.py",
@@ -1406,16 +1406,16 @@
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_worker_v1.17.58_deploy.tar.gz",
-      "archive_sha256": "9d536371890aa6e71757c5e24a5693e82eb712fe1891e8339eb0fdbac2fd28ea",
-      "bytes": 2240782,
+      "filename": "storm_tracker_worker_v1.17.59_deploy.tar.gz",
+      "archive_sha256": "af103461a03c4bd98a3cf7809e18ba26f0d66c0c70e1022e1537c28638c359e6",
+      "bytes": 2240957,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.57_worker_v1.17.58_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.57_worker_v1.17.59_evidence.json",
           "archive_and_source_match": true
         },
         {
-          "manifest": "storm_tracker_release_v1.14.57_worker_v1.17.58_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.57_worker_v1.17.59_evidence.json",
           "archive_and_source_match": true
         }
       ]
