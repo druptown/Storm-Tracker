@@ -44,6 +44,7 @@ ITALIAMETEO_DPC_HISTORICAL_CATALOG_ENDPOINT = (
     "https://meteohub.agenziaitaliameteo.it/api/datasets/"
     "radar_sri_dpc/opendata"
 )
+METEOLUX_WEATHER_ENDPOINT = "https://metapi.ana.lu/api/v1/metapp/weather"
 OPERA_LISTING_ENDPOINT = "https://s3.waw3-1.cloudferro.com/openradar-24h/"
 OPERA_OBJECT_BASE = "https://s3.waw3-1.cloudferro.com/openradar-24h"
 METAR_ENDPOINT = "https://aviationweather.gov/api/data/metar"
@@ -1032,6 +1033,67 @@ class ItaliaMeteoDpcHistoricalCatalogAdapter:
         # This endpoint inventories historical GRIB files for replay. It has
         # no live meteorological value, so a successful validation deliberately
         # produces no observation for live fusion.
+        return ()
+
+
+class MeteoLuxValidationAdapter:
+    """Validate MeteoLux location guidance without inventing data semantics."""
+
+    def __init__(self, *, endpoint: str = METEOLUX_WEATHER_ENDPOINT) -> None:
+        self._endpoint = endpoint
+
+    async def fetch(
+        self,
+        request: ThinProviderRequest,
+        fetcher: AsyncHttpFetcher,
+        *,
+        now: float,
+    ) -> tuple[NormalizedObservation, ...]:
+        del now
+        for target in request.targets:
+            payload = await fetcher.get_json(
+                self._endpoint,
+                params={
+                    "langcode": "en",
+                    "lat": f"{target.latitude:.5f}",
+                    "long": f"{target.longitude:.5f}",
+                },
+                maximum_bytes=4 * 1024 * 1024,
+            )
+            if not isinstance(payload, Mapping):
+                raise ValueError("meteolux_payload_invalid")
+            city = payload.get("city")
+            forecast = payload.get("forecast")
+            current = (
+                forecast.get("current")
+                if isinstance(forecast, Mapping)
+                else None
+            )
+            if (
+                not isinstance(city, Mapping)
+                or not isinstance(current, Mapping)
+                or current.get("type") != "current"
+                or not isinstance(current.get("temperature"), Mapping)
+                or not isinstance(current.get("wind"), Mapping)
+                or "rain" not in current
+            ):
+                raise ValueError("meteolux_current_invalid")
+            try:
+                datetime.fromisoformat(current.get("date"))
+                city_latitude = float(city.get("lat"))
+                city_longitude = float(city.get("long"))
+            except (TypeError, ValueError):
+                raise ValueError("meteolux_current_invalid") from None
+            if (
+                not math.isfinite(city_latitude)
+                or not math.isfinite(city_longitude)
+                or not -90.0 <= city_latitude <= 90.0
+                or not -180.0 <= city_longitude <= 180.0
+            ):
+                raise ValueError("meteolux_current_invalid")
+        # The endpoint does not declare units/accumulation intervals for its
+        # display strings. Until that semantic contract is public, it proves
+        # availability only and must not enter quantitative fusion.
         return ()
 
 
@@ -3569,6 +3631,7 @@ __all__ = [
     "MeteoFranceOAuthTokenProvider",
     "MeteoFranceRadarAdapter",
     "MetOfficeRadarAdapter",
+    "MeteoLuxValidationAdapter",
     "NetatmoAdapter",
     "NetatmoOAuthTokenProvider",
     "OpenMeteoAdapter",

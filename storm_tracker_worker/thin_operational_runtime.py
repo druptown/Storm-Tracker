@@ -50,6 +50,7 @@ SNAPSHOT_PROVIDER_IDS = {
         "validation.italiameteo.dpc_sri_historical_catalog"
     ),
     "metoffice_radar": "radar.metoffice.uk_rate",
+    "meteolux": "validation.meteolux.location",
 }
 
 

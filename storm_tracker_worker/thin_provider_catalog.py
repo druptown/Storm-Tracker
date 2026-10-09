@@ -74,6 +74,12 @@ FRANCE_METROPOLE = CoverageBox(
 )
 ITALY = CoverageBox(south=35.0, north=48.0, west=4.5, east=20.5)
 AUSTRIA = CoverageBox(south=45.5, north=49.5, west=8.1, east=17.75)
+LUXEMBOURG_AND_BORDER = CoverageBox(
+    south=48.5,
+    north=51.0,
+    west=4.5,
+    east=7.5,
+)
 UNITED_KINGDOM_AND_IRELAND = CoverageBox(
     south=48.0,
     north=62.0,
@@ -130,6 +136,12 @@ PROVIDERS: tuple[ThinProviderSpec, ...] = (
         "inca_nowcast",
         900.0,
         AUSTRIA,
+    ),
+    ThinProviderSpec(
+        "meteolux",
+        "location_weather_validation",
+        900.0,
+        LUXEMBOURG_AND_BORDER,
     ),
     ThinProviderSpec(
         "metoffice_radar",
