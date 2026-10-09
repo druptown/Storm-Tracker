@@ -58,14 +58,16 @@ PRODUCTION_ACQUISITION_EPOCH = "source-v2"
 # their immutable schema. Keep it unchanged so every retained byte remains
 # readable. Admission uses the lower claim below, leaving ample NAS headroom.
 PRODUCTION_RAW_CAPACITY_BYTES = 128 * 1024 * 1024 * 1024
-# Reserve a large but realistic raw payload envelope on the dedicated 160 GiB
-# NAS-HA volume.  The former 96 GiB claim plus both 4 GiB catalog ceilings and
-# the 2 GiB host reserve left less headroom than the filesystem can guarantee,
-# so a nearly empty store could fail closed at startup.  This changes only the
-# admission claim; the immutable 128 GiB store/ledger schema ceilings remain
-# unchanged and all existing objects stay readable.
-PRODUCTION_RETENTION_CLAIM_BYTES = 80 * 1024 * 1024 * 1024
-_PREVIOUS_PRODUCTION_RETENTION_CLAIM_BYTES = 96 * 1024 * 1024 * 1024
+# Reserve a large but realistic raw payload envelope on the dedicated 160 GB
+# NAS-HA volume.  The complete guard also reserves both 4 GiB cadence catalogs,
+# the Blitzortung object/catalog/control envelope and 2 GiB for HA itself.  An
+# 80 GiB cadence claim therefore required about 111 GiB of free filesystem
+# space and blocked a healthy VM that still had about 94 GiB free.  This changes
+# only the admission claim; the immutable 128 GiB store/ledger schema ceilings
+# remain unchanged and every existing object stays readable.
+PRODUCTION_RETENTION_CLAIM_BYTES = 48 * 1024 * 1024 * 1024
+_PREVIOUS_PRODUCTION_RETENTION_CLAIM_BYTES = 80 * 1024 * 1024 * 1024
+_LEGACY_PRODUCTION_RETENTION_CLAIM_BYTES = 96 * 1024 * 1024 * 1024
 _FAILED_INTERMEDIATE_RAW_CAPACITY_BYTES = 96 * 1024 * 1024 * 1024
 PRODUCTION_ENTRY_CAPACITY = 1_000_000
 PRODUCTION_RESERVATION_CAPACITY = 250_000
@@ -331,7 +333,7 @@ def _previous_timeout_payload(config: RawCaptureServiceConfig) -> bytes:
 
 
 def _previous_retention_claim_payload(config: RawCaptureServiceConfig) -> bytes:
-    """Reconstruct the exact former 96 GiB admission claim for migration."""
+    """Reconstruct the exact former 80 GiB admission claim for migration."""
 
     mapping = config.to_mapping()
     retention = mapping.get("retention")
@@ -339,6 +341,19 @@ def _previous_retention_claim_payload(config: RawCaptureServiceConfig) -> bytes:
         raise WorkerOnlyBootstrapError("previous retention mapping invalid")
     retention["retained_payload_claim_bytes"] = (
         _PREVIOUS_PRODUCTION_RETENTION_CLAIM_BYTES
+    )
+    return _canonical(mapping)
+
+
+def _legacy_retention_claim_payload(config: RawCaptureServiceConfig) -> bytes:
+    """Reconstruct the older 96 GiB admission claim for direct migration."""
+
+    mapping = config.to_mapping()
+    retention = mapping.get("retention")
+    if not isinstance(retention, dict):
+        raise WorkerOnlyBootstrapError("legacy retention mapping invalid")
+    retention["retained_payload_claim_bytes"] = (
+        _LEGACY_PRODUCTION_RETENTION_CLAIM_BYTES
     )
     return _canonical(mapping)
 
@@ -498,6 +513,7 @@ def _load_existing_runtime_authority(
     try:
         existing_config = config_path.read_bytes()
         previous_retention_claim_payload = _previous_retention_claim_payload(config)
+        legacy_retention_claim_payload = _legacy_retention_claim_payload(config)
         previous_timeout_payload = _previous_timeout_payload(config)
         previous_epoch_payload = _previous_acquisition_epoch_payload(config)
         previous_epoch_timeout_payload = _previous_acquisition_epoch_payload(
@@ -520,6 +536,7 @@ def _load_existing_runtime_authority(
             or existing_config not in (
                 payload,
                 previous_retention_claim_payload,
+                legacy_retention_claim_payload,
                 previous_timeout_payload,
                 previous_epoch_payload,
                 previous_epoch_timeout_payload,
@@ -568,6 +585,7 @@ def _load_existing_runtime_authority(
                 payload,
                 accepted_previous=(
                     previous_retention_claim_payload,
+                    legacy_retention_claim_payload,
                     previous_timeout_payload,
                     previous_epoch_payload,
                     previous_epoch_timeout_payload,
@@ -623,6 +641,7 @@ def materialize_worker_only_runtime(
     ))
     previous_awn_payload = _previous_awn_payload(config)
     previous_retention_claim_payload = _previous_retention_claim_payload(config)
+    legacy_retention_claim_payload = _legacy_retention_claim_payload(config)
     previous_timeout_payload = _previous_timeout_payload(config)
     previous_epoch_payload = _previous_acquisition_epoch_payload(config)
     previous_epoch_timeout_payload = _previous_acquisition_epoch_payload(
@@ -638,6 +657,7 @@ def materialize_worker_only_runtime(
             failed_intermediate_payload,
             previous_awn_payload,
             previous_retention_claim_payload,
+            legacy_retention_claim_payload,
             previous_timeout_payload,
             previous_epoch_payload,
             previous_epoch_timeout_payload,
