@@ -1,0 +1,169 @@
+{
+  "kind": "recovered_archive_source",
+  "component": "integration",
+  "version": "0.1.0",
+  "source_id": "7ace5557da2e9ce3b3ce48c5e764207da05421224025d9f43b93ff8e606b1ed3",
+  "recovered_on": "2026-10-09",
+  "files": [
+    {
+      "path": "__init__.py",
+      "mode": 420,
+      "sha256": "5c2cd2c4d5c8d0e51f6c0b24a394561ebb3c86a66bc480a0e76ad1a45ef9eaf9",
+      "size": 14235
+    },
+    {
+      "path": "const.py",
+      "mode": 420,
+      "sha256": "b2a14181c334ac36959da6fedb89d26fa86b19138eabf5b4cbe5cde0e3a8a43f",
+      "size": 1412
+    },
+    {
+      "path": "engine/__init__.py",
+      "mode": 420,
+      "sha256": "bb16efb79356db51551840a528ab5ad7cc82ea94f24fc0fe2c2c56e1128bb60a",
+      "size": 38
+    },
+    {
+      "path": "engine/observation.py",
+      "mode": 420,
+      "sha256": "fa2b25e188369bd8b7ebbafcb82939d376fce2b031817b9075cd102120731f69",
+      "size": 2641
+    },
+    {
+      "path": "engine/observation_fusion_engine.py",
+      "mode": 420,
+      "sha256": "144a1c3110b97ee274ee7fa55bc8c9aad8420d08e40e69378324fb42204ac8da",
+      "size": 5414
+    },
+    {
+      "path": "engine/region_manager.py",
+      "mode": 420,
+      "sha256": "c0cea0eade8488290a6b432dcf4c73c8bd6859b305ec4e1016ecfdf2d74c0c58",
+      "size": 12640
+    },
+    {
+      "path": "engine/storm.py",
+      "mode": 420,
+      "sha256": "a25997284dc98575f287fec23294fd0ee7a16a72102114ef2a7697f95712c375",
+      "size": 4134
+    },
+    {
+      "path": "engine/storm_engine.py",
+      "mode": 420,
+      "sha256": "abea5fc2de6ef352d2bd4c15c006aeaae503ba150d67247a8c1a9438231f9406",
+      "size": 22947
+    },
+    {
+      "path": "geometry/__init__.py",
+      "mode": 420,
+      "sha256": "037ee6550f8f01812e302ca0294bec5b762ec80ace09458109a62d3ba73acde5",
+      "size": 40
+    },
+    {
+      "path": "geometry/bounding_box.py",
+      "mode": 420,
+      "sha256": "9b0b5a5f3926266321ef1cd2f0a58b0fdaf756c40d83422595682f37dda200fd",
+      "size": 1538
+    },
+    {
+      "path": "geometry/distance.py",
+      "mode": 420,
+      "sha256": "f59563ab6944ee3a42b7d01eebbe2b2d24ed38a9b636aa61c86f94a685460755",
+      "size": 1541
+    },
+    {
+      "path": "geometry/geocode.py",
+      "mode": 420,
+      "sha256": "56123703004063e5a68ab5a84a7fad6c0008008fff7acdcb1d9c8405ce007333",
+      "size": 1731
+    },
+    {
+      "path": "geometry/hull.py",
+      "mode": 420,
+      "sha256": "4b1a9141b59c57703c32510126ee3be0c1e7bc40b35123febcd47cbd1b75b63c",
+      "size": 2198
+    },
+    {
+      "path": "manifest.json",
+      "mode": 420,
+      "sha256": "ded31d75c16b8ad66a369f158af8e1e3c62372670e5cecdabd68542caba6c9e7",
+      "size": 262
+    },
+    {
+      "path": "plogger/__init__.py",
+      "mode": 420,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0
+    },
+    {
+      "path": "plogger/provider_logger.py",
+      "mode": 420,
+      "sha256": "0c1e70bfb1dbdfe3882ff341f3193b5a80769029c5a88e9ebe4117c13fa513dc",
+      "size": 5291
+    },
+    {
+      "path": "projection/__init__.py",
+      "mode": 420,
+      "sha256": "f8c83709c5d5b8c554c6e7f74ac14024d2c9de51bb56229f5de3402592168f93",
+      "size": 42
+    },
+    {
+      "path": "providers/__init__.py",
+      "mode": 420,
+      "sha256": "4c931432b361549d075414c8cb9b5a9b425d039fc083c2852a484b999ec839ab",
+      "size": 41
+    },
+    {
+      "path": "providers/blitzortung.py",
+      "mode": 420,
+      "sha256": "8df0d0c41d0bff513625c7a32fa411284d824583eb03b984378ba25c960f1e64",
+      "size": 5532
+    },
+    {
+      "path": "providers/kmi.py",
+      "mode": 420,
+      "sha256": "3ad47f4fca756fa81365ec7887d6efb82decdb5ce90d545c31d49c41e8418a9e",
+      "size": 7883
+    },
+    {
+      "path": "providers/knmi.py",
+      "mode": 420,
+      "sha256": "1c0b1360e47f4a2e9e66e011d710f8b9275798d7cf595592f67bc5ccae7ced2d",
+      "size": 8070
+    },
+    {
+      "path": "providers/netatmo.py",
+      "mode": 420,
+      "sha256": "89c3684d70ea19c62cefbaf9a02fcae9446422a23b9a5161e0bb10ea64924485",
+      "size": 10184
+    },
+    {
+      "path": "providers/open_meteo.py",
+      "mode": 420,
+      "sha256": "7ff10fb938c72b9e620a0fe03001fb462bffbdcceb4c31b19baa8275cfbb6589",
+      "size": 5147
+    },
+    {
+      "path": "providers/rainviewer.py",
+      "mode": 420,
+      "sha256": "1be6712b5e7103870161ef2eb490c72d4ad2d65d9e7f1834b61d285662b2a314",
+      "size": 8031
+    },
+    {
+      "path": "sensor.py",
+      "mode": 420,
+      "sha256": "478745aa607dcee25dc2e49256adea2794657ff85fffb4a2ccc8536f827c3bbc",
+      "size": 14501
+    }
+  ],
+  "artifacts": [
+    {
+      "filename": "Storm tracker v3.zip",
+      "archive_sha256": "46a0d391c9a82855b4d52b59e68e3d054577b7a9c1972f811e2b29d9d1d1246e",
+      "bytes": 47456,
+      "evidence_checks": []
+    }
+  ],
+  "deployment_status": "not_inferred",
+  "history_order": "version_then_source_hash_not_original_development_timestamps"
+}
