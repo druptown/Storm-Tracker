@@ -1357,14 +1357,13 @@ class RawCaptureServiceRuntime:
                 raise RawCaptureServiceIntegrityError(
                     "raw_capture_runtime_restart_required"
                 )
-            # Healthy restarts take the bounded live preflight only.  The
-            # preflight already escalates storage-integrity failures to orphan
-            # recovery plus one deep audit, so an ever-growing retained corpus
-            # can no longer delay every normal worker start.
-            self._retention_preflight(full_audit=False)
+            # Start transport and admission immediately.  The first provider
+            # tick performs the bounded retention preflight before any capture
+            # is admitted and escalates an actual integrity failure to orphan
+            # recovery plus one deep audit.  Storage size therefore cannot
+            # delay the worker heartbeat or initial operational snapshot.
             self._resource_preflight()
             self._sync_blitzortung_event_ingress()
-            self._retention_preflight(full_audit=False)
 
     def _tick_all_raw_ingress(self) -> ShadowTickResult:
         with self._raw_ingress_integrity_lock:
