@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from .storm import Storm
+from .trajectory import fit_adaptive_trajectory
 from ..geometry.bounding_box import compute_bounding_box, bounding_box_changed
 from ..geometry.hull import convex_hull, hull_radius_km
 from ..geometry.geocode import nearest_place, PlaceEntry
@@ -130,6 +131,8 @@ class StormEngine:
 
         # 4. Alle actieve storms bijwerken
         for storm in self._storms.values():
+            storm.prune_radar_cells()
+            storm.update_radar_classification()
             storm.update_counts()
             self._update_centroid(storm)
             self._update_movement(storm)
@@ -145,7 +148,7 @@ class StormEngine:
 
         # 7. Callback naar coordinator
         if self._on_updated:
-            self._on_updated(list(self._storms.values()))
+            self._on_updated(self.get_active_storms())
 
     def get_storms(self) -> list[Storm]:
         """Geef alle actieve storms terug (gesorteerd op grootte)."""
@@ -155,8 +158,125 @@ class StormEngine:
             reverse=True
         )
 
+    def get_active_storms(self) -> list[Storm]:
+        """Geef alleen systemen die operationeel nog actief zijn."""
+        return [storm for storm in self.get_storms() if not storm.is_dormant]
+
     def get_storm(self, storm_id: str) -> Optional[Storm]:
         return self._storms.get(storm_id)
+
+    def export_mcs_history(self) -> list[dict]:
+        """Geef compacte, JSON-veilige MCS-historiek voor persistente opslag."""
+        snapshots = []
+        for storm in self._storms.values():
+            if not storm.radar_system_frames:
+                continue
+            snapshot = storm.to_mcs_snapshot()
+            snapshot["motion_history"] = [
+                {"lat": point.lat, "lon": point.lon, "timestamp": point.ts}
+                for point in self._history.get(storm.storm_id, [])
+            ]
+            snapshots.append(snapshot)
+        return snapshots
+
+    def restore_mcs_history(self, snapshots: list[dict]) -> int:
+        """Herstel geldige radarhistoriek vóór de eerste nieuwe providerpoll."""
+        restored = 0
+        for snapshot in snapshots:
+            try:
+                storm = Storm.from_mcs_snapshot(snapshot)
+            except (KeyError, TypeError, ValueError):
+                _LOGGER.warning("Ongeldige MCS-snapshot overgeslagen", exc_info=True)
+                continue
+            if not storm.radar_system_frames:
+                continue
+            age_minutes = (time.time() - storm.last_update) / 60.0
+            if age_minutes > self._remove_minutes:
+                continue
+            storm.is_dormant = age_minutes > self._expire_minutes
+            self._storms[storm.storm_id] = storm
+            cutoff = time.time() - MAX_HISTORY_AGE_MIN * 60
+            history = []
+            for raw in snapshot.get("motion_history", []):
+                try:
+                    point = CentroidPoint(
+                        lat=float(raw["lat"]),
+                        lon=float(raw["lon"]),
+                        ts=float(raw["timestamp"]),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if point.ts >= cutoff:
+                    history.append(point)
+            if not history:
+                history = self._rebuild_radar_motion_history(storm, cutoff)
+            self._history[storm.storm_id] = sorted(
+                history, key=lambda point: point.ts
+            )[-MAX_HISTORY_POINTS:]
+            storm._dirty = True
+            self._update_movement(storm)
+            restored += 1
+        return restored
+
+    @staticmethod
+    def _rebuild_radar_motion_history(
+        storm: Storm, cutoff: float
+    ) -> list[CentroidPoint]:
+        """Herbouw centroidpunten uit oudere snapshots zonder motion_history."""
+        grouped: dict[float, list[tuple[float, float, float]]] = {}
+        for cell in storm.radar_cells.values():
+            if cell.timestamp < cutoff:
+                continue
+            weight = max(float(cell.area_km2), 1.0)
+            grouped.setdefault(float(cell.timestamp), []).append(
+                (cell.lat, cell.lon, weight)
+            )
+
+        # Oudere snapshots kunnen voor een tijdstip alleen nog een parent-frame
+        # bevatten. Gebruik dan het midden van de footprint als veilige fallback.
+        for frame in storm.radar_system_frames.values():
+            timestamp = float(frame.timestamp)
+            if timestamp < cutoff or timestamp in grouped:
+                continue
+            points = frame.footprint_points or tuple(frame.convective_points)
+            if not points:
+                continue
+            grouped[timestamp] = [(lat, lon, 1.0) for lat, lon in points]
+
+        history = []
+        for timestamp, points in grouped.items():
+            total_weight = sum(weight for _, _, weight in points)
+            history.append(CentroidPoint(
+                lat=sum(lat * weight for lat, _, weight in points) / total_weight,
+                lon=sum(lon * weight for _, lon, weight in points) / total_weight,
+                ts=timestamp,
+            ))
+        return sorted(history, key=lambda point: point.ts)
+
+    def retain_within(
+        self, center_lat: float, center_lon: float, radius_km: float
+    ) -> int:
+        """Verwijder WeatherSystems buiten het actuele monitoringsgebied."""
+        remove_ids = [
+            storm_id
+            for storm_id, storm in self._storms.items()
+            if _haversine(
+                center_lat,
+                center_lon,
+                storm.centroid_lat,
+                storm.centroid_lon,
+            ) > radius_km
+        ]
+
+        for storm_id in remove_ids:
+            self._storms.pop(storm_id, None)
+            self._history.pop(storm_id, None)
+            self._last_geocode_pos.pop(storm_id, None)
+
+        if remove_ids and self._on_updated:
+            self._on_updated(self.get_active_storms())
+
+        return len(remove_ids)
 
     # ── Observatie-verwerking per type ────────────────────────────────────
 
@@ -170,11 +290,23 @@ class StormEngine:
         best_storm: Optional[Storm] = None
         best_dist:  float           = self._cluster_radius
 
-        for storm in self._storms.values():
+        # Alle lokale kernen uit dezelfde oorspronkelijke OPERA-component
+        # horen binnen deze batch onvoorwaardelijk bij hetzelfde WeatherSystem.
+        parent_system_id = getattr(obs, "parent_system_id", None)
+        if parent_system_id:
+            best_storm = next(
+                (
+                    storm for storm in self._storms.values()
+                    if not storm.is_dormant
+                    and parent_system_id in storm.source_system_ids
+                ),
+                None,
+            )
+
+        for storm in self._storms.values() if best_storm is None else ():
             if storm.is_dormant:
                 continue
-            dist = _haversine(obs.lat, obs.lon,
-                              storm.centroid_lat, storm.centroid_lon)
+            dist = self._distance_to_storm(obs, storm)
             if dist < best_dist:
                 best_dist  = dist
                 best_storm = storm
@@ -192,6 +324,31 @@ class StormEngine:
                 self._new_storm(obs)
             else:
                 _LOGGER.debug("Max storms bereikt, observatie genegeerd")
+
+    @staticmethod
+    def _distance_to_storm(obs, storm: Storm) -> float:
+        """Match tegen echte bronfootprints, niet enkel rastercentroids."""
+        def compact(points, limit=24):
+            values = tuple(points or ())
+            if len(values) <= limit:
+                return values
+            step = max(1, len(values) // limit)
+            return values[::step][:limit]
+
+        observation_points = (
+            (obs.lat, obs.lon),
+            *compact(getattr(obs, "footprint_points", ())),
+        )
+        storm_points = [(storm.centroid_lat, storm.centroid_lon)]
+        for cell in storm.radar_cells.values():
+            storm_points.append((cell.lat, cell.lon))
+            storm_points.extend(compact(cell.footprint_points))
+        distances = [
+            _haversine(obs_lat, obs_lon, storm_lat, storm_lon)
+            for obs_lat, obs_lon in observation_points
+            for storm_lat, storm_lon in storm_points
+        ]
+        return min(distances)
 
     def _apply_observation_to_storm(self, storm: Storm, obs) -> None:
         """Pas de effecten van een observatie toe op een storm-object."""
@@ -218,6 +375,7 @@ class StormEngine:
             # Max intensiteit bijhouden voor clutter-filtering
             if (obs.intensity or 0) > storm.max_radar_intensity:
                 storm.max_radar_intensity = obs.intensity or 0
+            storm.record_radar_cell(obs)
 
     def _apply_rain_verification(self, obs) -> None:
         """
@@ -268,31 +426,53 @@ class StormEngine:
 
     def _update_centroid(self, storm: Storm) -> None:
         """
-        Herbereken centroid op basis van recente LIGHTNING en RADAR
-        observaties (laatste 5 min), gewogen naar recentheid.
+        Bouw de trajecthistorie primair uit afzonderlijke radarframes.
 
-        Gebruikt de timestamp van de observaties zelf (niet verwerkingstijd)
-        als referentiepunt — maakt de regressie deterministisch en
-        replay-veilig (kritieke bug uit V2, hier bewust gefixeerd).
+        Bliksemposities zijn geen veilige proxy voor de verplaatsing van de
+        neerslagcontour: nieuwe ontladingen kunnen aan een andere flank
+        ontstaan. Daarom gebruikt de neerslagprognose radarcentroids zodra die
+        beschikbaar zijn; bliksem blijft alleen een fallback.
         """
-        # Lightning-posities (meest nauwkeurig, punt-precies)
-        lightning = storm.strikes_in_window(minutes=5)  # (ts, lat, lon)
-        # Radar-posities (minder nauwkeurig, grotere pixels)
-        radar_cutoff = time.time() - 5 * 60
-        radar = [(ts, lat, lon) for ts, lat, lon, intens
-                 in storm._radar_observations if ts >= radar_cutoff]
+        cutoff = time.time() - MAX_HISTORY_AGE_MIN * 60
+        grouped: dict[float, list[tuple[float, float, float]]] = {}
+        for cell in storm.radar_cells.values():
+            if cell.timestamp < cutoff:
+                continue
+            weight = max(float(cell.area_km2), 1.0)
+            grouped.setdefault(float(cell.timestamp), []).append(
+                (cell.lat, cell.lon, weight)
+            )
 
-        all_points = [(ts, lat, lon) for ts, lat, lon in lightning] + \
-                     [(ts, lat, lon) for ts, lat, lon in radar]
-        if not all_points:
+        hist = self._history.setdefault(storm.storm_id, [])
+        if grouped:
+            existing = {round(point.ts, 3): point for point in hist}
+            for timestamp, points in grouped.items():
+                total_weight = sum(weight for _, _, weight in points)
+                existing[round(timestamp, 3)] = CentroidPoint(
+                    lat=sum(lat * weight for lat, _, weight in points)
+                    / total_weight,
+                    lon=sum(lon * weight for _, lon, weight in points)
+                    / total_weight,
+                    ts=timestamp,
+                )
+            hist[:] = sorted(existing.values(), key=lambda point: point.ts)
+            self._prune_history(storm.storm_id)
+            hist = self._history[storm.storm_id]
+            latest = hist[-1]
+            storm.centroid_lat = latest.lat
+            storm.centroid_lon = latest.lon
+            storm.motion_basis = "radar_centroid"
             return
 
-        reference_ts = max(ts for ts, _, _ in all_points)
+        lightning = storm.strikes_in_window(minutes=5)
+        if not lightning:
+            return
+        reference_ts = max(ts for ts, _, _ in lightning)
         total_weight = 0.0
         lat_sum = 0.0
         lon_sum = 0.0
 
-        for ts, lat, lon in all_points:
+        for ts, lat, lon in lightning:
             age    = reference_ts - ts
             weight = max(0.1, 1.0 - age / 300)
             lat_sum      += lat * weight
@@ -303,12 +483,16 @@ class StormEngine:
             new_lat = lat_sum / total_weight
             new_lon = lon_sum / total_weight
 
-            hist = self._history.setdefault(storm.storm_id, [])
-            hist.append(CentroidPoint(lat=new_lat, lon=new_lon, ts=reference_ts))
+            point = CentroidPoint(lat=new_lat, lon=new_lon, ts=reference_ts)
+            if hist and abs(hist[-1].ts - reference_ts) < 1.0:
+                hist[-1] = point
+            else:
+                hist.append(point)
             self._prune_history(storm.storm_id)
 
             storm.centroid_lat = new_lat
             storm.centroid_lon = new_lon
+            storm.motion_basis = "lightning_fallback"
 
     def _prune_history(self, storm_id: str) -> None:
         """Verwijder oude history punten."""
@@ -323,8 +507,11 @@ class StormEngine:
 
     def _update_movement(self, storm: Storm) -> None:
         """
-        Bereken richting en snelheid via lineaire regressie op centroid history.
-        Alleen als er genoeg punten zijn en de cache vervallen is.
+        Kies adaptief tussen constante snelheid en constante versnelling.
+
+        Het versnellingsmodel wordt alleen gekozen als een hindcast op de
+        laatste frames beter presteert. Zo blijft een voorspelbaar gebogen pad
+        bruikbaar, zonder elke centroidschommeling als bocht te interpreteren.
         """
         if not storm._dirty:
             return
@@ -334,10 +521,43 @@ class StormEngine:
             storm._dirty = False
             return
 
-        heading, speed = self._linear_regression(hist)
-        storm.heading_deg = heading
-        storm.speed_kmh   = speed
-        storm.confidence  = self._calc_confidence(hist, heading, speed)
+        estimate = fit_adaptive_trajectory(hist)
+        if estimate is None:
+            storm._dirty = False
+            return
+        heading = estimate.heading_deg
+        speed = estimate.speed_kmh
+        if speed > 150.0 or estimate.speed_at(90.0) > 180.0:
+            _LOGGER.debug(
+                "Adaptief traject afgewezen: %.1f km/h nu, %.1f km/h op +90 min",
+                speed,
+                estimate.speed_at(90.0),
+            )
+            heading = None
+            speed = None
+        storm.heading_deg = round(heading, 1) if heading is not None else None
+        storm.speed_kmh = round(speed, 1) if speed is not None else None
+        storm.motion_sample_count = len(hist)
+        storm.motion_history_minutes = round((hist[-1].ts - hist[0].ts) / 60.0, 1)
+        storm.motion_fit_quality = estimate.fit_quality
+        storm.motion_model = estimate.model
+        storm.motion_prediction_error_km = estimate.prediction_error_km
+        storm.motion_model_gain = round(estimate.model_gain, 3)
+        storm.velocity_east_kmh = round(estimate.velocity_east_kmh, 2)
+        storm.velocity_north_kmh = round(estimate.velocity_north_kmh, 2)
+        storm.acceleration_east_kmh2 = round(
+            estimate.acceleration_east_kmh2, 2
+        )
+        storm.acceleration_north_kmh2 = round(
+            estimate.acceleration_north_kmh2, 2
+        )
+        storm.confidence = self._calc_confidence(
+            hist,
+            heading,
+            speed,
+            fit_quality=estimate.fit_quality,
+            prediction_error_km=estimate.prediction_error_km,
+        )
         storm._dirty      = False
 
     def _linear_regression(
@@ -389,16 +609,54 @@ class StormEngine:
         hist: list[CentroidPoint],
         heading: Optional[float],
         speed: Optional[float],
+        *,
+        fit_quality: Optional[float] = None,
+        prediction_error_km: Optional[float] = None,
     ) -> str:
-        """Bereken confidence op basis van history lengte en consistentie."""
+        """Bereken confidence op basis van historie én echte hindcastfout."""
         n = len(hist)
-        if heading is None or n < MIN_HISTORY_POINTS:
+        span_minutes = (hist[-1].ts - hist[0].ts) / 60.0 if n > 1 else 0.0
+        quality = (
+            self._fit_quality(hist) if fit_quality is None else fit_quality
+        )
+        error = math.inf if prediction_error_km is None else prediction_error_km
+        if heading is None or n < MIN_HISTORY_POINTS or span_minutes < 5:
             return "Onvoldoende data"
-        if n >= 10 and speed is not None and speed > 1:
+        if (
+            n >= 6
+            and span_minutes >= 15
+            and quality >= 0.80
+            and error <= 3.0
+            and speed
+            and speed > 1
+        ):
             return "Hoog"
-        if n >= 6:
+        if span_minutes >= 10 and quality >= 0.55 and error <= 8.0:
             return "Matig"
         return "Laag"
+
+    @staticmethod
+    def _fit_quality(hist: list[CentroidPoint]) -> float:
+        """Gemiddelde R² van lat(t) en lon(t), als maat voor rechte beweging."""
+        if len(hist) < 2:
+            return 0.0
+        times = [point.ts - hist[0].ts for point in hist]
+
+        def r_squared(values: list[float]) -> float:
+            slope = _slope(times, values)
+            if slope is None:
+                return 0.0
+            mean_t = sum(times) / len(times)
+            mean_value = sum(values) / len(values)
+            intercept = mean_value - slope * mean_t
+            residual = sum(
+                (value - (intercept + slope * timestamp)) ** 2
+                for timestamp, value in zip(times, values)
+            )
+            total = sum((value - mean_value) ** 2 for value in values)
+            return 1.0 if total <= 1e-12 and residual <= 1e-12 else max(0.0, 1 - residual / total) if total > 0 else 0.0
+
+        return round((r_squared([p.lat for p in hist]) + r_squared([p.lon for p in hist])) / 2, 3)
 
     # ── Geometrie: bounding box, polygon (hull), geocoding ──────────────────
 
@@ -414,11 +672,11 @@ class StormEngine:
         points = [
             (lat, lon)
             for ts, lat, lon in storm.strikes_in_window(HULL_WINDOW_MINUTES)
-        ] + [
-            (lat, lon)
-            for ts, lat, lon, intens in storm._radar_observations
-            if ts >= cutoff
         ]
+        for cell in storm.radar_cells.values():
+            if cell.timestamp < cutoff:
+                continue
+            points.extend(cell.footprint_points or ((cell.lat, cell.lon),))
 
         new_box = compute_bounding_box(points)
 
@@ -504,6 +762,13 @@ class StormEngine:
         keeper.strike_count += other.strike_count
         keeper.update_counts()
         keeper._dirty = True
+        keeper.radar_cells.update(other.radar_cells)
+        keeper.source_system_ids.update(other.source_system_ids)
+        keeper.parent_system_areas.update(other.parent_system_areas)
+        keeper.parent_system_footprints.update(other.parent_system_footprints)
+        keeper._source_system_last_seen.update(other._source_system_last_seen)
+        keeper.radar_system_frames.update(other.radar_system_frames)
+        keeper.update_radar_classification()
 
         # Gecombineerde centroid (gewogen naar strike_count)
         total = keeper.strikes_60min + other.strikes_60min

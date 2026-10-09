@@ -1,0 +1,69 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Storm Tracker instellen",
+        "description": "De thuislocatie wordt automatisch uit Home Assistant gelezen. Selecteer de Life360-trackers die je afzonderlijk wilt volgen.",
+        "data": {
+          "persons": "Life360-personen",
+          "test_tracker_entity": "Fictieve tracker (optioneel, alleen voor tests)",
+          "radar_radius_km": "Radarbereik",
+          "engine_sharing_distance_km": "Afstand waarop targets dezelfde engine delen",
+          "eumetsat_consumer_key": "EUMETSAT consumer key (optionele Blitzortung-back-up)",
+          "eumetsat_consumer_secret": "EUMETSAT consumer secret",
+          "meteofrance_api_token": "Météo-France tijdelijk API-token (optionele terugval)",
+          "meteofrance_application_id": "Météo-France APPLICATION_ID voor automatische tokenvernieuwing",
+          "hsaf_username": "H SAF FTP-gebruikersnaam",
+          "hsaf_password": "H SAF FTP-wachtwoord",
+          "knmi_api_key": "KNMI API-key",
+          "knmi_wms_api_key": "KNMI WMS API-key (optioneel; anders dezelfde key)",
+          "netatmo_client_id": "Netatmo client-ID",
+          "netatmo_client_secret": "Netatmo client secret",
+          "netatmo_refresh_token": "Netatmo refresh-token",
+          "netatmo_radius_km": "Netatmo-stationsradius",
+          "lightning_source_mode": "Bliksembron",
+          "open_meteo_enabled": "Open-Meteo-modelbegeleiding inschakelen (optioneel)"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Storm Tracker kan maar eenmaal worden geconfigureerd."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Locaties beheren",
+        "description": "Thuis is altijd actief. Beheer hier de Life360-personen en de optionele fictieve testtracker. Herstart Home Assistant nadat je de opties hebt opgeslagen.",
+        "data": {
+          "persons": "Life360-personen",
+          "test_tracker_entity": "Fictieve tracker (optioneel, alleen voor tests)",
+          "radar_radius_km": "Radarbereik",
+          "engine_sharing_distance_km": "Afstand waarop targets dezelfde engine delen",
+          "eumetsat_consumer_key": "EUMETSAT consumer key (optionele Blitzortung-back-up)",
+          "eumetsat_consumer_secret": "EUMETSAT consumer secret",
+          "meteofrance_api_token": "Météo-France tijdelijk API-token (optionele terugval)",
+          "meteofrance_application_id": "Météo-France APPLICATION_ID voor automatische tokenvernieuwing",
+          "hsaf_username": "H SAF FTP-gebruikersnaam",
+          "hsaf_password": "H SAF FTP-wachtwoord",
+          "knmi_api_key": "KNMI API-key",
+          "knmi_wms_api_key": "KNMI WMS API-key (optioneel; anders dezelfde key)",
+          "netatmo_client_id": "Netatmo client-ID",
+          "netatmo_client_secret": "Netatmo client secret",
+          "netatmo_refresh_token": "Netatmo refresh-token",
+          "netatmo_radius_km": "Netatmo-stationsradius",
+          "lightning_source_mode": "Bliksembron",
+          "open_meteo_enabled": "Open-Meteo-modelbegeleiding inschakelen (optioneel)"
+        }
+      }
+    }
+  },
+  "selector": {
+    "lightning_source_mode": {
+      "options": {
+        "auto": "Automatisch (Blitzortung met satellietfallback)",
+        "satellite_test": "Satelliet forceren (testmodus)"
+      }
+    }
+  }
+}

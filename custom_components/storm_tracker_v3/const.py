@@ -1,4 +1,4 @@
-"""Storm Tracker V3 — const.py v0.1.0"""
+"""Storm Tracker V3 — const.py v0.4.3"""
 
 DOMAIN = "storm_tracker_v3"
 

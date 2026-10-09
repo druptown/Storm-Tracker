@@ -51,6 +51,24 @@ def _write_row_sync(filename: str, row: dict) -> None:
         _LOGGER.warning("ProviderLogger: schrijffout %s: %s", filename, e)
 
 
+def _write_rows_sync(filename: str, rows: list[dict]) -> None:
+    """Schrijf een volledige providerbatch in één executor-job."""
+    if not rows:
+        return
+    _ensure_dir()
+    path = LOG_DIR / filename
+    _rotate_if_needed(path)
+    is_new = not path.exists()
+    try:
+        with open(path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            if is_new:
+                writer.writeheader()
+            writer.writerows(rows)
+    except Exception as e:
+        _LOGGER.warning("ProviderLogger: batch-schrijffout %s: %s", filename, e)
+
+
 def _log(hass, filename: str, row: dict) -> None:
     """Schrijf via executor — volledig non-blocking."""
     hass.async_add_executor_job(_write_row_sync, filename, row)
@@ -62,6 +80,17 @@ def log_lightning(hass, lat: float, lon: float, timestamp: float) -> None:
         "lat":       round(lat, 5),
         "lon":       round(lon, 5),
     })
+
+
+def log_lightning_batch(hass, observations: list[dict]) -> None:
+    """Bundel blikseminslagen zodat een storm de HA-executor niet verzadigt."""
+    rows = [{
+        "timestamp": datetime.fromtimestamp(item["timestamp"]).isoformat(),
+        "lat": round(item["lat"], 5),
+        "lon": round(item["lon"], 5),
+    } for item in observations]
+    if rows:
+        hass.async_add_executor_job(_write_rows_sync, "blitzortung.csv", rows)
 
 
 def log_kmi(hass, obs_list: list, tracker_lat: float, tracker_lon: float) -> None:
@@ -121,17 +150,59 @@ def log_netatmo(hass, obs_list: list, tracker_lat: float, tracker_lon: float) ->
     })
 
 
-def log_open_meteo(hass, result: dict, tracker_lat: float, tracker_lon: float) -> None:
+def log_open_meteo(
+    hass,
+    result: dict,
+    tracker_lat: float,
+    tracker_lon: float,
+    *,
+    target_id: str = "unknown",
+) -> None:
     import json as _json
-    _log(hass, "open_meteo.csv", {
+    # Nieuw doelgericht schema in een nieuw bestand; zo blijven historische
+    # 324-puntengridregels correct leesbaar in open_meteo.csv.
+    _log(hass, "open_meteo_targets.csv", {
         "timestamp":              datetime.now().isoformat(timespec="seconds"),
+        "target_id":              target_id,
         "tracker_lat":            round(tracker_lat, 4),
         "tracker_lon":            round(tracker_lon, 4),
-        "is_raining":             result.get("is_raining", False),
-        "natte_punten_nu":        result.get("wet_now", 0),
-        "natte_punten_90min":     result.get("wet_forecast_90m", 0),
-        "totaal_punten":          result.get("total_points", 0),
-        "max_neerslag_mm":        result.get("max_precipitation", 0),
-        "locaties_nu":            _json.dumps(result.get("wet_locations_now", [])),
-        "locaties_forecast":      _json.dumps(result.get("wet_locations_forecast", [])),
+        "provider_status":        result.get("provider_status"),
+        "fetch_sequence":         result.get("fetch_sequence"),
+        "last_success_at":        result.get("last_success_at"),
+        "neerslag_nu_mm":         result.get("current_precipitation_mm"),
+        "max_neerslag_90min_mm":  result.get("forecast_90m_max_mm"),
+        "totaal_90min_mm":        result.get("forecast_90m_total_mm"),
+        "natte_stappen_90min":    result.get("forecast_90m_wet_steps"),
+        "eerste_regen_minuten":   result.get("forecast_90m_first_wet_minutes"),
+        "max_neerslag_3uur_mm":   result.get("forecast_3h_max_mm"),
+        "totaal_3uur_mm":         result.get("forecast_3h_total_mm"),
+        "neerslagkans_max_6uur":  result.get(
+            "precipitation_probability_max_6h_percent"
+        ),
+        "cape_max_3uur_jkg":      result.get("cape_max_3h_jkg"),
+        "lpi_max_3uur":           result.get(
+            "lightning_potential_max_3h"
+        ),
+        "lifted_index_min_6uur":  result.get("lifted_index_min_6h"),
+        "cin_min_6uur_jkg":       result.get(
+            "convective_inhibition_min_6h_jkg"
+        ),
+        "windstoot_max_3uur_kmh": result.get("wind_gusts_max_3h_kmh"),
+        "wind_850hpa_kmh":        result.get("wind_850hpa_speed_kmh"),
+        "wind_850hpa_graden":     result.get(
+            "wind_850hpa_direction_deg"
+        ),
+        "wind_700hpa_kmh":        result.get("wind_700hpa_speed_kmh"),
+        "wind_700hpa_graden":     result.get(
+            "wind_700hpa_direction_deg"
+        ),
+        "druk_msl_hpa":           result.get("pressure_msl_hpa"),
+        "beschikbare_variabelen": _json.dumps(
+            result.get("available_variables", [])
+        ),
+        "model_lat":              result.get("model_latitude"),
+        "model_lon":              result.get("model_longitude"),
+        "kwartierwaarden": _json.dumps(
+            result.get("forecast_90m_precipitation_mm", [])
+        ),
     })
