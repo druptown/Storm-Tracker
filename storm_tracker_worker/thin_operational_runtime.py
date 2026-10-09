@@ -332,7 +332,7 @@ class ThinOperationalRuntime:
             item.target_id: (
                 item.latitude,
                 item.longitude,
-                max(0.0, item.location_accuracy_m / 1000.0),
+                max(0.0, float(item.location_accuracy_m or 0.0) / 1000.0),
             )
             for item in active_targets
         })
