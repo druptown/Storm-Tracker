@@ -35,10 +35,16 @@ from .worker_first_composition import (
 from .worker_first_service_composition import WorkerFirstServiceSourcePaths
 
 
-CONTRACT = "stv3-worker-only-bootstrap-v2"
+CONTRACT = "stv3-worker-only-bootstrap-v3"
 DEFAULT_ROOT = Path("/data/storm_tracker_worker_runtime_production_v1")
 CONFIG_FILENAME = "worker-only-config.json"
-PRODUCTION_RAW_CAPACITY_BYTES = 128 * 1024 * 1024 * 1024
+# Keep the configured envelope comfortably below the actual 160 GB NAS VM
+# filesystem.  The retention guard reserves the complete unused RAW envelope,
+# both 4 GiB catalog ceilings and 2 GiB of host headroom before it admits a
+# provider cycle.  A 128 GiB RAW ceiling therefore required roughly 138 GiB
+# free and incorrectly blocked an otherwise empty 160 GB installation.
+PRODUCTION_RAW_CAPACITY_BYTES = 96 * 1024 * 1024 * 1024
+_LEGACY_PRODUCTION_RAW_CAPACITY_BYTES = 128 * 1024 * 1024 * 1024
 PRODUCTION_ENTRY_CAPACITY = 1_000_000
 PRODUCTION_RESERVATION_CAPACITY = 250_000
 PRODUCTION_CAPTURE_CAPACITY = 250_000
@@ -119,7 +125,10 @@ def _profile() -> DwdRvShadowChainProfile:
     )
 
 
-def _capacity_contract() -> tuple[RawCapacityProfile, RawArtifactLimits]:
+def _capacity_contract(
+    *,
+    raw_capacity_bytes: int = PRODUCTION_RAW_CAPACITY_BYTES,
+) -> tuple[RawCapacityProfile, RawArtifactLimits]:
     active = tuple(
         rule for rule in ACTIVATION_RULES.values() if rule.executable
     )
@@ -131,7 +140,7 @@ def _capacity_contract() -> tuple[RawCapacityProfile, RawArtifactLimits]:
         int(rule.maximum_transport_bytes or 0) for rule in active
     )
     global_bytes = max(
-        PRODUCTION_RAW_CAPACITY_BYTES,
+        raw_capacity_bytes,
         required_bytes * 2,
         maximum_object_bytes * 2,
     )
@@ -171,14 +180,20 @@ def _capacity_contract() -> tuple[RawCapacityProfile, RawArtifactLimits]:
     )
 
 
-def build_worker_only_config(root: str | Path) -> RawCaptureServiceConfig:
+def _build_worker_only_config(
+    root: str | Path,
+    *,
+    raw_capacity_bytes: int,
+) -> RawCaptureServiceConfig:
     supplied = Path(root)
     if not supplied.is_absolute():
         raise WorkerOnlyBootstrapError("bootstrap root must be absolute")
     resolved = supplied.resolve(strict=False)
     if resolved != supplied or resolved == Path(resolved.anchor):
         raise WorkerOnlyBootstrapError("bootstrap root is not canonical")
-    capacity, raw_limits = _capacity_contract()
+    capacity, raw_limits = _capacity_contract(
+        raw_capacity_bytes=raw_capacity_bytes,
+    )
     worker_first = WorkerFirstCompositionConfig.create(
         paths=_paths(resolved),
         profile=_profile(),
@@ -205,11 +220,47 @@ def build_worker_only_config(root: str | Path) -> RawCaptureServiceConfig:
     )
 
 
-def _publish_identical(path: Path, payload: bytes) -> None:
+def build_worker_only_config(root: str | Path) -> RawCaptureServiceConfig:
+    return _build_worker_only_config(
+        root,
+        raw_capacity_bytes=PRODUCTION_RAW_CAPACITY_BYTES,
+    )
+
+
+def _publish_identical(
+    path: Path,
+    payload: bytes,
+    *,
+    accepted_previous: tuple[bytes, ...] = (),
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
-        if path.is_symlink() or not path.is_file() or path.read_bytes() != payload:
+        if path.is_symlink() or not path.is_file():
             raise WorkerOnlyBootstrapError("existing bootstrap config differs")
+        existing = path.read_bytes()
+        if existing == payload:
+            return
+        if existing not in accepted_previous:
+            raise WorkerOnlyBootstrapError("existing bootstrap config differs")
+        temporary: Path | None = None
+        try:
+            descriptor, raw_path = tempfile.mkstemp(
+                dir=path.parent,
+                prefix=".worker-only-config-migration-",
+                suffix=".tmp",
+            )
+            temporary = Path(raw_path)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if path.is_symlink() or path.read_bytes() != existing:
+                raise WorkerOnlyBootstrapError("bootstrap config raced with drift")
+            os.replace(temporary, path)
+            temporary = None
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         return
     temporary: Path | None = None
     try:
@@ -240,8 +291,16 @@ def materialize_worker_only_runtime(root: str | Path = DEFAULT_ROOT) -> dict[str
         expected_config_sha256=config.worker_first.fingerprint,
     )
     payload = _canonical(config.to_mapping())
+    legacy_payload = _canonical(_build_worker_only_config(
+        root,
+        raw_capacity_bytes=_LEGACY_PRODUCTION_RAW_CAPACITY_BYTES,
+    ).to_mapping())
     config_path = Path(root) / CONFIG_FILENAME
-    _publish_identical(config_path, payload)
+    _publish_identical(
+        config_path,
+        payload,
+        accepted_previous=(legacy_payload,),
+    )
     return {
         "authority_sha256": authority.authority_sha256,
         "config_path": str(config_path),
