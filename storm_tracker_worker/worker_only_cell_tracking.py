@@ -1315,10 +1315,12 @@ def _metric_source_grid(
                 "dwd_metric_grid_certificate_mismatch"
             )
         grid = AnalysisGrid(
-            grid_id=(
-                "worker-only-source-grid:"
-                + hashlib.sha256(certificate.fingerprint.encode("ascii")).hexdigest()
-            ),
+            # The certificate is intentionally bound to one frame's content,
+            # so its fingerprint changes for every valid DWD scan.  It may be
+            # used to validate the geometry, but it must never become the
+            # temporal track grid identity.  The stable geometry-only ID is
+            # installed below for every trackable provider.
+            grid_id=certificate.certificate_id,
             crs=certificate.target_crs,
             origin_x_m=certificate.source_west_edge_target_m,
             origin_y_m=certificate.source_north_edge_target_m,
@@ -1345,7 +1347,50 @@ def _metric_source_grid(
         return None, "metric_grid_crs_not_projected"
     if grid.width != field.native_grid.width or grid.height != field.native_grid.height:
         raise WorkerOnlyCellTrackingError("metric_grid_shape_mismatch")
-    return grid, None
+    return _stable_metric_source_grid(workload_id, grid), None
+
+
+def _stable_metric_source_grid(
+    workload_id: str,
+    grid: AnalysisGrid,
+) -> AnalysisGrid:
+    """Replace a frame-bound provider grid ID with exact geometry identity.
+
+    Provider evidence and transform certificates remain fully content-bound.
+    Cell tracking, however, must compare consecutive values on the same fixed
+    geometry.  Including a capture/certificate ID here resets every track on
+    every frame and makes motion mathematically impossible.
+    """
+
+    _safe_id(workload_id, "workload_id")
+    geometry_id = "worker-only-source-grid:" + _digest({
+        "axis_order": grid.axis_order,
+        "contract": "stv3-worker-only-metric-grid-geometry-v1",
+        "coordinate_unit": grid.coordinate_unit,
+        "crs": grid.crs,
+        "height": grid.height,
+        "origin_x_m": grid.origin_x_m,
+        "origin_y_m": grid.origin_y_m,
+        "row_order": grid.row_order,
+        "width": grid.width,
+        "workload_id": workload_id,
+        "x_resolution_m": grid.x_resolution_m,
+        "y_resolution_m": grid.y_resolution_m,
+    })
+    return AnalysisGrid(
+        grid_id=geometry_id,
+        crs=grid.crs,
+        origin_x_m=grid.origin_x_m,
+        origin_y_m=grid.origin_y_m,
+        x_resolution_m=grid.x_resolution_m,
+        y_resolution_m=grid.y_resolution_m,
+        width=grid.width,
+        height=grid.height,
+        coordinate_unit=grid.coordinate_unit,
+        axis_order=grid.axis_order,
+        row_order=grid.row_order,
+        contract_version=grid.contract_version,
+    )
 
 
 def _region_lineage_id(workload_id: str, target_ids: tuple[str, ...]) -> str:
