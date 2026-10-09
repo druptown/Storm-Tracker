@@ -75,6 +75,9 @@ MAX_DIAGNOSTIC_BYTES = 16 * 1024
 MAX_CHILD_RESULT_BYTES = 16 * 1024
 MAX_CHILD_REQUEST_BYTES = 16 * 1024
 MAX_EXECUTOR_WALL_SECONDS = 300.0
+ADAPTIVE_ATTEMPT_WALL_SECONDS = 20.0
+ADAPTIVE_ATTEMPT_FAILURE_THRESHOLD = 2
+ADAPTIVE_FULL_PROBE_INTERVAL = 6
 DEFAULT_OWNER = "acquisition-shadow-v3"
 DEADLINE_BINDING_CONTRACT = "stv3-worker-acquisition-deadline-binding-v1"
 CANARY_CHILD_ENVIRONMENT_ALLOWLIST = frozenset({
@@ -448,6 +451,7 @@ class AcquisitionShadowRuntime:
         self._latest_terminal_observations: dict[
             str, tuple[tuple[float, str, str], dict[str, str]]
         ] = {}
+        self._consecutive_terminal_failures: dict[str, int] = {}
         self._raw_store = self._validate_storage_envelope()
         self._capture_reconciler = CaptureCapacityReconciler(
             raw_store=self._raw_store,
@@ -495,6 +499,13 @@ class AcquisitionShadowRuntime:
         previous = self._latest_terminal_observations.get(workload_id)
         if previous is not None and previous[0] >= order:
             return
+        if receipt.outcome == "completed_shadow_raw":
+            self._consecutive_terminal_failures.pop(workload_id, None)
+        elif receipt.attempt_count > 0:
+            self._consecutive_terminal_failures[workload_id] = min(
+                1_000_000,
+                self._consecutive_terminal_failures.get(workload_id, 0) + 1,
+            )
         self._latest_terminal_observations[workload_id] = (
             order,
             {
@@ -510,10 +521,45 @@ class AcquisitionShadowRuntime:
         workloads_by_job = self._scheduler.workload_ids_for_jobs(tuple(
             receipt.scheduler_job_id for receipt in terminals
         ))
-        for receipt in terminals:
+        for receipt in sorted(
+            terminals,
+            key=lambda item: (
+                item.created_at,
+                item.acquisition_job_id,
+                item.receipt_sha256,
+            ),
+        ):
             workload_id = workloads_by_job.get(receipt.scheduler_job_id)
             if workload_id is not None:
                 self._remember_terminal_observation(workload_id, receipt)
+
+    def _attempt_wall_seconds(
+        self,
+        job: acquisition.AcquisitionJob,
+        *,
+        rule_wall_seconds: float,
+        deadline_remaining_seconds: float,
+    ) -> float:
+        """Bound repeat failures without permanently excluding slow products.
+
+        A provider that repeatedly consumes its complete wall budget can starve
+        the single crash-safe acquisition lane.  After two executed terminal
+        failures it therefore receives short probes.  One deterministic slot
+        in every six retains the complete native budget, so a legitimately
+        large product can still recover without an operator restart.
+        """
+
+        remaining = min(rule_wall_seconds, deadline_remaining_seconds)
+        failures = self._consecutive_terminal_failures.get(job.workload_id, 0)
+        if failures < ADAPTIVE_ATTEMPT_FAILURE_THRESHOLD:
+            return remaining
+        phase = int(
+            hashlib.sha256(job.workload_id.encode("utf-8")).hexdigest()[:8],
+            16,
+        ) % ADAPTIVE_FULL_PROBE_INTERVAL
+        if job.slot_index % ADAPTIVE_FULL_PROBE_INTERVAL == phase:
+            return remaining
+        return min(remaining, ADAPTIVE_ATTEMPT_WALL_SECONDS)
 
     def _validate_storage_envelope(self) -> RawArtifactStore:
         profile = self._capacity_ledger.profile
@@ -874,7 +920,7 @@ class AcquisitionShadowRuntime:
                 continue
             if self._execution_store.load_terminal(job.job_id) is not None:
                 continue
-            self._execution_store.record(
+            receipt = self._execution_store.record(
                 scheduler_job_id=scheduler_job_id,
                 acquisition_job_id=job.job_id,
                 binding_sha256=self._missed_deadline_binding_sha256(
@@ -885,6 +931,7 @@ class AcquisitionShadowRuntime:
                 reason_code="deadline_expired",
                 terminal=True,
             )
+            self._remember_terminal_observation(job.workload_id, receipt)
             accounted += 1
         jobs_by_scheduled_for: dict[float, dict[str, acquisition.AcquisitionJob]] = {}
         for record in self._due_deadline_records(plan=plan, now=now):
@@ -926,7 +973,7 @@ class AcquisitionShadowRuntime:
                 raise AcquisitionRuntimeError("deadline scheduler/job binding drifted")
             if self._execution_store.load_terminal(job.job_id) is not None:
                 continue
-            self._execution_store.record(
+            receipt = self._execution_store.record(
                 scheduler_job_id=record.job_id,
                 acquisition_job_id=job.job_id,
                 binding_sha256=self._deadline_binding_sha256(record, job),
@@ -935,6 +982,7 @@ class AcquisitionShadowRuntime:
                 reason_code="deadline_expired",
                 terminal=True,
             )
+            self._remember_terminal_observation(job.workload_id, receipt)
             accounted += 1
         return accounted
 
@@ -1308,10 +1356,14 @@ class AcquisitionShadowRuntime:
                 "admitted handler wall budget is outside the executor boundary"
             )
         execution_started_at = self._transition_time(now)
-        remaining = min(
-            float(rule_wall),
-            max(0.0, claimed.deadline_at - execution_started_at),
+        remaining = self._attempt_wall_seconds(
+            job,
+            rule_wall_seconds=float(rule_wall),
+            deadline_remaining_seconds=max(
+                0.0, claimed.deadline_at - execution_started_at
+            ),
         )
+        attempt_deadline_at = execution_started_at + remaining
         if remaining < 0.05:
             reason = "execution_deadline_exhausted"
             return self._retry_or_expire(bound, claimed, reason, now=now)
@@ -1473,12 +1525,14 @@ class AcquisitionShadowRuntime:
             }
         # OAuth minting consumes the same bounded absolute deadline as the
         # child.  Recompute the child wall after the parent broker returns.
-        active_deadline_at = float(
-            request.get("execution_deadline_at", claimed.deadline_at)
+        active_deadline_at = min(
+            attempt_deadline_at,
+            float(request.get("execution_deadline_at", claimed.deadline_at)),
         )
-        remaining = min(
-            float(rule_wall),
-            max(
+        remaining = self._attempt_wall_seconds(
+            job,
+            rule_wall_seconds=float(rule_wall),
+            deadline_remaining_seconds=max(
                 0.0,
                 active_deadline_at - self._transition_time(now),
             ),
@@ -1791,6 +1845,23 @@ class AcquisitionShadowRuntime:
             "capture_recovery": self._capture_reconciler.diagnostics(),
             "contract": CONTRACT,
             "collector_scope": self._collector_scope,
+            "adaptive_attempts": {
+                "failure_threshold": ADAPTIVE_ATTEMPT_FAILURE_THRESHOLD,
+                "full_probe_interval": ADAPTIVE_FULL_PROBE_INTERVAL,
+                "short_wall_seconds": ADAPTIVE_ATTEMPT_WALL_SECONDS,
+                "throttled_workload_count": len([
+                    count
+                    for count in self._consecutive_terminal_failures.values()
+                    if count >= ADAPTIVE_ATTEMPT_FAILURE_THRESHOLD
+                ]),
+                "throttled_workload_ids": sorted(
+                    workload_id
+                    for workload_id, count in (
+                        self._consecutive_terminal_failures.items()
+                    )
+                    if count >= ADAPTIVE_ATTEMPT_FAILURE_THRESHOLD
+                ),
+            },
             "execution_receipts": self._execution_store.stats(),
             "last_tick": self._last_tick.as_dict(),
             "operational_admission_eligible": False,
