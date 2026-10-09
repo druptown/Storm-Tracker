@@ -12,7 +12,6 @@ import xml.etree.ElementTree as ET
 from typing import Any, Mapping, Protocol
 
 from .thin_observation import (
-    MAX_GROUND_SOURCE_AGE_SECONDS,
     NormalizedObservation,
     ObservationKind,
     ObservationQuality,
@@ -474,8 +473,7 @@ class MetarAdapter:
         payload = await fetcher.get_json(
             self._endpoint,
             params={
-                # Aviation Weather documents bbox as lat0,lon0,lat1,lon1.
-                "bbox": f"{south:.3f},{west:.3f},{north:.3f},{east:.3f}",
+                "bbox": f"{west:.3f},{south:.3f},{east:.3f},{north:.3f}",
                 "format": "json",
                 "hours": "1",
             },
@@ -509,7 +507,6 @@ class MetarAdapter:
                     "quality": ObservationQuality.GOOD,
                     "geometry": _point(longitude, latitude),
                     "metadata": {"station_id": station_id},
-                    "maximum_age_seconds": MAX_GROUND_SOURCE_AGE_SECONDS,
                 }
                 temperature = _optional_float(station.get("temp"))
                 pressure = _optional_float(station.get("altim"))
