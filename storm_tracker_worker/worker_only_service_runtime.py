@@ -183,6 +183,7 @@ class WorkerOnlyServiceRuntime:
             "latest_received_at": None,
             "database_bytes": 0,
             "exact_raw": True,
+            "source_statistics": [],
         }
         self._clock = clock
         self._gate = asyncio.Lock()
@@ -258,7 +259,11 @@ class WorkerOnlyServiceRuntime:
         if index is None:
             return
         try:
-            self._raw_calibration_stats = index.initialize()
+            initialized = index.initialize()
+            initialized["source_statistics"] = [
+                dict(row) for row in index.source_statistics()
+            ]
+            self._raw_calibration_stats = initialized
         except Exception:
             self._increment("raw_calibration_index_failures")
             self._raw_calibration_stats = {
@@ -288,6 +293,9 @@ class WorkerOnlyServiceRuntime:
             }
             return
         already_indexed = result.pop("already_indexed", False)
+        result["source_statistics"] = [
+            dict(row) for row in index.source_statistics()
+        ]
         self._raw_calibration_stats = result
         if not already_indexed:
             self._increment("raw_calibration_indexed")
