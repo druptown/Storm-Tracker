@@ -359,87 +359,17 @@ def project_radar_field(
     field: ThinRadarField,
     grid: AnalysisGrid,
 ) -> RegionalRadarLayer:
-    """Conservatively project one native rain-rate field onto one region."""
+    """Vector-project one native rain-rate field onto one region.
+
+    Sampling the complete target grid in one pyproj/NumPy pass avoids the
+    former source-pixel polygon loop.  The nearest native pixel remains the
+    validity authority (so nodata cannot bleed into the fused field), while
+    valid neighbours are bilinearly weighted for a stable rain rate.
+    """
     source_crs = _metric_projected_crs(field.crs)
     target_crs = _metric_projected_crs(grid.crs)
     to_source = Transformer.from_crs(target_crs, source_crs, always_xy=True)
-    to_target = Transformer.from_crs(source_crs, target_crs, always_xy=True)
     shape = (grid.height, grid.width)
-    support_area = np.zeros(shape, dtype=np.float64)
-    valid_area = np.zeros(shape, dtype=np.float64)
-    rain_integral = np.zeros(shape, dtype=np.float64)
-    source_window = _source_window(field, grid, to_source)
-    if source_window is not None:
-        first_row, last_row, first_column, last_column = source_window
-        source_x_edges = field.origin_x_m + np.arange(
-            first_column, last_column + 1, dtype=float,
-        ) * field.x_resolution_m
-        source_y_edges = field.origin_y_m - np.arange(
-            first_row, last_row + 1, dtype=float,
-        ) * field.y_resolution_m
-        source_x_mesh, source_y_mesh = np.meshgrid(source_x_edges, source_y_edges)
-        target_x_mesh, target_y_mesh = to_target.transform(source_x_mesh, source_y_mesh)
-        if not np.all(np.isfinite(target_x_mesh)) or not np.all(np.isfinite(target_y_mesh)):
-            raise RegionalRadarProjectionError("coordinate_transform_failed")
-
-        grid_west, grid_south, grid_east, grid_north = grid.extent_edges_m
-        for local_row, source_row in enumerate(range(first_row, last_row)):
-            for local_column, source_column in enumerate(range(first_column, last_column)):
-                polygon = [
-                    (float(target_x_mesh[local_row, local_column]), float(target_y_mesh[local_row, local_column])),
-                    (float(target_x_mesh[local_row, local_column + 1]), float(target_y_mesh[local_row, local_column + 1])),
-                    (float(target_x_mesh[local_row + 1, local_column + 1]), float(target_y_mesh[local_row + 1, local_column + 1])),
-                    (float(target_x_mesh[local_row + 1, local_column]), float(target_y_mesh[local_row + 1, local_column])),
-                ]
-                minimum_x = min(point[0] for point in polygon)
-                maximum_x = max(point[0] for point in polygon)
-                minimum_y = min(point[1] for point in polygon)
-                maximum_y = max(point[1] for point in polygon)
-                if (
-                    maximum_x <= grid_west
-                    or minimum_x >= grid_east
-                    or maximum_y <= grid_south
-                    or minimum_y >= grid_north
-                ):
-                    continue
-                first_target_column = max(
-                    0,
-                    math.floor((minimum_x - grid.origin_x_m) / grid.x_resolution_m),
-                )
-                last_target_column = min(
-                    grid.width - 1,
-                    math.ceil((maximum_x - grid.origin_x_m) / grid.x_resolution_m) - 1,
-                )
-                first_target_row = max(
-                    0,
-                    math.floor((grid.origin_y_m - maximum_y) / grid.y_resolution_m),
-                )
-                last_target_row = min(
-                    grid.height - 1,
-                    math.ceil((grid.origin_y_m - minimum_y) / grid.y_resolution_m) - 1,
-                )
-                for target_row in range(first_target_row, last_target_row + 1):
-                    north = grid.origin_y_m - target_row * grid.y_resolution_m
-                    south = north - grid.y_resolution_m
-                    for target_column in range(first_target_column, last_target_column + 1):
-                        west = grid.origin_x_m + target_column * grid.x_resolution_m
-                        east = west + grid.x_resolution_m
-                        overlap = _polygon_area(_clip_rectangle(
-                            polygon,
-                            west=west,
-                            south=south,
-                            east=east,
-                            north=north,
-                        ))
-                        if overlap <= _AREA_EPSILON_M2:
-                            continue
-                        support_area[target_row, target_column] += overlap
-                        if bool(field.valid_mask[source_row, source_column]):
-                            valid_area[target_row, target_column] += overlap
-                            rain_integral[target_row, target_column] += overlap * float(
-                                field.rain_rate_mm_h[source_row, source_column]
-                            )
-
     center_columns = np.arange(grid.width, dtype=float) + 0.5
     center_rows = np.arange(grid.height, dtype=float) + 0.5
     target_center_x, target_center_y = np.meshgrid(
@@ -447,6 +377,20 @@ def project_radar_field(
         grid.origin_y_m - center_rows * grid.y_resolution_m,
     )
     nearest_x, nearest_y = to_source.transform(target_center_x, target_center_y)
+    if not np.all(np.isfinite(nearest_x)) or not np.all(np.isfinite(nearest_y)):
+        raise RegionalRadarProjectionError("coordinate_transform_failed")
+
+    source_columns = (
+        (nearest_x - field.origin_x_m) / field.x_resolution_m - 0.5
+    )
+    source_rows = (
+        (field.origin_y_m - nearest_y) / field.y_resolution_m - 0.5
+    )
+    lower_columns = np.floor(source_columns).astype(np.int64)
+    lower_rows = np.floor(source_rows).astype(np.int64)
+    column_fraction = np.clip(source_columns - lower_columns, 0.0, 1.0)
+    row_fraction = np.clip(source_rows - lower_rows, 0.0, 1.0)
+
     nearest_columns = np.floor(
         (nearest_x - field.origin_x_m) / field.x_resolution_m
     ).astype(np.int64)
@@ -465,13 +409,39 @@ def project_radar_field(
         nearest_rows[nearest_in_bounds],
         nearest_columns[nearest_in_bounds],
     ]
-    support_mask = support_area > _AREA_EPSILON_M2
-    valid_mask = nearest_valid & (valid_area > _AREA_EPSILON_M2)
+
+    valid_weight = np.zeros(shape, dtype=np.float64)
+    rain_weighted = np.zeros(shape, dtype=np.float64)
+    for row_offset, column_offset, weights in (
+        (0, 0, (1.0 - row_fraction) * (1.0 - column_fraction)),
+        (0, 1, (1.0 - row_fraction) * column_fraction),
+        (1, 0, row_fraction * (1.0 - column_fraction)),
+        (1, 1, row_fraction * column_fraction),
+    ):
+        rows = lower_rows + row_offset
+        columns = lower_columns + column_offset
+        in_bounds = (
+            (rows >= 0)
+            & (rows < source_height)
+            & (columns >= 0)
+            & (columns < source_width)
+        )
+        safe_rows = np.clip(rows, 0, source_height - 1)
+        safe_columns = np.clip(columns, 0, source_width - 1)
+        source_valid = in_bounds & field.valid_mask[safe_rows, safe_columns]
+        effective_weight = np.where(source_valid, weights, 0.0)
+        valid_weight += effective_weight
+        rain_weighted += effective_weight * np.where(
+            source_valid,
+            field.rain_rate_mm_h[safe_rows, safe_columns],
+            0.0,
+        )
+
+    support_mask = nearest_in_bounds
+    valid_mask = nearest_valid & (valid_weight > _AREA_EPSILON_M2)
     rain_rate = np.full(shape, np.nan, dtype=np.float64)
-    rain_rate[valid_mask] = (
-        rain_integral[valid_mask] / valid_area[valid_mask]
-    )
-    coverage_fraction = np.clip(valid_area / grid.pixel_area_m2, 0.0, 1.0)
+    rain_rate[valid_mask] = rain_weighted[valid_mask] / valid_weight[valid_mask]
+    coverage_fraction = np.clip(valid_weight, 0.0, 1.0)
     return RegionalRadarLayer(
         provider_id=field.provider_id,
         product_id=field.product_id,
@@ -577,6 +547,13 @@ def fuse_regional_radar_fields(
     if len(layers) > 64:
         raise ValueError("regional_fusion_supports_at_most_64_sources")
 
+    ordered_layers = sorted(
+        zip(layers, maximum_ages),
+        key=lambda item: (-item[0].observed_at, item[0].provider_id),
+    )
+    layers = [item[0] for item in ordered_layers]
+    maximum_ages = [item[1] for item in ordered_layers]
+
     shape = (grid.height, grid.width)
     source_weights = np.zeros((len(layers), *shape), dtype=np.float64)
     source_values = np.full((len(layers), *shape), np.nan, dtype=np.float64)
@@ -595,36 +572,67 @@ def fuse_regional_radar_fields(
         source_weights[index, layer.valid_mask] = weights[layer.valid_mask]
         source_values[index, layer.valid_mask] = layer.rain_rate_mm_h[layer.valid_mask]
 
-    fused_values = np.full(shape, np.nan, dtype=np.float64)
-    fused_valid = np.zeros(shape, dtype=bool)
-    confidence = np.zeros(shape, dtype=np.float64)
-    contributor_mask = np.zeros(shape, dtype=np.uint64)
-    disagreement = np.zeros(shape, dtype=bool)
-    selected_provider_ids: set[str] = set()
+    top_count = min(3, len(layers))
+    ranked_indices = np.argsort(
+        -source_weights,
+        axis=0,
+        kind="stable",
+    )[:top_count]
+    ranked_weights = np.take_along_axis(
+        source_weights, ranked_indices, axis=0,
+    )
+    ranked_values = np.take_along_axis(
+        source_values, ranked_indices, axis=0,
+    )
+    ranked_valid = ranked_weights > 0.0
+    total_weight = np.sum(ranked_weights, axis=0)
+    fused_valid = total_weight > 0.0
 
-    for row, column in np.argwhere(np.any(source_weights > 0.0, axis=0)):
-        available = np.flatnonzero(source_weights[:, row, column] > 0.0)
-        ranked = sorted(
-            available.tolist(),
-            key=lambda index: (
-                -source_weights[index, row, column],
-                -layers[index].observed_at,
-                layers[index].provider_id,
-            ),
-        )[:3]
-        weights = source_weights[ranked, row, column]
-        values = source_values[ranked, row, column]
-        median = _weighted_median(values, weights)
-        distance = max(5.0, 3.0 * max(1.0, median))
-        clipped = np.clip(values, max(0.0, median - distance), median + distance)
-        if not np.array_equal(clipped, values):
-            disagreement[row, column] = True
-        fused_values[row, column] = float(np.average(clipped, weights=weights))
-        fused_valid[row, column] = True
-        confidence[row, column] = min(1.0, float(np.sum(weights)) / 3.0)
-        for index in ranked:
-            contributor_mask[row, column] |= np.uint64(1) << np.uint64(index)
-            selected_provider_ids.add(layers[index].provider_id)
+    sortable_values = np.where(ranked_valid, ranked_values, np.inf)
+    value_order = np.argsort(sortable_values, axis=0, kind="stable")
+    sorted_values = np.take_along_axis(sortable_values, value_order, axis=0)
+    sorted_weights = np.take_along_axis(ranked_weights, value_order, axis=0)
+    cumulative_weight = np.cumsum(sorted_weights, axis=0)
+    median_rank = np.argmax(
+        cumulative_weight >= (total_weight[np.newaxis, ...] * 0.5),
+        axis=0,
+    )
+    median = np.take_along_axis(
+        sorted_values,
+        median_rank[np.newaxis, ...],
+        axis=0,
+    )[0]
+    median = np.where(fused_valid, median, 0.0)
+    distance = np.maximum(5.0, 3.0 * np.maximum(1.0, median))
+    clipped = np.minimum(
+        np.maximum(ranked_values, np.maximum(0.0, median - distance)),
+        median + distance,
+    )
+    disagreement = np.any(
+        ranked_valid & (clipped != ranked_values),
+        axis=0,
+    )
+    weighted_sum = np.sum(
+        np.where(ranked_valid, clipped * ranked_weights, 0.0),
+        axis=0,
+    )
+    fused_values = np.full(shape, np.nan, dtype=np.float64)
+    fused_values[fused_valid] = (
+        weighted_sum[fused_valid] / total_weight[fused_valid]
+    )
+    confidence = np.minimum(1.0, total_weight / 3.0)
+    contributor_mask = np.zeros(shape, dtype=np.uint64)
+    for rank in range(top_count):
+        rank_indices = ranked_indices[rank].astype(np.uint64)
+        rank_valid = ranked_valid[rank]
+        bits = np.left_shift(np.uint64(1), rank_indices)
+        contributor_mask[rank_valid] |= bits[rank_valid]
+
+    selected_provider_ids = {
+        layer.provider_id
+        for index, layer in enumerate(layers)
+        if np.any(ranked_valid & (ranked_indices == index))
+    }
 
     if not np.any(fused_valid):
         return _empty_fusion(
