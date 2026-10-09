@@ -863,7 +863,15 @@ class ThinOperationalRuntime:
                     transition.candidate_edge_count,
                     ",".join(transition.reason_codes),
                 )
-            for item in self._radar_tracker.tracks(field, scope.target_id):
+            system_reader = getattr(self._radar_tracker, "systems", None)
+            forecast_tracks = (
+                system_reader(field, scope.target_id)
+                if system_reader is not None
+                else ()
+            )
+            if not forecast_tracks:
+                forecast_tracks = self._radar_tracker.tracks(field, scope.target_id)
+            for item in forecast_tracks:
                 speed = math.hypot(
                     item.velocity_east_kmh, item.velocity_north_kmh,
                 )
@@ -899,6 +907,11 @@ class ThinOperationalRuntime:
                         item.motion_agreement_angle_deg
                     ),
                     region_id=region.region_id,
+                    mean_precipitation_rate_mm_h=(
+                        item.rain_rate_mm_h
+                        if getattr(item, "mean_rain_rate_mm_h", None) is None
+                        else item.mean_rain_rate_mm_h
+                    ),
                 ))
 
         for region in region_plan.regions:

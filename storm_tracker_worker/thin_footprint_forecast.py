@@ -194,25 +194,31 @@ def _polygon_interval(
     previous_time = 0.0
     previous_hit = initial
     entry = 0.0 if initial else None
+    last_exit = None
     current_time = min(step_seconds, horizon_seconds)
     while previous_time < horizon_seconds:
         current_hit = hit(current_time)
         if not previous_hit and current_hit:
-            entry = _refine_boundary(
+            boundary = _refine_boundary(
                 hit, previous_time, current_time, entering=True,
             )
+            if entry is None:
+                entry = boundary
         elif previous_hit and not current_hit and entry is not None:
-            exit_time = _refine_boundary(
+            last_exit = _refine_boundary(
                 hit, previous_time, current_time, entering=False,
             )
-            return entry, exit_time, False
         previous_time, previous_hit = current_time, current_hit
         current_time = min(horizon_seconds, current_time + step_seconds)
         if current_time == previous_time:
             break
     if entry is None:
         return None
-    return entry, horizon_seconds, True
+    if previous_hit:
+        return entry, horizon_seconds, True
+    if last_exit is None:
+        return None
+    return entry, last_exit, False
 
 
 def _centerline_interval(
@@ -327,8 +333,15 @@ def forecast_target_passage(
         method=method,
         predicted_intensity_mm_h=(
             None
-            if cell.precipitation_rate_mm_h is None
-            else float(cell.precipitation_rate_mm_h)
+            if (
+                getattr(cell, "mean_precipitation_rate_mm_h", None) is None
+                and cell.precipitation_rate_mm_h is None
+            )
+            else float(
+                getattr(cell, "mean_precipitation_rate_mm_h", None)
+                if getattr(cell, "mean_precipitation_rate_mm_h", None) is not None
+                else cell.precipitation_rate_mm_h
+            )
         ),
         footprint=MappingProxyType(geometry),
         fallback_reason=fallback_reason,

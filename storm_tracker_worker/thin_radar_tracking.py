@@ -165,6 +165,7 @@ class RadarTrack:
     motion_reason_codes: tuple[str, ...]
     motion_supporting_methods: tuple[str, ...]
     motion_agreement_angle_deg: float | None
+    mean_rain_rate_mm_h: float | None = None
 
 
 def _footprint_geometry(
@@ -304,6 +305,7 @@ class ThinRadarTracker:
                 observed_at=estimate.valid_at,
                 latitude=float(latitude), longitude=float(longitude),
                 rain_rate_mm_h=float(hierarchy.maximum_value),
+                mean_rain_rate_mm_h=float(hierarchy.mean_value),
                 velocity_east_kmh=velocity_east_kmh,
                 velocity_north_kmh=velocity_north_kmh,
                 motion_ready=motion_ready,
@@ -336,6 +338,68 @@ class ThinRadarTracker:
                 ),
             ))
         return tuple(tracks)
+
+    def systems(self, field: ThinRadarField, target_id: str) -> tuple[RadarTrack, ...]:
+        """Expose current WeatherSystems as forecastable aggregate footprints."""
+        state = self._states.get((field.provider_id, target_id))
+        if (
+            state is None
+            or state.last_frame is None
+            or state.weather_systems is None
+        ):
+            return ()
+        inverse = Transformer.from_crs(field.crs, "EPSG:4326", always_xy=True)
+        grid = state.last_frame.grid
+        systems: list[RadarTrack] = []
+        for system in state.weather_systems.systems:
+            pixels = system.aggregate_current_footprint
+            if not pixels:
+                continue
+            x_m = math.fsum(
+                grid.origin_x_m + (column + 0.5) * grid.x_resolution_m
+                for _row, column in pixels
+            ) / len(pixels)
+            y_m = math.fsum(
+                grid.origin_y_m - (row + 0.5) * grid.y_resolution_m
+                for row, _column in pixels
+            ) / len(pixels)
+            longitude, latitude = inverse.transform(x_m, y_m)
+            values = tuple(
+                float(state.last_frame.values[row][column])
+                for row, column in pixels
+                if state.last_frame.values[row][column] is not None
+            )
+            if not values:
+                continue
+            motion = system.descriptive_motion
+            ready = motion.vx_m_s is not None
+            east_kmh = 0.0 if not ready else float(motion.vx_m_s) * 3.6
+            north_kmh = 0.0 if not ready else float(motion.vy_m_s) * 3.6
+            supporting_methods = tuple(sorted({
+                str(member.motion_method)
+                for member in system.member_tracks
+                if member.motion_method is not None
+            }))
+            systems.append(RadarTrack(
+                track_id=system.system_id,
+                provider_id=field.provider_id,
+                observed_at=system.valid_at,
+                latitude=float(latitude),
+                longitude=float(longitude),
+                rain_rate_mm_h=max(values),
+                mean_rain_rate_mm_h=math.fsum(values) / len(values),
+                velocity_east_kmh=east_kmh,
+                velocity_north_kmh=north_kmh,
+                motion_ready=ready,
+                geometry=_footprint_geometry(pixels, grid, inverse),
+                motion_status="ready_medium" if ready else "indeterminate",
+                motion_confidence="medium" if ready else "indeterminate",
+                motion_method=motion.method if ready else None,
+                motion_reason_codes=tuple(system.system_uncertainty),
+                motion_supporting_methods=supporting_methods,
+                motion_agreement_angle_deg=None,
+            ))
+        return tuple(systems)
 
 
 def _digest(value: Any) -> str:

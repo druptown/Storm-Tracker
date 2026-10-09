@@ -45,6 +45,7 @@ class StormCell:
     motion_supporting_methods: tuple[str, ...] = ()
     motion_agreement_angle_deg: float | None = None
     region_id: str | None = None
+    mean_precipitation_rate_mm_h: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +70,7 @@ class StormCell:
             "motion_supporting_methods": list(self.motion_supporting_methods),
             "motion_agreement_angle_deg": self.motion_agreement_angle_deg,
             "region_id": self.region_id,
+            "mean_precipitation_rate_mm_h": self.mean_precipitation_rate_mm_h,
         }
 
 
