@@ -74,6 +74,7 @@ _SNAPSHOT_KEYS = frozenset({
     "ui_storms",
     "map_artifact",
 })
+_SNAPSHOT_OPTIONAL_KEYS = frozenset({"radar_fusion"})
 _WORKER_KEYS = frozenset({
     "state",
     "queue_depth",
@@ -158,6 +159,21 @@ _STORM_KEYS = frozenset({
     "reason_codes",
 })
 _MAP_KEYS = frozenset({"artifact_handle", "etag"})
+_RADAR_FUSION_KEYS = frozenset({
+    "region_id",
+    "grid_id",
+    "status",
+    "mode",
+    "evaluated_at",
+    "field_observed_at",
+    "contributors",
+    "excluded",
+    "standby",
+    "reason_codes",
+    "coverage_fraction",
+    "mean_confidence",
+    "disagreement_fraction",
+})
 
 _WORKER_STATES = frozenset({
     "online", "busy", "degraded", "offline", "unknown",
@@ -175,6 +191,12 @@ _CURRENT_PRECIPITATION_STATES = frozenset({"unknown", "dry", "raining"})
 _NEXT_THREAT_STATES = frozenset({"unknown", "none", "available"})
 _PASSAGE_STATES = frozenset({"unknown", "none", "possible", "expected"})
 _GROUND_STATES = frozenset({"unknown", "dry", "wet", "mixed"})
+_RADAR_FUSION_STATES = frozenset({
+    "current", "degraded", "onvoldoende_data",
+})
+_RADAR_FUSION_MODES = frozenset({
+    "fused", "single_source", "fallback",
+})
 
 
 class OperationalSnapshotError(ValueError):
@@ -253,6 +275,27 @@ def _exact_keys(value: Any, expected: frozenset[str], path: str) -> Mapping:
         extra = sorted(keys - expected)
         raise SnapshotValidationError(
             f"{path} heeft geen exacte sleutels; ontbreekt={missing}, extra={extra}"
+        )
+    return value
+
+
+def _keys_with_optional(
+    value: Any,
+    required: frozenset[str],
+    optional: frozenset[str],
+    path: str,
+) -> Mapping:
+    if not isinstance(value, Mapping):
+        raise SnapshotValidationError(f"{path} moet een object zijn")
+    keys = set(value)
+    if any(not isinstance(key, str) for key in keys):
+        raise SnapshotValidationError(f"{path} bevat een niet-tekstuele sleutel")
+    missing = required - keys
+    extra = keys - required - optional
+    if missing or extra:
+        raise SnapshotValidationError(
+            f"{path} heeft ongeldige sleutels; "
+            f"ontbreekt={sorted(missing)}, extra={sorted(extra)}"
         )
     return value
 
@@ -407,6 +450,56 @@ def _validate_region(value: Any, path: str) -> None:
     )
 
 
+def _validate_provider_reason_mapping(value: Any, path: str) -> None:
+    if not isinstance(value, Mapping):
+        raise SnapshotValidationError(f"{path} moet een object zijn")
+    if len(value) > MAX_PROVIDERS:
+        raise SnapshotValidationError(f"{path} overschrijdt de itemlimiet")
+    for provider_id, reason_code in value.items():
+        _identifier(provider_id, f"{path}.provider_id")
+        _token(reason_code, f"{path}.{provider_id}")
+
+
+def _validate_radar_fusion(value: Any, path: str) -> None:
+    fusion = _exact_keys(value, _RADAR_FUSION_KEYS, path)
+    _identifier(fusion["region_id"], f"{path}.region_id")
+    if fusion["grid_id"] is not None:
+        _identifier(fusion["grid_id"], f"{path}.grid_id")
+    _token(
+        fusion["status"],
+        f"{path}.status",
+        allowed=_RADAR_FUSION_STATES,
+    )
+    _token(
+        fusion["mode"],
+        f"{path}.mode",
+        allowed=_RADAR_FUSION_MODES,
+    )
+    _finite(fusion["evaluated_at"], f"{path}.evaluated_at", minimum=0)
+    _finite(
+        fusion["field_observed_at"],
+        f"{path}.field_observed_at",
+        minimum=0,
+        optional=True,
+    )
+    _sorted_unique_ids(
+        fusion["contributors"],
+        f"{path}.contributors",
+        maximum_items=MAX_PROVIDERS,
+    )
+    _validate_provider_reason_mapping(fusion["excluded"], f"{path}.excluded")
+    _validate_provider_reason_mapping(fusion["standby"], f"{path}.standby")
+    _sorted_unique_ids(
+        fusion["reason_codes"],
+        f"{path}.reason_codes",
+        maximum_items=MAX_REASON_CODES,
+    )
+    for name in (
+        "coverage_fraction",
+        "mean_confidence",
+        "disagreement_fraction",
+    ):
+        _finite(fusion[name], f"{path}.{name}", minimum=0, maximum=1)
 def _validate_ground_evidence(value: Any, path: str) -> None:
     ground = _exact_keys(value, _GROUND_EVIDENCE_KEYS, path)
     status = _token(
@@ -865,7 +958,12 @@ def _validate_map_artifact(value: Any, path: str) -> None:
 
 def validate_snapshot(value: Any) -> dict:
     """Validate and detach one strict operational snapshot."""
-    snapshot = _exact_keys(value, _SNAPSHOT_KEYS, "snapshot")
+    snapshot = _keys_with_optional(
+        value,
+        _SNAPSHOT_KEYS,
+        _SNAPSHOT_OPTIONAL_KEYS,
+        "snapshot",
+    )
     if snapshot["contract"] != CONTRACT:
         raise SnapshotValidationError("snapshot.contract is niet ondersteund")
     revision = _counter(snapshot["revision"], "snapshot.revision", minimum=1)
@@ -960,6 +1058,14 @@ def validate_snapshot(value: Any) -> dict:
         id_field="storm_id",
     )
     _validate_map_artifact(snapshot["map_artifact"], "snapshot.map_artifact")
+    if "radar_fusion" in snapshot:
+        _validate_collection(
+            snapshot["radar_fusion"],
+            "snapshot.radar_fusion",
+            maximum_items=MAX_REGIONS,
+            item_validator=_validate_radar_fusion,
+            id_field="region_id",
+        )
 
     region_set = set(region_ids)
     target_set = set(target_ids)
