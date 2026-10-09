@@ -528,6 +528,7 @@ class ThinOperationalRuntime:
                 nowcast,
                 validations,
                 regional_radar=tuple(regional_summaries),
+                region_plan=region_plan,
             )
         self._revision += 1
         snapshot = self._build_snapshot(

@@ -15,6 +15,7 @@ from .thin_fusion import FusionCycle
 from .thin_ground_validation import ForecastValidation
 from .thin_nowcast import ThinNowcast
 from .thin_regional_radar_fusion import RegionalFusionSummary
+from .thin_region_planner import ThinRegionPlan
 from .thin_station_measurement import (
     StationMeasurement,
     deduplicate_station_measurements,
@@ -89,17 +90,142 @@ class PostGISWriteResult:
 
 
 _INSERT_OBSERVATION = """
+WITH source AS (
+    SELECT
+        %s::text AS provider_id,
+        %s::text AS product_id,
+        %s::text AS kind,
+        to_timestamp(%s) AS observed_at,
+        ST_SetSRID(ST_GeomFromGeoJSON(%s),4326) AS geometry,
+        %s::double precision AS value,
+        %s::text AS unit,
+        to_timestamp(%s) AS received_at,
+        %s::text AS quality,
+        %s::jsonb AS metadata
+)
 INSERT INTO stv3_observation(
     observation_key,provider_id,product_id,target_id,kind,value,unit,
     observed_at,received_at,quality,metadata,geometry
-) VALUES(
-    %s,%s,%s,%s,%s,%s,%s,
-    to_timestamp(%s),to_timestamp(%s),%s,%s::jsonb,
-    ST_SetSRID(ST_GeomFromGeoJSON(%s),4326)
 )
+SELECT
+    public.stv3_observation_source_key(
+        provider_id,product_id,kind,observed_at,geometry
+    ),
+    provider_id,product_id,NULL,kind,value,unit,
+    observed_at,received_at,quality,metadata,geometry
+FROM source
 ON CONFLICT(observation_key) DO UPDATE SET
-    value=EXCLUDED.value, quality=EXCLUDED.quality,
+    value=EXCLUDED.value, unit=EXCLUDED.unit,
+    received_at=GREATEST(stv3_observation.received_at,EXCLUDED.received_at),
+    quality=EXCLUDED.quality,
     metadata=EXCLUDED.metadata, geometry=EXCLUDED.geometry,
+    updated_at=clock_timestamp()
+"""
+
+_INSERT_OBSERVATION_REGION = """
+INSERT INTO stv3_observation_region(
+    observation_key,region_revision_id,first_seen_at,last_seen_at
+) VALUES(
+    public.stv3_observation_source_key(
+        %s,%s,%s,to_timestamp(%s),
+        ST_SetSRID(ST_GeomFromGeoJSON(%s),4326)
+    ),
+    %s,to_timestamp(%s),to_timestamp(%s)
+)
+ON CONFLICT(observation_key,region_revision_id) DO UPDATE SET
+    first_seen_at=LEAST(
+        stv3_observation_region.first_seen_at,
+        EXCLUDED.first_seen_at
+    ),
+    last_seen_at=GREATEST(
+        stv3_observation_region.last_seen_at,
+        EXCLUDED.last_seen_at
+    )
+"""
+
+_ENFORCE_RETENTION = "SELECT public.stv3_enforce_retention()"
+
+_CLOSE_REGION_TARGETS = """
+UPDATE stv3_region_target
+SET valid_until=to_timestamp(%s),active=false,updated_at=clock_timestamp()
+WHERE valid_until IS NULL
+  AND NOT EXISTS(
+      SELECT 1
+      FROM unnest(%s::text[],%s::text[])
+          AS desired(target_id,region_revision_id)
+      WHERE desired.target_id=stv3_region_target.target_id
+        AND desired.region_revision_id=stv3_region_target.region_revision_id
+  )
+"""
+
+_CLOSE_REGION_REVISIONS = """
+UPDATE stv3_region_revision
+SET valid_until=to_timestamp(%s),active=false
+WHERE valid_until IS NULL
+  AND NOT(region_revision_id=ANY(%s::text[]))
+"""
+
+_CLOSE_REGION_INSTANCES = """
+UPDATE stv3_region_instance
+SET valid_until=to_timestamp(%s),active=false
+WHERE valid_until IS NULL
+  AND NOT(region_instance_id=ANY(%s::text[]))
+"""
+
+_INSERT_REGION_INSTANCE = """
+INSERT INTO stv3_region_instance(
+    region_instance_id,region_id,kind,activated_at,last_seen_at,
+    valid_until,active
+) VALUES(
+    %s,%s,%s,to_timestamp(%s),to_timestamp(%s),NULL,true
+)
+ON CONFLICT(region_instance_id) DO UPDATE SET
+    region_id=EXCLUDED.region_id,
+    kind=EXCLUDED.kind,
+    activated_at=LEAST(
+        stv3_region_instance.activated_at,EXCLUDED.activated_at
+    ),
+    last_seen_at=GREATEST(
+        stv3_region_instance.last_seen_at,EXCLUDED.last_seen_at
+    ),
+    valid_until=NULL,active=true
+"""
+
+_INSERT_REGION_REVISION = """
+INSERT INTO stv3_region_revision(
+    region_revision_id,region_instance_id,center,observation_radius_km,
+    radar_analysis_radius_km,valid_from,last_seen_at,valid_until,active
+) VALUES(
+    %s,%s,ST_SetSRID(ST_MakePoint(%s,%s),4326),%s,%s,
+    to_timestamp(%s),to_timestamp(%s),NULL,true
+)
+ON CONFLICT(region_revision_id) DO UPDATE SET
+    region_instance_id=EXCLUDED.region_instance_id,
+    center=EXCLUDED.center,
+    observation_radius_km=EXCLUDED.observation_radius_km,
+    radar_analysis_radius_km=EXCLUDED.radar_analysis_radius_km,
+    valid_from=LEAST(stv3_region_revision.valid_from,EXCLUDED.valid_from),
+    last_seen_at=GREATEST(
+        stv3_region_revision.last_seen_at,EXCLUDED.last_seen_at
+    ),
+    valid_until=NULL,active=true
+"""
+
+_INSERT_REGION_TARGET = """
+INSERT INTO stv3_region_target(
+    target_id,region_revision_id,position,location_accuracy_m,
+    position_observed_at,valid_from,valid_until,active
+) VALUES(
+    %s,%s,ST_SetSRID(ST_MakePoint(%s,%s),4326),%s,
+    to_timestamp(%s),to_timestamp(%s),NULL,true
+)
+ON CONFLICT(target_id) WHERE valid_until IS NULL DO UPDATE SET
+    region_revision_id=EXCLUDED.region_revision_id,
+    position=EXCLUDED.position,
+    location_accuracy_m=EXCLUDED.location_accuracy_m,
+    position_observed_at=EXCLUDED.position_observed_at,
+    valid_from=LEAST(stv3_region_target.valid_from,EXCLUDED.valid_from),
+    valid_until=NULL,active=true,
     updated_at=clock_timestamp()
 """
 
@@ -164,6 +290,26 @@ ON CONFLICT(provider_id,station_id,observed_at,measurement_type) DO UPDATE SET
     updated_at=clock_timestamp()
 """
 
+_INSERT_STATION_MEASUREMENT_REGION = """
+INSERT INTO stv3_station_measurement_region(
+    provider_id,station_id,observed_at,measurement_type,region_revision_id,
+    first_seen_at,last_seen_at
+) VALUES(
+    %s,%s,to_timestamp(%s),%s,%s,to_timestamp(%s),to_timestamp(%s)
+)
+ON CONFLICT(
+    provider_id,station_id,observed_at,measurement_type,region_revision_id
+) DO UPDATE SET
+    first_seen_at=LEAST(
+        stv3_station_measurement_region.first_seen_at,
+        EXCLUDED.first_seen_at
+    ),
+    last_seen_at=GREATEST(
+        stv3_station_measurement_region.last_seen_at,
+        EXCLUDED.last_seen_at
+    )
+"""
+
 _AUTO_UPSERT_GROUND_STATION = """
 INSERT INTO stv3_ground_station(
     provider_id,station_id,position,discovered_at,last_seen_at,
@@ -205,39 +351,43 @@ ON CONFLICT(cycle_key) DO UPDATE SET
 _INSERT_CELL = """
 INSERT INTO stv3_storm_cell(
     cell_id,observed_at,provider_id,precipitation_rate_mm_h,
-    reflectivity_dbz,radar_level,geometry
+    reflectivity_dbz,radar_level,geometry,region_revision_id
 ) VALUES(%s,to_timestamp(%s),%s,%s,%s,%s,
-    ST_SetSRID(ST_GeomFromGeoJSON(%s),4326))
+    ST_SetSRID(ST_GeomFromGeoJSON(%s),4326),%s)
 ON CONFLICT(cell_id,observed_at) DO UPDATE SET
     precipitation_rate_mm_h=EXCLUDED.precipitation_rate_mm_h,
     reflectivity_dbz=EXCLUDED.reflectivity_dbz,
-    radar_level=EXCLUDED.radar_level,geometry=EXCLUDED.geometry
+    radar_level=EXCLUDED.radar_level,geometry=EXCLUDED.geometry,
+    region_revision_id=EXCLUDED.region_revision_id
 """
 
 _INSERT_TRACK = """
 INSERT INTO stv3_track_point(
     cell_id,observed_at,velocity_east_kmh,velocity_north_kmh,
-    speed_kmh,heading_deg,position
+    speed_kmh,heading_deg,position,region_revision_id
 ) VALUES(%s,to_timestamp(%s),%s,%s,%s,%s,
-    ST_SetSRID(ST_GeomFromGeoJSON(%s),4326))
+    ST_SetSRID(ST_GeomFromGeoJSON(%s),4326),%s)
 ON CONFLICT(cell_id,observed_at) DO UPDATE SET
     velocity_east_kmh=EXCLUDED.velocity_east_kmh,
     velocity_north_kmh=EXCLUDED.velocity_north_kmh,
     speed_kmh=EXCLUDED.speed_kmh,heading_deg=EXCLUDED.heading_deg,
-    position=EXCLUDED.position
+    position=EXCLUDED.position,
+    region_revision_id=EXCLUDED.region_revision_id
 """
 
 _INSERT_FORECAST = """
 INSERT INTO stv3_target_forecast(
     target_id,evaluated_at,current_state,forecast_state,
-    precipitation_rate_mm_h,eta_minutes,confidence,reason_code,contributors
-) VALUES(%s,to_timestamp(%s),%s,%s,%s,%s,%s,%s,%s::jsonb)
+    precipitation_rate_mm_h,eta_minutes,confidence,reason_code,contributors,
+    region_revision_id
+) VALUES(%s,to_timestamp(%s),%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
 ON CONFLICT(target_id,evaluated_at) DO UPDATE SET
     current_state=EXCLUDED.current_state,
     forecast_state=EXCLUDED.forecast_state,
     precipitation_rate_mm_h=EXCLUDED.precipitation_rate_mm_h,
     eta_minutes=EXCLUDED.eta_minutes,confidence=EXCLUDED.confidence,
-    reason_code=EXCLUDED.reason_code,contributors=EXCLUDED.contributors
+    reason_code=EXCLUDED.reason_code,contributors=EXCLUDED.contributors,
+    region_revision_id=EXCLUDED.region_revision_id
 """
 
 _INSERT_TARGET_POSITION = """
@@ -254,16 +404,17 @@ ON CONFLICT(target_id,observed_at) DO UPDATE SET
 _INSERT_PASSAGE = """
 INSERT INTO stv3_target_passage(
     target_id,evaluated_at,cell_id,provider_id,entry_at,exit_at,
-    method,predicted_intensity_mm_h,footprint,metadata
+    method,predicted_intensity_mm_h,footprint,metadata,region_revision_id
 ) VALUES(
     %s,to_timestamp(%s),%s,%s,to_timestamp(%s),to_timestamp(%s),
-    %s,%s,ST_SetSRID(ST_GeomFromGeoJSON(%s),4326),%s::jsonb
+    %s,%s,ST_SetSRID(ST_GeomFromGeoJSON(%s),4326),%s::jsonb,%s
 )
 ON CONFLICT(target_id,evaluated_at,cell_id) DO UPDATE SET
     entry_at=EXCLUDED.entry_at,exit_at=EXCLUDED.exit_at,
     method=EXCLUDED.method,
     predicted_intensity_mm_h=EXCLUDED.predicted_intensity_mm_h,
-    footprint=EXCLUDED.footprint,metadata=EXCLUDED.metadata
+    footprint=EXCLUDED.footprint,metadata=EXCLUDED.metadata,
+    region_revision_id=EXCLUDED.region_revision_id
 """
 
 _INSERT_VALIDATION = """
@@ -271,9 +422,9 @@ INSERT INTO stv3_forecast_validation(
     validation_key,target_id,evaluated_at,cell_id,provider_id,
     station_provider_id,station_id,outcome,entry_error_seconds,
     exit_error_seconds,predicted_intensity_mm_h,observed_intensity_mm_h,
-    details
+    details,region_revision_id
 ) VALUES(
-    %s,%s,to_timestamp(%s),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb
+    %s,%s,to_timestamp(%s),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s
 )
 ON CONFLICT(validation_key) DO UPDATE SET
     outcome=EXCLUDED.outcome,
@@ -281,7 +432,8 @@ ON CONFLICT(validation_key) DO UPDATE SET
     exit_error_seconds=EXCLUDED.exit_error_seconds,
     predicted_intensity_mm_h=EXCLUDED.predicted_intensity_mm_h,
     observed_intensity_mm_h=EXCLUDED.observed_intensity_mm_h,
-    details=EXCLUDED.details
+    details=EXCLUDED.details,
+    region_revision_id=EXCLUDED.region_revision_id
 """
 
 
@@ -433,6 +585,7 @@ class ThinPostGISWriter:
                 ThinNowcast,
                 tuple[ForecastValidation, ...],
                 tuple[RegionalFusionSummary, ...],
+                ThinRegionPlan | None,
             ]
         ] = deque()
         self._lock = asyncio.Lock()
@@ -455,13 +608,20 @@ class ThinPostGISWriter:
                 ThinNowcast,
                 tuple[ForecastValidation, ...],
                 tuple[RegionalFusionSummary, ...],
+                ThinRegionPlan | None,
             ], ...
         ],
     ) -> dict[str, int]:
         connection = self._connect()
         counts = {
+            "regions": 0,
+            "region_instances": 0,
+            "region_revisions": 0,
+            "region_targets": 0,
             "observations": 0,
+            "observation_region_links": 0,
             "station_measurements": 0,
+            "station_measurement_region_links": 0,
             "auto_discovered_stations": 0,
             "fusion_cycles": 0,
             "storm_cells": 0,
@@ -473,9 +633,104 @@ class ThinPostGISWriter:
         }
         try:
             with connection.cursor() as cursor:
+                seen_instance_ids: set[str] = set()
+                seen_revision_ids: set[str] = set()
+                seen_memberships: set[tuple[str, str]] = set()
+                for (
+                    cycle,
+                    _nowcast,
+                    _validations,
+                    _regional_radar,
+                    region_plan,
+                ) in batch:
+                    if region_plan is None:
+                        continue
+                    active_instances = tuple(
+                        region.region_instance_id
+                        for region in region_plan.regions
+                    )
+                    active_revisions = tuple(
+                        region.region_revision_id
+                        for region in region_plan.regions
+                    )
+                    active_memberships = tuple(
+                        (target.target_id, region.region_revision_id)
+                        for region in region_plan.regions
+                        for target in region.targets
+                    )
+                    cursor.execute(
+                        _CLOSE_REGION_TARGETS,
+                        (
+                            cycle.evaluated_at,
+                            [item[0] for item in active_memberships],
+                            [item[1] for item in active_memberships],
+                        ),
+                    )
+                    cursor.execute(
+                        _CLOSE_REGION_REVISIONS,
+                        (cycle.evaluated_at, list(active_revisions)),
+                    )
+                    cursor.execute(
+                        _CLOSE_REGION_INSTANCES,
+                        (cycle.evaluated_at, list(active_instances)),
+                    )
+                    instance_rows: list[tuple[Any, ...]] = []
+                    revision_rows: list[tuple[Any, ...]] = []
+                    membership_rows: list[tuple[Any, ...]] = []
+                    for region in region_plan.regions:
+                        instance_rows.append((
+                            region.region_instance_id,
+                            region.region_id,
+                            region.kind,
+                            region.activated_at,
+                            cycle.evaluated_at,
+                        ))
+                        revision_rows.append((
+                            region.region_revision_id,
+                            region.region_instance_id,
+                            region.center_longitude,
+                            region.center_latitude,
+                            region.observation_radius_km,
+                            region.radar_analysis_radius_km,
+                            region.revision_valid_from,
+                            cycle.evaluated_at,
+                        ))
+                        seen_instance_ids.add(region.region_instance_id)
+                        seen_revision_ids.add(region.region_revision_id)
+                        for target in region.targets:
+                            membership_rows.append((
+                                target.target_id,
+                                region.region_revision_id,
+                                target.longitude,
+                                target.latitude,
+                                target.location_accuracy_m,
+                                target.position_observed_at,
+                                cycle.evaluated_at,
+                            ))
+                            seen_memberships.add((
+                                target.target_id,
+                                region.region_revision_id,
+                            ))
+                    if instance_rows:
+                        cursor.executemany(_INSERT_REGION_INSTANCE, instance_rows)
+                    if revision_rows:
+                        cursor.executemany(_INSERT_REGION_REVISION, revision_rows)
+                    if membership_rows:
+                        cursor.executemany(_INSERT_REGION_TARGET, membership_rows)
+                counts["region_instances"] = len(seen_instance_ids)
+                counts["region_revisions"] = len(seen_revision_ids)
+                counts["regions"] = len(seen_revision_ids)
+                counts["region_targets"] = len(seen_memberships)
+
                 all_observations = tuple(
                     observation
-                    for cycle, _nowcast, _validations, _regional_radar in batch
+                    for (
+                        cycle,
+                        _nowcast,
+                        _validations,
+                        _regional_radar,
+                        _region_plan,
+                    ) in batch
                     for observation in cycle.observations
                 )
                 station_candidates = deduplicate_station_measurements(
@@ -518,8 +773,76 @@ class ThinPostGISWriter:
                     )
                     counts["station_measurements"] = len(station_rows)
 
-                observation_rows: list[tuple[Any, ...]] = []
-                for cycle, nowcast, _validations, _regional_radar in batch:
+                station_region_rows: dict[
+                    tuple[tuple[str, str, float, str], str],
+                    tuple[Any, ...],
+                ] = {}
+                for (
+                    cycle,
+                    _nowcast,
+                    _validations,
+                    _regional_radar,
+                    region_plan,
+                ) in batch:
+                    if region_plan is None:
+                        continue
+                    for observation in cycle.observations:
+                        measurement = StationMeasurement.from_observation(
+                            observation
+                        )
+                        if (
+                            measurement is None
+                            or measurement.identity not in station_identities
+                        ):
+                            continue
+                        region_revision_id = None
+                        if observation.target_id is not None:
+                            region_revision_id = region_plan.region_revision_id_for(
+                                observation.target_id
+                            )
+                        if region_revision_id is None:
+                            region_revision_id = (
+                                region_plan.region_revision_id_for_position(
+                                observation.latitude,
+                                observation.longitude,
+                            )
+                            )
+                        if region_revision_id is None:
+                            continue
+                        station_region_rows[
+                            (measurement.identity, region_revision_id)
+                        ] = (
+                            measurement.provider_id,
+                            measurement.station_id,
+                            measurement.observed_at,
+                            measurement.measurement_type,
+                            region_revision_id,
+                            measurement.received_at,
+                            measurement.received_at,
+                        )
+                if station_region_rows:
+                    cursor.executemany(
+                        _INSERT_STATION_MEASUREMENT_REGION,
+                        station_region_rows.values(),
+                    )
+                    counts["station_measurement_region_links"] = len(
+                        station_region_rows
+                    )
+
+                observations_by_source: dict[
+                    tuple[str, str, str, float, str], tuple[Any, ...]
+                ] = {}
+                observation_region_rows: dict[
+                    tuple[tuple[str, str, str, float, str], str],
+                    tuple[Any, ...],
+                ] = {}
+                for (
+                    cycle,
+                    nowcast,
+                    _validations,
+                    _regional_radar,
+                    region_plan,
+                ) in batch:
                     for observation in cycle.observations:
                         station_measurement = StationMeasurement.from_observation(
                             observation,
@@ -534,35 +857,71 @@ class ThinPostGISWriter:
                             "type": "Point",
                             "coordinates": [observation.longitude, observation.latitude],
                         }
-                        identity = {
-                            "provider_id": observation.provider_id,
-                            "product_id": observation.product_id,
-                            "target_id": observation.target_id,
-                            "kind": observation.kind.value,
-                            "observed_at": observation.observed_at,
-                            "latitude": observation.latitude,
-                            "longitude": observation.longitude,
-                        }
-                        observation_rows.append((
-                            _sha(identity),
+                        geometry_json = _json(geometry)
+                        source_identity = (
                             observation.provider_id,
                             observation.product_id,
-                            observation.target_id,
                             observation.kind.value,
+                            observation.observed_at,
+                            geometry_json,
+                        )
+                        observations_by_source[source_identity] = (
+                            observation.provider_id,
+                            observation.product_id,
+                            observation.kind.value,
+                            observation.observed_at,
+                            geometry_json,
                             observation.value,
                             observation.unit,
-                            observation.observed_at,
                             observation.received_at,
                             observation.quality.value,
                             _json(payload["metadata"]),
-                            _json(geometry),
-                        ))
-                        counts["observations"] += 1
+                        )
+                        region_revision_id = None
+                        if region_plan is not None:
+                            if observation.target_id is not None:
+                                region_revision_id = (
+                                    region_plan.region_revision_id_for(
+                                    observation.target_id
+                                )
+                                )
+                            if region_revision_id is None:
+                                region_revision_id = (
+                                    region_plan.region_revision_id_for_position(
+                                    observation.latitude,
+                                    observation.longitude,
+                                )
+                                )
+                        if region_revision_id is not None:
+                            observation_region_rows[
+                                (source_identity, region_revision_id)
+                            ] = (
+                                observation.provider_id,
+                                observation.product_id,
+                                observation.kind.value,
+                                observation.observed_at,
+                                geometry_json,
+                                region_revision_id,
+                                observation.received_at,
+                                observation.received_at,
+                            )
 
+                observation_rows = list(observations_by_source.values())
                 if observation_rows:
                     cursor.executemany(_INSERT_OBSERVATION, observation_rows)
+                    counts["observations"] = len(observation_rows)
+                region_rows = list(observation_region_rows.values())
+                if region_rows:
+                    cursor.executemany(_INSERT_OBSERVATION_REGION, region_rows)
+                    counts["observation_region_links"] = len(region_rows)
 
-                for cycle, nowcast, validations, regional_radar in batch:
+                for (
+                    cycle,
+                    nowcast,
+                    validations,
+                    regional_radar,
+                    region_plan,
+                ) in batch:
                     targets = {
                         key: value.as_dict() for key, value in cycle.targets.items()
                     }
@@ -598,6 +957,14 @@ class ThinPostGISWriter:
                     for cell in nowcast.storm_cells:
                         cell_payload = cell.as_dict()
                         geometry_json = _json(cell_payload["geometry"])
+                        cell_region_revision_id = (
+                            None
+                            if region_plan is None
+                            else region_plan.region_revision_id_for_position(
+                                cell.latitude,
+                                cell.longitude,
+                            )
+                        )
                         cursor.execute(_INSERT_CELL, (
                             cell.cell_id,
                             cell.observed_at,
@@ -606,6 +973,7 @@ class ThinPostGISWriter:
                             cell.reflectivity_dbz,
                             cell.radar_level,
                             geometry_json,
+                            cell_region_revision_id,
                         ))
                         counts["storm_cells"] += 1
                         cursor.execute(_INSERT_TRACK, (
@@ -619,10 +987,16 @@ class ThinPostGISWriter:
                                 "type": "Point",
                                 "coordinates": [cell.longitude, cell.latitude],
                             }),
+                            cell_region_revision_id,
                         ))
                         counts["track_points"] += 1
 
                     for target_id, forecast in nowcast.target_results.items():
+                        target_region_revision_id = (
+                            None
+                            if region_plan is None
+                            else region_plan.region_revision_id_for(target_id)
+                        )
                         cursor.execute(_INSERT_FORECAST, (
                             target_id,
                             nowcast.evaluated_at,
@@ -633,6 +1007,7 @@ class ThinPostGISWriter:
                             forecast.confidence,
                             forecast.reason_code,
                             _json(list(forecast.contributors)),
+                            target_region_revision_id,
                         ))
                         counts["target_forecasts"] += 1
                         if (
@@ -649,6 +1024,13 @@ class ThinPostGISWriter:
                             counts["target_positions"] += 1
 
                     for passage in nowcast.target_passages:
+                        passage_region_revision_id = (
+                            None
+                            if region_plan is None
+                            else region_plan.region_revision_id_for(
+                                passage.target_id
+                            )
+                        )
                         cursor.execute(_INSERT_PASSAGE, (
                             passage.target_id,
                             passage.evaluated_at,
@@ -663,10 +1045,18 @@ class ThinPostGISWriter:
                                 "fallback_reason": passage.fallback_reason,
                                 "horizon_clipped": passage.horizon_clipped,
                             }),
+                            passage_region_revision_id,
                         ))
                         counts["target_passages"] += 1
 
                     for validation in validations:
+                        validation_region_revision_id = (
+                            None
+                            if region_plan is None
+                            else region_plan.region_revision_id_for(
+                                validation.target_id
+                            )
+                        )
                         cursor.execute(_INSERT_VALIDATION, (
                             validation.validation_key,
                             validation.target_id,
@@ -688,8 +1078,11 @@ class ThinPostGISWriter:
                                     validation.contributing_stations
                                 ),
                             }),
+                            validation_region_revision_id,
                         ))
                         counts["forecast_validations"] += 1
+
+                cursor.execute(_ENFORCE_RETENTION)
             connection.commit()
             return counts
         except BaseException:
@@ -705,6 +1098,7 @@ class ThinPostGISWriter:
         validations: tuple[ForecastValidation, ...] = (),
         *,
         regional_radar: tuple[RegionalFusionSummary, ...] = (),
+        region_plan: ThinRegionPlan | None = None,
     ) -> PostGISWriteResult:
         async with self._lock:
             if len(self._queue) >= MAX_RETRY_CYCLES:
@@ -715,6 +1109,7 @@ class ThinPostGISWriter:
                 nowcast,
                 tuple(validations),
                 tuple(regional_radar),
+                region_plan,
             ))
             batch = tuple(self._queue)
             try:

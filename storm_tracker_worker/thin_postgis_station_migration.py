@@ -18,8 +18,10 @@ from .thin_postgis import _INSERT_STATION_MEASUREMENT
 from .thin_station_measurement import normalize_station_measurement_type
 
 
-MIGRATION_ID = "legacy_observation_v1"
+MIGRATION_ID = "legacy_ground_observation_v2"
 MIGRATION_STATEMENT_TIMEOUT_MS = 600_000
+GROUND_PROVIDER_IDS = ("kmi_aws", "metar", "netatmo", "wunderground")
+_QUALITY_RANK = {"unknown": 0, "poor": 1, "suspect": 2, "good": 3}
 
 
 _SET_MIGRATION_STATEMENT_TIMEOUT = """
@@ -64,6 +66,13 @@ WHERE migration_id=%s
 FOR UPDATE
 """
 
+_INSERT_STATE = """
+INSERT INTO stv3_station_measurement_backfill_state(
+    migration_id,source_cursor,copied_count,rejected_count,status
+) VALUES(%s,NULL,0,0,'pending')
+ON CONFLICT(migration_id) DO NOTHING
+"""
+
 _SELECT_LEGACY_BATCH = """
 SELECT observation.observation_key,observation.provider_id,
        observation.product_id,observation.value,observation.unit,
@@ -72,14 +81,21 @@ SELECT observation.observation_key,observation.provider_id,
        observation.quality,observation.metadata,observation.kind,
        station.station_id IS NOT NULL
 FROM stv3_observation AS observation
-LEFT JOIN stv3_ground_station AS station
+JOIN stv3_ground_station AS station
   ON station.provider_id=observation.provider_id
  AND station.station_id=observation.metadata->>'station_id'
-WHERE (%s::text IS NULL OR observation.observation_key>%s)
+WHERE observation.provider_id=%s
   AND observation.observed_at >= to_timestamp(%s)
+  AND (
+      %s::double precision IS NULL
+      OR observation.observed_at > to_timestamp(%s)
+      OR (
+          observation.observed_at = to_timestamp(%s)
+          AND observation.observation_key > %s
+      )
+  )
   AND NULLIF(observation.metadata->>'station_id','') IS NOT NULL
-  AND NULLIF(observation.metadata->>'measurement','') IS NOT NULL
-ORDER BY observation.observation_key
+ORDER BY observation.observed_at,observation.observation_key
 LIMIT %s
 """
 
@@ -111,10 +127,13 @@ WITH legacy AS (
            MIN(observation.value) AS minimum_value,
            MAX(observation.value) AS maximum_value
     FROM stv3_observation AS observation
-    WHERE observation.observed_at>=to_timestamp(%s)
+    JOIN stv3_ground_station AS station
+      ON station.provider_id=observation.provider_id
+     AND station.station_id=observation.metadata->>'station_id'
+    WHERE observation.provider_id=ANY(%s)
+      AND observation.observed_at>=to_timestamp(%s)
       AND observation.observed_at<to_timestamp(%s)
       AND NULLIF(observation.metadata->>'station_id','') IS NOT NULL
-      AND NULLIF(observation.metadata->>'measurement','') IS NOT NULL
     GROUP BY observation.provider_id,
              lower(observation.metadata->>'measurement')
 ), canonical AS (
@@ -183,6 +202,43 @@ def _optional_float(value: Any) -> float | None:
     return result if math.isfinite(result) else None
 
 
+def _decode_source_cursor(value: object) -> tuple[int, float | None, str | None]:
+    if value is None:
+        return 0, None, None
+    try:
+        payload = json.loads(str(value))
+        provider_index = int(payload["provider_index"])
+        observed_at = payload.get("observed_at")
+        observation_key = payload.get("observation_key")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise RuntimeError("backfill_cursor_invalid") from error
+    if not 0 <= provider_index <= len(GROUND_PROVIDER_IDS):
+        raise RuntimeError("backfill_cursor_invalid")
+    if observed_at is None and observation_key is None:
+        return provider_index, None, None
+    timestamp = _optional_float(observed_at)
+    key = str(observation_key or "")
+    if timestamp is None or not key:
+        raise RuntimeError("backfill_cursor_invalid")
+    return provider_index, timestamp, key
+
+
+def _encode_source_cursor(
+    provider_index: int,
+    observed_at: float | None,
+    observation_key: str | None,
+) -> str:
+    return json.dumps(
+        {
+            "provider_index": int(provider_index),
+            "observed_at": observed_at,
+            "observation_key": observation_key,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 class StationMeasurementMigrationRepository:
     """PostGIS boundary for additive station backfill and verification."""
 
@@ -212,6 +268,7 @@ class StationMeasurementMigrationRepository:
                     _SET_MIGRATION_STATEMENT_TIMEOUT,
                     (str(MIGRATION_STATEMENT_TIMEOUT_MS),),
                 )
+                cursor.execute(_INSERT_STATE, (MIGRATION_ID,))
                 cursor.execute(_SELECT_STATE, (MIGRATION_ID,))
                 state = cursor.fetchone()
                 if state is None:
@@ -219,14 +276,34 @@ class StationMeasurementMigrationRepository:
                 source_cursor = None if state[0] is None else str(state[0])
                 copied_total = int(state[1])
                 rejected_total = int(state[2])
-                cursor.execute(
-                    _SELECT_LEGACY_BATCH,
-                    (source_cursor, source_cursor, cutoff, int(limit) + 1),
+                provider_index, cursor_time, cursor_key = (
+                    _decode_source_cursor(source_cursor)
                 )
-                fetched = tuple(cursor.fetchall())
+                fetched: tuple[Any, ...] = ()
+                while provider_index < len(GROUND_PROVIDER_IDS) and not fetched:
+                    cursor.execute(
+                        _SELECT_LEGACY_BATCH,
+                        (
+                            GROUND_PROVIDER_IDS[provider_index],
+                            cutoff,
+                            cursor_time,
+                            cursor_time,
+                            cursor_time,
+                            cursor_key,
+                            int(limit) + 1,
+                        ),
+                    )
+                    fetched = tuple(cursor.fetchall())
+                    if not fetched:
+                        provider_index += 1
+                        cursor_time = None
+                        cursor_key = None
                 has_more = len(fetched) > int(limit)
                 rows = fetched[:int(limit)]
-                insert_rows: list[tuple[Any, ...]] = []
+                insert_rows_by_identity: dict[
+                    tuple[str, str, float, str],
+                    tuple[Any, ...],
+                ] = {}
                 rejected = 0
                 for row in rows:
                     try:
@@ -252,7 +329,9 @@ class StationMeasurementMigrationRepository:
                             or not math.isfinite(received_at)
                         ):
                             raise ValueError("legacy_station_measurement_invalid")
-                        insert_rows.append((
+                        metadata["storage_origin"] = "legacy_backfill"
+                        metadata["legacy_observation_key"] = str(row[0])
+                        insert_row = (
                             str(row[1]),
                             station_id,
                             observed_at,
@@ -268,7 +347,24 @@ class StationMeasurementMigrationRepository:
                                 separators=(",", ":"),
                                 allow_nan=False,
                             ),
-                        ))
+                        )
+                        identity = (
+                            insert_row[0],
+                            insert_row[1],
+                            insert_row[2],
+                            insert_row[3],
+                        )
+                        previous = insert_rows_by_identity.get(identity)
+                        if previous is None or (
+                            _QUALITY_RANK[insert_row[8]],
+                            insert_row[7],
+                            insert_row[4],
+                        ) > (
+                            _QUALITY_RANK[previous[8]],
+                            previous[7],
+                            previous[4],
+                        ):
+                            insert_rows_by_identity[identity] = insert_row
                     except (
                         IndexError,
                         TypeError,
@@ -277,12 +373,30 @@ class StationMeasurementMigrationRepository:
                         json.JSONDecodeError,
                     ):
                         rejected += 1
+                insert_rows = tuple(insert_rows_by_identity.values())
                 if insert_rows:
                     cursor.executemany(_INSERT_STATION_MEASUREMENT, insert_rows)
-                next_cursor = source_cursor
+                next_provider_index = provider_index
+                next_cursor_time = cursor_time
+                next_cursor_key = cursor_key
                 if rows:
-                    next_cursor = str(rows[-1][0])
-                status = "partial" if has_more else "complete"
+                    if has_more:
+                        next_cursor_time = float(rows[-1][5])
+                        next_cursor_key = str(rows[-1][0])
+                    else:
+                        next_provider_index += 1
+                        next_cursor_time = None
+                        next_cursor_key = None
+                status = (
+                    "complete"
+                    if next_provider_index >= len(GROUND_PROVIDER_IDS)
+                    else "partial"
+                )
+                next_cursor = _encode_source_cursor(
+                    next_provider_index,
+                    next_cursor_time,
+                    next_cursor_key,
+                )
                 copied_total += len(insert_rows)
                 rejected_total += rejected
                 cursor.execute(_UPDATE_STATE, (
@@ -323,7 +437,10 @@ class StationMeasurementMigrationRepository:
                     _SET_MIGRATION_STATEMENT_TIMEOUT,
                     (str(MIGRATION_STATEMENT_TIMEOUT_MS),),
                 )
-                cursor.execute(_VERIFY_BUCKETS, (start, end, start, end))
+                cursor.execute(
+                    _VERIFY_BUCKETS,
+                    (list(GROUND_PROVIDER_IDS), start, end, start, end),
+                )
                 bucket_rows = tuple(cursor.fetchall())
                 cursor.execute(_SELECT_BACKFILL_REJECTIONS, (MIGRATION_ID,))
                 unrecognizable_row = cursor.fetchone()
@@ -387,6 +504,7 @@ class StationMeasurementMigrationRepository:
 
 __all__ = [
     "BackfillReport",
+    "GROUND_PROVIDER_IDS",
     "MIGRATION_ID",
     "StationMeasurementMigrationRepository",
     "VerificationBucket",

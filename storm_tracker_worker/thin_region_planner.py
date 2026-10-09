@@ -22,6 +22,7 @@ DEFAULT_WARNING_BUFFER_KM = 10.0
 DEFAULT_MAX_STORM_SPEED_KMH = 80.0
 DEFAULT_LOOKAHEAD_MINUTES = 45.0
 DEFAULT_RADAR_ANALYSIS_RADIUS_KM = 250.0
+REGION_COVERAGE_BUCKET_KM = 5.0
 
 
 def _haversine_km(
@@ -60,6 +61,20 @@ def _spherical_center(targets: tuple[Target, ...]) -> tuple[float, float]:
     return math.degrees(latitude), math.degrees(longitude)
 
 
+def _stable_id(prefix: str, value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return prefix + hashlib.sha256(encoded).hexdigest()[:24]
+
+
+def _coverage_bucket_km(value: float) -> float:
+    return math.ceil(float(value) / REGION_COVERAGE_BUCKET_KM) * REGION_COVERAGE_BUCKET_KM
+
+
 @dataclass(frozen=True, slots=True)
 class ThinAcquisitionRegion:
     region_id: str
@@ -70,6 +85,10 @@ class ThinAcquisitionRegion:
     targets: tuple[Target, ...]
     stale_target_ids: tuple[str, ...]
     radar_analysis_radius_km: float | None = None
+    region_instance_id: str = ""
+    region_revision_id: str = ""
+    activated_at: float = 0.0
+    revision_valid_from: float = 0.0
 
     @property
     def target_ids(self) -> tuple[str, ...]:
@@ -85,6 +104,12 @@ class ThinRegionPlan:
 
     def region_id_for(self, target_id: str) -> str | None:
         return self.target_region_ids.get(target_id)
+
+    def region_revision_id_for(self, target_id: str) -> str | None:
+        region_id = self.region_id_for(target_id)
+        if region_id is None:
+            return None
+        return self.region(region_id).region_revision_id
 
     def location_status_for(self, target_id: str) -> str | None:
         return self.location_statuses.get(target_id)
@@ -111,6 +136,16 @@ class ThinRegionPlan:
 
     def accepts_position(self, latitude: float, longitude: float) -> bool:
         return self.region_id_for_position(latitude, longitude) is not None
+
+    def region_revision_id_for_position(
+        self,
+        latitude: float,
+        longitude: float,
+    ) -> str | None:
+        region_id = self.region_id_for_position(latitude, longitude)
+        if region_id is None:
+            return None
+        return self.region(region_id).region_revision_id
 
     def region(self, region_id: str) -> ThinAcquisitionRegion:
         for region in self.regions:
@@ -167,6 +202,9 @@ class ThinRegionPlanner:
         self._last_available: dict[str, tuple[Target, float]] = {}
         self._previous_assignments: dict[str, str] = {}
         self._external_centers: dict[str, tuple[float, float]] = {}
+        self._external_instances: dict[str, tuple[str, float]] = {}
+        self._region_revisions: dict[str, tuple[object, str, float]] = {}
+        self._instance_generation = 0
 
     def _active_targets(
         self,
@@ -253,24 +291,62 @@ class ThinRegionPlanner:
         self,
         *,
         region_id: str,
+        region_instance_id: str,
+        activated_at: float,
         kind: str,
         center: tuple[float, float],
         targets: tuple[Target, ...],
         statuses: Mapping[str, str],
+        now: float,
     ) -> ThinAcquisitionRegion:
         target_offsets = tuple(
             _haversine_km(center[0], center[1], target.latitude, target.longitude)
             for target in targets
         )
-        radius = max(
-            self._warning_radius_km
-            + offset
-            for offset in target_offsets
+        coverage_offset = max(target_offsets)
+        radius = _coverage_bucket_km(self._warning_radius_km + coverage_offset)
+        radar_analysis_radius = _coverage_bucket_km(
+            self._radar_analysis_radius_km + coverage_offset
         )
-        radar_analysis_radius = max(
-            self._radar_analysis_radius_km + offset
-            for offset in target_offsets
+        previous_revision = self._region_revisions.get(region_id)
+        if previous_revision is not None and kind == "external":
+            previous_fingerprint = previous_revision[0]
+            same_fixed_center = (
+                previous_fingerprint[0] == region_instance_id
+                and previous_fingerprint[1] == round(center[0], 5)
+                and previous_fingerprint[2] == round(center[1], 5)
+            )
+            coverage_hysteresis_km = REGION_COVERAGE_BUCKET_KM * 2.0
+            if (
+                same_fixed_center
+                and abs(radius - previous_fingerprint[3])
+                    <= coverage_hysteresis_km
+                and abs(radar_analysis_radius - previous_fingerprint[4])
+                    <= coverage_hysteresis_km
+            ):
+                radius = previous_fingerprint[3]
+                radar_analysis_radius = previous_fingerprint[4]
+        revision_fingerprint = (
+            region_instance_id,
+            round(center[0], 5),
+            round(center[1], 5),
+            radius,
+            radar_analysis_radius,
         )
+        if previous_revision is not None and previous_revision[0] == revision_fingerprint:
+            region_revision_id = previous_revision[1]
+            revision_valid_from = previous_revision[2]
+        else:
+            region_revision_id = _stable_id(
+                "region-revision:",
+                revision_fingerprint,
+            )
+            revision_valid_from = now
+            self._region_revisions[region_id] = (
+                revision_fingerprint,
+                region_revision_id,
+                revision_valid_from,
+            )
         return ThinAcquisitionRegion(
             region_id=region_id,
             kind=kind,
@@ -284,7 +360,26 @@ class ThinRegionPlanner:
                 if statuses.get(target.target_id) == "stale"
             ),
             radar_analysis_radius_km=radar_analysis_radius,
+            region_instance_id=region_instance_id,
+            region_revision_id=region_revision_id,
+            activated_at=activated_at,
+            revision_valid_from=revision_valid_from,
         )
+
+    def _external_instance(self, region_id: str, *, now: float) -> tuple[str, float]:
+        current = self._external_instances.get(region_id)
+        if current is not None:
+            return current
+        self._instance_generation += 1
+        current = (
+            _stable_id(
+                "region-instance:",
+                (region_id, now, self._instance_generation),
+            ),
+            now,
+        )
+        self._external_instances[region_id] = current
+        return current
 
     def plan(self, state: DesiredState, *, now: float) -> ThinRegionPlan:
         if not isinstance(state, DesiredState):
@@ -311,10 +406,13 @@ class ThinRegionPlanner:
         if home is not None and home_targets:
             region = self._region(
                 region_id="region:home",
+                region_instance_id="region-instance:home",
+                activated_at=0.0,
                 kind="home",
                 center=(home.latitude, home.longitude),
                 targets=home_targets,
                 statuses=statuses,
+                now=now_value,
             )
             regions.append(region)
             assignments.update({target.target_id: region.region_id for target in home_targets})
@@ -335,12 +433,19 @@ class ThinRegionPlanner:
                 center = desired_center
             self._external_centers[region_id] = center
             active_external_ids.add(region_id)
+            region_instance_id, activated_at = self._external_instance(
+                region_id,
+                now=now_value,
+            )
             region = self._region(
                 region_id=region_id,
+                region_instance_id=region_instance_id,
+                activated_at=activated_at,
                 kind="external",
                 center=center,
                 targets=cluster,
                 statuses=statuses,
+                now=now_value,
             )
             regions.append(region)
             assignments.update({target.target_id: region_id for target in cluster})
@@ -348,6 +453,8 @@ class ThinRegionPlanner:
         for region_id in tuple(self._external_centers):
             if region_id not in active_external_ids:
                 self._external_centers.pop(region_id, None)
+                self._external_instances.pop(region_id, None)
+                self._region_revisions.pop(region_id, None)
         self._previous_assignments = dict(assignments)
         ordered_regions = tuple(sorted(regions, key=lambda item: item.region_id))
         return ThinRegionPlan(
