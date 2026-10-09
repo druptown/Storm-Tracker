@@ -31,7 +31,7 @@ def _intensity_levels(field: ThinRadarField | ThinVisualRadarField) -> np.ndarra
 
 
 def crop_visual_radar_field(field: ThinVisualRadarField, region: Any) -> ThinVisualRadarField | None:
-    """Keep native visual pixels in the selected region, not all of Spain."""
+    """Keep source pixels in this region, including Web-Mercator tiles."""
     radius = float(region.radar_analysis_radius_km or region.observation_radius_km)
     latitude = region.center_latitude
     longitude = region.center_longitude
@@ -40,15 +40,23 @@ def crop_visual_radar_field(field: ThinVisualRadarField, region: Any) -> ThinVis
         1.0, math.sin(radius / 6371.0088) / max(0.001, math.cos(math.radians(latitude))),
     )))
     height, width = field.levels.shape
-    row0 = max(0, math.floor((field.latitude_top - latitude - delta_lat) / field.latitude_scale))
-    row1 = min(height, math.ceil((field.latitude_top - latitude + delta_lat) / field.latitude_scale))
-    col0 = max(0, math.floor((longitude - delta_lon - field.longitude_left) / field.longitude_scale))
-    col1 = min(width, math.ceil((longitude + delta_lon - field.longitude_left) / field.longitude_scale))
+    left, bottom, right, top = longitude-delta_lon, latitude-delta_lat, longitude+delta_lon, latitude+delta_lat
+    inverse = None
+    if field.crs != "EPSG:4326":
+        forward = Transformer.from_crs("EPSG:4326", field.crs, always_xy=True)
+        inverse = Transformer.from_crs(field.crs, "EPSG:4326", always_xy=True)
+        left, bottom, right, top = forward.transform_bounds(left, bottom, right, top, densify_pts=21)
+    row0 = max(0, math.floor((field.latitude_top - top) / field.latitude_scale))
+    row1 = min(height, math.ceil((field.latitude_top - bottom) / field.latitude_scale))
+    col0 = max(0, math.floor((left - field.longitude_left) / field.longitude_scale))
+    col1 = min(width, math.ceil((right - field.longitude_left) / field.longitude_scale))
     if row0 >= row1 or col0 >= col1:
         return None
     rows, columns = np.indices((row1 - row0, col1 - col0))
-    latitudes = np.radians(field.latitude_top - (rows + row0 + 0.5) * field.latitude_scale)
-    longitudes = np.radians(field.longitude_left + (columns + col0 + 0.5) * field.longitude_scale)
+    ys = field.latitude_top - (rows + row0 + 0.5) * field.latitude_scale
+    xs = field.longitude_left + (columns + col0 + 0.5) * field.longitude_scale
+    lons, lats = (xs, ys) if inverse is None else inverse.transform(xs, ys)
+    latitudes, longitudes = np.radians(lats), np.radians(lons)
     center_latitude = math.radians(latitude)
     haversine = (
         np.sin((latitudes - center_latitude) / 2) ** 2
@@ -136,7 +144,8 @@ def _overlay_at_factor(
         rectangles = _rectangles_for_levels(levels)
 
     visual = isinstance(field, ThinVisualRadarField)
-    inverse = None if visual else Transformer.from_crs(field.crs, "EPSG:4326", always_xy=True)
+    inverse = (None if visual and field.crs == "EPSG:4326"
+               else Transformer.from_crs(field.crs, "EPSG:4326", always_xy=True))
     origin_x = field.longitude_left if visual else field.origin_x_m
     origin_y = field.latitude_top if visual else field.origin_y_m
     x_resolution = field.longitude_scale if visual else field.x_resolution_m
@@ -159,7 +168,7 @@ def _overlay_at_factor(
             (left, bottom),
             (left, top),
         ):
-            longitude, latitude = ((x_value, y_value) if visual
+            longitude, latitude = ((x_value, y_value) if inverse is None
                                    else inverse.transform(x_value, y_value))
             # Six decimals are substantially finer than the 500 m analysis
             # pixels and keep the shared MQTT payload compact.

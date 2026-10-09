@@ -1140,7 +1140,9 @@ class ThinOperationalRuntime:
                         continue
                     if spec is not None and not any(spec.applies_to(t) for t in region.targets):
                         continue
-                    candidates.append(field)
+                    cropped = crop_visual_radar_field(field, region)
+                    if cropped is not None:
+                        candidates.append(cropped)
             if not candidates:
                 continue
             visual = min(candidates, key=lambda f: (
@@ -1155,9 +1157,7 @@ class ThinOperationalRuntime:
                 )
                 if quantitative_rank < _NATIVE_RADAR_FALLBACK_RANK.get(visual.provider_id, 999):
                     continue
-            cropped = crop_visual_radar_field(visual, region)
-            if cropped is not None:
-                display_fields[region.region_id] = cropped
+            display_fields[region.region_id] = visual
         radar_overlays = build_radar_overlays(
             sorted(display_fields.items()),
             maximum_total_runs=MAX_TOTAL_RADAR_OVERLAY_RUNS,
@@ -1346,6 +1346,36 @@ class ThinOperationalRuntime:
                 cell.cell_id,
                 group,
             ))
+
+        # Polygon-only radar (e.g. OPERA DBZH / KMI APPV4) must not vanish
+        # because a different region has native tracked cells. This is a map
+        # fallback only: do not fabricate motion or quantitative rain rates.
+        cell_regions = {cell.region_id or default_region_id for cell in nowcast.storm_cells}
+        for region in region_plan.regions:
+            if region.region_id in display_fields or region.region_id in cell_regions:
+                continue
+            regional_plan = replace(region_plan, regions=(region,))
+            for index, observation in enumerate(_select_spatial_radar_fallback_observations(fusion, regional_plan)):
+                if observation.geometry.get("type") not in {"Polygon", "MultiPolygon"}:
+                    continue
+                age_limit = PROVIDER_FUSION_AGE_SECONDS.get(observation.provider_id, MAX_FUSION_AGE_SECONDS)
+                if not 0 <= fusion.evaluated_at - observation.observed_at <= age_limit:
+                    continue
+                identifier = f"visual:{region.region_id}:{observation.provider_id}:{index}"
+                cell_feature_groups.append((observation.value, identifier, [{
+                    "type": "Feature", "id": identifier,
+                    "geometry": json.loads(json.dumps(dict(observation.geometry))),
+                    "properties": {
+                        "layer": "radar_cell", "engine_id": region.region_id,
+                        "provider_id": observation.provider_id,
+                        "observed_at": observation.observed_at,
+                        "intensity": (observation.value if observation.kind is ObservationKind.RAIN_RATE else None),
+                        "max_dbz": (observation.value if observation.kind is ObservationKind.REFLECTIVITY else None),
+                        "radar_level": (observation.value if observation.kind is ObservationKind.RADAR_LEVEL else None),
+                        "motion_ready": False, "motion_status": "unavailable",
+                        "display_only": True,
+                    },
+                }]))
 
         lightning_count = 0
         for index, observation in enumerate(fusion.observations):

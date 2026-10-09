@@ -348,6 +348,8 @@ class ThinVisualRadarField:
     longitude_scale: float
     latitude_scale: float
     levels: Any
+    # The affine axes above use source-CRS units (degrees by default).
+    crs: str = "EPSG:4326"
 
     def __post_init__(self) -> None:
         import numpy as np
@@ -2710,6 +2712,37 @@ def _rainviewer_spatial_observations(
     return tuple(spatial)
 
 
+def _rainviewer_visual_fields(decoded, centers, request, observed_at):
+    """Stitch fetched tiles without resampling or inventing rain rates."""
+    import numpy as np
+
+    count = 2**RAINVIEWER_ZOOM
+    size = RAINVIEWER_TILE_SIZE
+    world = 2 * math.pi * 6378137.0
+    resolution = world / (count * size)
+    fields = []
+    used = set()
+    for latitude, longitude in centers:
+        gx, gy = _rainviewer_global_pixel(latitude, longitude)
+        cx = int(gx // size) % count
+        cy = min(count - 1, max(0, int(gy // size)))
+        if (cx, cy) in used:
+            continue
+        used.add((cx, cy))
+        y0, y1 = max(0, cy - 1), min(count, cy + 2)
+        mosaic = np.zeros(((y1-y0)*size, 3*size), dtype=np.uint8)
+        for column, x in enumerate(range(cx-1, cx+2)):
+            for row, y in enumerate(range(y0, y1)):
+                mosaic[row*size:(row+1)*size, column*size:(column+1)*size] = decoded[(x % count, y)]
+        fields.append(ThinVisualRadarField(
+            request.provider_id, request.product_id, observed_at,
+            (cx-1)*size*resolution-world/2,
+            world/2-y0*size*resolution,
+            resolution, resolution, mosaic, crs="EPSG:3857",
+        ))
+    return tuple(fields)
+
+
 class RainViewerRadarAdapter:
     def __init__(self, *, manifest_url: str = RAINVIEWER_MANIFEST_ENDPOINT) -> None:
         self._manifest_url = manifest_url
@@ -2812,7 +2845,11 @@ class RainViewerRadarAdapter:
             key=lambda item: (item.value, item.metadata.get("block_count", 0)),
             reverse=True,
         )[:MAX_NATIONAL_RADAR_SPATIAL_CELLS])
-        return tuple(observations)
+        async with _RADAR_DECODE_SEMAPHORE:
+            visual_fields = await asyncio.to_thread(
+                _rainviewer_visual_fields, decoded, centers, request, observed_at,
+            )
+        return ThinAdapterResult(tuple(observations), visual_radar_fields=visual_fields)
 
 
 class MeteoFranceOAuthTokenProvider:
