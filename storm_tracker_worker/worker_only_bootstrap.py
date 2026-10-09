@@ -17,7 +17,10 @@ from typing import Callable
 
 from .acquisition_activation import ACTIVATION_RULES
 from .analysis_grid_transform import AnalysisGridTransformConfig
-from .blitzortung_event_ingress import BlitzortungEventIngressLimits
+from .blitzortung_event_ingress import (
+    ACCESS_RETENTION_AUTHORITY_ID,
+    BlitzortungEventIngressLimits,
+)
 from .dwd_rv_completion_consumer import DwdRvShadowChainProfile
 from .dwd_rv_completion_process_isolation import DwdRvCompletionIsolationLimits
 from .evidence_to_cells_shadow import EvidenceToCellsShadowConfig
@@ -41,7 +44,8 @@ from .worker_first_ownership import (
 )
 
 
-CONTRACT = "stv3-worker-only-bootstrap-v7"
+CONTRACT = "stv3-worker-only-bootstrap-v8"
+BLITZORTUNG_AUTHORITY_ENV = "STV3_BLITZORTUNG_RAW_RETENTION_AUTHORITY"
 DEFAULT_ROOT = Path("/data/storm_tracker_worker_runtime_production_v1")
 CONFIG_FILENAME = "worker-only-config.json"
 # Start a fresh acquisition epoch after the original append-only raw store
@@ -209,6 +213,7 @@ def _build_worker_only_config(
     *,
     raw_capacity_bytes: int,
     retained_payload_claim_bytes: int | None,
+    blitzortung_enabled: bool = False,
 ) -> RawCaptureServiceConfig:
     supplied = Path(root)
     if not supplied.is_absolute():
@@ -240,18 +245,34 @@ def _build_worker_only_config(
         blitzortung_raw_store_root=source / "blitzortung-raw",
         blitzortung_raw_store_limits=RawArtifactLimits(),
         blitzortung_ingress_limits=BlitzortungEventIngressLimits(),
-        blitzortung_enabled=False,
+        blitzortung_enabled=blitzortung_enabled,
         host_operational_free_reserve_bytes=2 * 1024 * 1024 * 1024,
         retained_payload_claim_bytes=retained_payload_claim_bytes,
     )
 
 
-def build_worker_only_config(root: str | Path) -> RawCaptureServiceConfig:
+def build_worker_only_config(
+    root: str | Path,
+    *,
+    blitzortung_enabled: bool = False,
+) -> RawCaptureServiceConfig:
     return _build_worker_only_config(
         root,
         raw_capacity_bytes=PRODUCTION_RAW_CAPACITY_BYTES,
         retained_payload_claim_bytes=PRODUCTION_RETENTION_CLAIM_BYTES,
+        blitzortung_enabled=blitzortung_enabled,
     )
+
+
+def _configured_blitzortung_enabled() -> bool:
+    authority = os.environ.get(BLITZORTUNG_AUTHORITY_ENV, "")
+    if not authority:
+        return False
+    if authority != ACCESS_RETENTION_AUTHORITY_ID:
+        raise WorkerOnlyBootstrapError(
+            "blitzortung retention authority is invalid"
+        )
+    return True
 
 
 def _legacy_v4_payload(config: RawCaptureServiceConfig) -> bytes:
@@ -483,6 +504,14 @@ def _load_existing_runtime_authority(
             config,
             previous_timeout=True,
         )
+        previous_blitzortung_disabled_payload = _canonical(
+            _build_worker_only_config(
+                config.worker_first.paths.authority_file.parent.parent.parent,
+                raw_capacity_bytes=PRODUCTION_RAW_CAPACITY_BYTES,
+                retained_payload_claim_bytes=PRODUCTION_RETENTION_CLAIM_BYTES,
+                blitzortung_enabled=False,
+            ).to_mapping()
+        )
         if (
             config_path.is_symlink()
             or authority_path.is_symlink()
@@ -494,6 +523,7 @@ def _load_existing_runtime_authority(
                 previous_timeout_payload,
                 previous_epoch_payload,
                 previous_epoch_timeout_payload,
+                previous_blitzortung_disabled_payload,
             )
         ):
             return None
@@ -541,6 +571,7 @@ def _load_existing_runtime_authority(
                     previous_timeout_payload,
                     previous_epoch_payload,
                     previous_epoch_timeout_payload,
+                    previous_blitzortung_disabled_payload,
                 ),
             )
     except WorkerOnlyBootstrapError:
@@ -552,8 +583,19 @@ def _load_existing_runtime_authority(
     return authority_sha256
 
 
-def materialize_worker_only_runtime(root: str | Path = DEFAULT_ROOT) -> dict[str, str]:
-    config = build_worker_only_config(root)
+def materialize_worker_only_runtime(
+    root: str | Path = DEFAULT_ROOT,
+    *,
+    blitzortung_enabled: bool | None = None,
+) -> dict[str, str]:
+    if blitzortung_enabled is None:
+        blitzortung_enabled = _configured_blitzortung_enabled()
+    if type(blitzortung_enabled) is not bool:
+        raise WorkerOnlyBootstrapError("blitzortung enabled flag is invalid")
+    config = build_worker_only_config(
+        root,
+        blitzortung_enabled=blitzortung_enabled,
+    )
     payload = _canonical(config.to_mapping())
     existing_authority_sha256 = _load_existing_runtime_authority(config, payload)
     if existing_authority_sha256 is not None:
@@ -571,11 +613,13 @@ def materialize_worker_only_runtime(root: str | Path = DEFAULT_ROOT) -> dict[str
         root,
         raw_capacity_bytes=PRODUCTION_RAW_CAPACITY_BYTES,
         retained_payload_claim_bytes=None,
+        blitzortung_enabled=blitzortung_enabled,
     ))
     failed_intermediate_payload = _legacy_v4_payload(_build_worker_only_config(
         root,
         raw_capacity_bytes=_FAILED_INTERMEDIATE_RAW_CAPACITY_BYTES,
         retained_payload_claim_bytes=None,
+        blitzortung_enabled=blitzortung_enabled,
     ))
     previous_awn_payload = _previous_awn_payload(config)
     previous_retention_claim_payload = _previous_retention_claim_payload(config)
@@ -628,6 +672,7 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "BLITZORTUNG_AUTHORITY_ENV",
     "CONFIG_FILENAME",
     "CONTRACT",
     "DEFAULT_ROOT",

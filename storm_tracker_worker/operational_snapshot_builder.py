@@ -163,6 +163,7 @@ def _unknown_provider(source_id: str, reason_code: str) -> dict[str, Any]:
     return {
         "provider_id": source_id,
         "display_name": source_id,
+        "readiness": "not_ready",
         "state": "unknown",
         "freshness": "unknown",
         "product_valid_at": None,

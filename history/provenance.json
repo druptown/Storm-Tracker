@@ -1,8 +1,8 @@
 {
   "kind": "recovered_archive_source",
   "component": "worker",
-  "version": "1.17.115",
-  "source_id": "73e8b31f3e4fc42d341817b4d93a2f7a0205c3b209d3259246bb06c61334242c",
+  "version": "1.17.116",
+  "source_id": "8945adfa3f9de8514cb297ff46e994347b9dd2b0ab981df8f472c5222228badc",
   "recovered_on": "2026-10-09",
   "files": [
     {
@@ -32,7 +32,7 @@
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "950c1aa0c6a72b413d6d5e96d8a6c8a9bfbe2134f962cf359dd44a69c849aab3",
+      "sha256": "2c66e0f2ff7d7bc5ab4d2a6a509ab96b63635dce6827fd644774221c00f94fd0",
       "size": 65
     },
     {
@@ -272,7 +272,7 @@
     {
       "path": "config.yaml",
       "mode": 420,
-      "sha256": "049f6513f4ba37f152ac0f718058e7cd2bf2e6a52c12f731ee5aa68ac228915e",
+      "sha256": "deb7649b24c69fc5934bb9746b5ec072f709531b59dcd25f546a68759ee6fd81",
       "size": 2682
     },
     {
@@ -578,8 +578,8 @@
     {
       "path": "multi_source_radar_snapshot.py",
       "mode": 420,
-      "sha256": "aae18c0e44a88943b4722fda406e9d863257943d69358a3c2313963f5a4644ab",
-      "size": 27118
+      "sha256": "bbe47baa23bc13731d2e8444d3d8da0ff2dcacb9b42ee4a3ad0d3636100ef524",
+      "size": 27213
     },
     {
       "path": "multi_source_satellite_facts.py",
@@ -590,8 +590,8 @@
     {
       "path": "multi_source_snapshot.py",
       "mode": 420,
-      "sha256": "e4d6d58c53615980e569ef5d8ddbd80009642fc0403856ed3b07fcc38a07ba09",
-      "size": 16473
+      "sha256": "7f855cc4196a0d192a7b57a6772475c143aa27d242327341b855e15997c161a7",
+      "size": 17378
     },
     {
       "path": "native_capture.py",
@@ -710,8 +710,8 @@
     {
       "path": "operational_snapshot_builder.py",
       "mode": 420,
-      "sha256": "3a8d57074917c76f9a3e6cd40b15af0d1e5bfc1a6819e9dad615dfd75e70c249",
-      "size": 11254
+      "sha256": "102bd760f912ebba57102d12edab90f170c96b3e89684b9616517b4a26261cef",
+      "size": 11288
     },
     {
       "path": "operational_snapshot_publication.py",
@@ -1322,8 +1322,8 @@
     {
       "path": "tracking_core/operational_snapshot.py",
       "mode": 420,
-      "sha256": "be8854ee46a822b65497f9501e1ec58a3cdef7e3e41c9ea220193ce95021eafb",
-      "size": 61466
+      "sha256": "37bbfd33143b77fa98970b127dd73e8ab371ab12c9e91548105ea1503c9123b0",
+      "size": 61990
     },
     {
       "path": "validation_corpus.py",
@@ -1382,8 +1382,8 @@
     {
       "path": "worker_only_bootstrap.py",
       "mode": 420,
-      "sha256": "4bceaa28ed728296a4ce88be560419454a06eb6560074b4809c030ceffb787bd",
-      "size": 25320
+      "sha256": "30685ba311a19f278187c536edab97db76bfa2d0802b0f563b49e7893836eb47",
+      "size": 26913
     },
     {
       "path": "worker_only_cell_tracking.py",
@@ -1400,8 +1400,8 @@
     {
       "path": "worker_only_motion_snapshot.py",
       "mode": 420,
-      "sha256": "c0336b767f7d104a6813503df2379161c680fce7ee376392355b173f3df02c3e",
-      "size": 8318
+      "sha256": "8e10060a9c98cf34cb9cdc08c67da4e19fff3c4e3d460fc5a08dab7a93236ad9",
+      "size": 8413
     },
     {
       "path": "worker_only_radar_processing.py",
@@ -1412,18 +1412,18 @@
     {
       "path": "worker_only_service_runtime.py",
       "mode": 420,
-      "sha256": "cb0e464c06bab861f02edacb25178e33496fcf839586e227f3cd46691495a0dd",
-      "size": 85030
+      "sha256": "0021bc1b26099b836264127c445b18e22d0fe7d0d63f57000aaf2fde5f9a186f",
+      "size": 86299
     }
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_worker_v1.17.115_deploy.tar.gz",
-      "archive_sha256": "a127699b70fb5354645d3f5e00c4005857168958f183222e9ff842bbd0b60ef1",
-      "bytes": 2272106,
+      "filename": "storm_tracker_worker_v1.17.116_deploy.tar.gz",
+      "archive_sha256": "11559825a0d350a105f4adc9a01d0529e10326b1950b387f2fd022df87698687",
+      "bytes": 2272915,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.99_worker_v1.17.115_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.100_worker_v1.17.116_evidence.json",
           "archive_and_source_match": true
         }
       ]

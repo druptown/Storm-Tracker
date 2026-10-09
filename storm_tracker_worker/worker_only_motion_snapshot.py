@@ -91,6 +91,7 @@ def build_radar_motion_nowcast_revision(
     queue_depth: int = 0,
     failed_jobs: int = 0,
     provider_status_overrides: Mapping[str, tuple[str, str]] | None = None,
+    ready_source_ids: frozenset[str] | None = None,
 ) -> CommittedOperationalFactRevision:
     """Publish the earliest current certified radar intersection per target."""
 
@@ -108,6 +109,7 @@ def build_radar_motion_nowcast_revision(
         queue_depth=queue_depth,
         failed_jobs=failed_jobs,
         provider_status_overrides=provider_status_overrides,
+        ready_source_ids=ready_source_ids,
     )
     snapshot = validate_snapshot(base.snapshot)
     current_providers = {

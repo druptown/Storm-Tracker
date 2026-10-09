@@ -13,6 +13,7 @@ from typing import Any, Mapping
 
 from .desired_state import DesiredState
 from .multi_source_operational_cycle import (
+    CATALOG_SOURCES,
     CycleStatus,
     GroundInput,
     LightningInput,
@@ -118,6 +119,7 @@ def _provider_item(
     *,
     evaluated_at_ms: int,
     received_at: float,
+    ready_source_ids: frozenset[str],
 ) -> dict[str, Any]:
     effective = _effective_status(
         contribution,
@@ -166,11 +168,18 @@ def _provider_item(
         freshness = "unknown"
         reason = contribution.reason_code or "target_outside_catalog_scope"
         error = None
+    readiness = (
+        "ready"
+        if contribution.source_id in ready_source_ids
+        or effective in {CycleStatus.CURRENT, CycleStatus.STALE}
+        else "not_ready"
+    )
     return {
         # Source identities, rather than shared vendor IDs, remain unique.  A
         # vendor can supply multiple independently fresh products.
         "provider_id": contribution.source_id,
         "display_name": contribution.source_id,
+        "readiness": readiness,
         "state": state,
         "freshness": freshness,
         "product_valid_at": product_valid_at,
@@ -262,6 +271,7 @@ def build_multi_source_status_snapshot(
     queue_depth: int = 0,
     failed_jobs: int = 0,
     provider_status_overrides: Mapping[str, tuple[str, str]] | None = None,
+    ready_source_ids: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """Build a strict snapshot that exposes all sources without fake weather.
 
@@ -286,11 +296,18 @@ def build_multi_source_status_snapshot(
         raise MultiSourceSnapshotError("evaluated_at ligt voor cycle completion")
     received_at = cycle.cycle_completed_at_ms / 1000.0
 
+    proven_ready = frozenset(ready_source_ids or ())
+    unknown_ready_ids = proven_ready - {
+        source.source_id for source in CATALOG_SOURCES
+    }
+    if unknown_ready_ids:
+        raise MultiSourceSnapshotError("readiness bevat een onbekende bron")
     providers = [
         _provider_item(
             contribution,
             evaluated_at_ms=evaluated_ms,
             received_at=received_at,
+            ready_source_ids=proven_ready,
         )
         for contribution in cycle.contributions
     ]
@@ -311,6 +328,11 @@ def build_multi_source_status_snapshot(
         provider = providers_by_id[provider_id]
         state, reason = override
         provider.update({
+            "readiness": (
+                "ready"
+                if state == "operational" or provider_id in proven_ready
+                else provider["readiness"]
+            ),
             "state": state,
             "freshness": "unknown",
             "product_valid_at": None,
@@ -386,6 +408,7 @@ def build_multi_source_status_fact_revision(
     queue_depth: int = 0,
     failed_jobs: int = 0,
     provider_status_overrides: Mapping[str, tuple[str, str]] | None = None,
+    ready_source_ids: frozenset[str] | None = None,
 ) -> CommittedOperationalFactRevision:
     """Commit the all-source status view with exact current-source evidence."""
 
@@ -398,6 +421,7 @@ def build_multi_source_status_fact_revision(
         queue_depth=queue_depth,
         failed_jobs=failed_jobs,
         provider_status_overrides=provider_status_overrides,
+        ready_source_ids=ready_source_ids,
     )
     contribution_by_id = {
         item.source_id: item for item in cycle.contributions

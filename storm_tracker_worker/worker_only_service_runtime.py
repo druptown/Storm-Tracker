@@ -288,6 +288,7 @@ class WorkerOnlyServiceRuntime:
         self._fact_store: OperationalFactRevisionStore | None = None
         self._snapshot_store: OperationalSnapshotStore | None = None
         self._captures: dict[str, CapturedSourceEvidence] = {}
+        self._ready_source_ids: set[str] = set()
         self._capture_ids: dict[str, str] = {}
         self._capture_desired_state_sha256: dict[str, str] = {}
         self._radar_observations: dict[
@@ -371,6 +372,12 @@ class WorkerOnlyServiceRuntime:
             initialized["source_statistics"] = [
                 dict(row) for row in index.source_statistics()
             ]
+            self._ready_source_ids.update(
+                row["source_id"]
+                for row in initialized["source_statistics"]
+                if isinstance(row.get("source_id"), str)
+                and row.get("captures", 0) > 0
+            )
             self._raw_calibration_stats = initialized
         except Exception:
             self._increment("raw_calibration_index_failures")
@@ -404,6 +411,7 @@ class WorkerOnlyServiceRuntime:
         result["source_statistics"] = [
             dict(row) for row in index.source_statistics()
         ]
+        self._ready_source_ids.add(source_id)
         self._raw_calibration_stats = result
         if not already_indexed:
             self._increment("raw_calibration_indexed")
@@ -789,6 +797,18 @@ class WorkerOnlyServiceRuntime:
             state = "offline"
         return {BLITZORTUNG_SOURCE_ID: (state, reason)}
 
+    def _provider_readiness_ids(
+        self,
+        provider_status_overrides: Mapping[str, tuple[str, str]],
+    ) -> frozenset[str]:
+        """Combine durable capture proof with current push-ingress proof."""
+
+        ready = set(self._ready_source_ids)
+        blitzortung = provider_status_overrides.get(BLITZORTUNG_SOURCE_ID)
+        if blitzortung is not None and blitzortung[0] == "operational":
+            ready.add(BLITZORTUNG_SOURCE_ID)
+        return frozenset(ready)
+
     async def _stage_cycle(self) -> bool:
         desired = self._raw.desired_state_store.load_active()
         if desired is None:
@@ -814,6 +834,9 @@ class WorkerOnlyServiceRuntime:
             evaluated_at_ms=now_ms,
         )
         provider_status_overrides = self._provider_status_overrides()
+        ready_source_ids = self._provider_readiness_ids(
+            provider_status_overrides
+        )
         cycle = build_raw_capture_operational_cycle(
             desired,
             tuple(self._captures.values()),
@@ -861,6 +884,7 @@ class WorkerOnlyServiceRuntime:
                         queue_depth=queue_depth,
                         failed_jobs=failed_jobs,
                         provider_status_overrides=provider_status_overrides,
+                        ready_source_ids=ready_source_ids,
                     )
                     if arrivals
                     else build_positive_radar_fact_revision(
@@ -873,6 +897,7 @@ class WorkerOnlyServiceRuntime:
                         queue_depth=queue_depth,
                         failed_jobs=failed_jobs,
                         provider_status_overrides=provider_status_overrides,
+                        ready_source_ids=ready_source_ids,
                     )
                 )
             except (
@@ -908,6 +933,7 @@ class WorkerOnlyServiceRuntime:
                     queue_depth=queue_depth,
                     failed_jobs=failed_jobs,
                     provider_status_overrides=provider_status_overrides,
+                    ready_source_ids=ready_source_ids,
                 )
         else:
             committed = build_multi_source_status_fact_revision(
@@ -919,6 +945,7 @@ class WorkerOnlyServiceRuntime:
                 queue_depth=queue_depth,
                 failed_jobs=failed_jobs,
                 provider_status_overrides=provider_status_overrides,
+                ready_source_ids=ready_source_ids,
             )
         if self._model_guidance:
             try:
@@ -1072,6 +1099,7 @@ class WorkerOnlyServiceRuntime:
                     source_id,
                     receipt,
                 )
+                self._ready_source_ids.add(source_id)
                 self._capture_ids[source_id] = result.source_capture_id
                 if isinstance(result.desired_state_sha256, str):
                     self._capture_desired_state_sha256[source_id] = (
@@ -1124,6 +1152,7 @@ class WorkerOnlyServiceRuntime:
                 capture,
             )
             self._captures[workload_id] = evidence
+            self._ready_source_ids.add(workload_id)
             self._capture_ids[workload_id] = capture.capture_id
             self._index_raw_calibration_capture(workload_id, capture)
             self._source_errors.pop(workload_id, None)
