@@ -31,7 +31,7 @@ from .tracking_core.operational_snapshot import encode_control_envelope
 
 
 _LOGGER = logging.getLogger(__name__)
-WORKER_VERSION = "1.18.7"
+WORKER_VERSION = "1.18.8"
 
 
 class ThinMqttService:
@@ -62,8 +62,37 @@ class ThinMqttService:
         self._last_error: str | None = None
         self._last_cycle_summary: tuple[Any, ...] | None = None
         self._last_geojson_feature_count: int | None = None
+        self._postgis_projection_enabled: bool | None = None
+        self._postgis_projection_status: str | None = None
+        self._postgis_projection_batch = 0
+        self._postgis_projection_ready = 0
+        self._postgis_projection_leased = 0
+        self._postgis_projection_projected = 0
+        self._postgis_projection_last_success_at: float | None = None
+        self._postgis_projection_last_error_code: str | None = None
 
     def _heartbeat(self, state: str = "online") -> bytes:
+        snapshot_runtime: dict[str, Any] = {
+            "snapshot_revision": self._last_snapshot_revision,
+            "snapshot_transport_state": (
+                "current" if self._last_snapshot_revision else "waiting"
+            ),
+        }
+        if (
+            isinstance(self._postgis_projection_enabled, bool)
+            and self._postgis_projection_status
+            in {"disabled", "waiting", "current", "degraded"}
+        ):
+            snapshot_runtime["postgis_projection"] = {
+                "enabled": self._postgis_projection_enabled,
+                "status": self._postgis_projection_status,
+                "batch": self._postgis_projection_batch,
+                "ready": self._postgis_projection_ready,
+                "leased": self._postgis_projection_leased,
+                "projected": self._postgis_projection_projected,
+                "last_success_at": self._postgis_projection_last_success_at,
+                "last_error_code": self._postgis_projection_last_error_code,
+            }
         return encode(envelope(
             "worker_status",
             state=state,
@@ -77,10 +106,7 @@ class ThinMqttService:
             worker_nice=int(os.getenv("STV3_WORKER_NICE", "0")),
             cpu_threads=2,
             provider_cycle_seconds=self.cycle_seconds,
-            operational_snapshot_runtime={
-                "snapshot_revision": self._last_snapshot_revision,
-                "snapshot_transport_state": "current" if self._last_snapshot_revision else "waiting",
-            },
+            operational_snapshot_runtime=snapshot_runtime,
         ))
 
     def _publish_heartbeat(self) -> None:
@@ -188,6 +214,26 @@ class ThinMqttService:
                 payload = encode_control_envelope(result.snapshot)
                 self._last_snapshot_revision = int(result.snapshot["revision"])
                 self._last_error = None
+                self._postgis_projection_enabled = (
+                    result.postgis.status != "disabled"
+                )
+                self._postgis_projection_status = result.postgis.status
+                self._postgis_projection_batch = self._last_snapshot_revision
+                self._postgis_projection_ready = max(
+                    0, int(result.postgis.queued_cycles)
+                )
+                self._postgis_projection_leased = 0
+                self._postgis_projection_projected = sum(
+                    max(0, int(value))
+                    for value in result.postgis.written_rows.values()
+                )
+                if result.postgis.status == "current":
+                    self._postgis_projection_last_success_at = time.time()
+                self._postgis_projection_last_error_code = (
+                    "postgis_projection_failed"
+                    if result.postgis.last_error_code is not None
+                    else None
+                )
                 provider_items = result.snapshot.get("providers", {}).get("items", [])
                 provider_summary = tuple(
                     sorted(
@@ -246,6 +292,7 @@ class ThinMqttService:
                         len(geojson_payload),
                     )
                     self._last_geojson_feature_count = geojson_feature_count
+                self._publish_heartbeat()
             except asyncio.CancelledError:
                 raise
             except Exception as error:
