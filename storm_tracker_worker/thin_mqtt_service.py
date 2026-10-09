@@ -30,7 +30,7 @@ from .tracking_core.operational_snapshot import encode_control_envelope
 
 
 _LOGGER = logging.getLogger(__name__)
-WORKER_VERSION = "1.18.1"
+WORKER_VERSION = "1.18.2"
 
 
 class ThinMqttService:
@@ -58,7 +58,7 @@ class ThinMqttService:
         self._last_snapshot_revision = 0
         self._last_error: str | None = None
         self._last_cycle_summary: tuple[Any, ...] | None = None
-        self._last_geojson_summary: tuple[int, int] | None = None
+        self._last_geojson_feature_count: int | None = None
 
     def _heartbeat(self, state: str = "online") -> bytes:
         return encode(envelope(
@@ -219,17 +219,16 @@ class ThinMqttService:
                     qos=1,
                     retain=True,
                 )
-                geojson_summary = (
-                    len(self.runtime.geojson_collection().get("features", [])),
-                    len(geojson_payload),
+                geojson_feature_count = len(
+                    self.runtime.geojson_collection().get("features", [])
                 )
-                if geojson_summary != self._last_geojson_summary:
+                if geojson_feature_count != self._last_geojson_feature_count:
                     _LOGGER.info(
                         "Dunne kaart gepubliceerd: features=%d bytes=%d",
-                        geojson_summary[0],
-                        geojson_summary[1],
+                        geojson_feature_count,
+                        len(geojson_payload),
                     )
-                    self._last_geojson_summary = geojson_summary
+                    self._last_geojson_feature_count = geojson_feature_count
             except asyncio.CancelledError:
                 raise
             except Exception as error:
