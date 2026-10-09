@@ -2412,6 +2412,7 @@ class WorkerService:
     def _abort_worker_first_bootstrap(self, code: str) -> NoReturn:
         """Preserve one fixed fatal even when bounded cleanup itself fails."""
 
+        _LOGGER.error("Worker-first bootstrap abort: code=%s", code)
         try:
             self._fail_worker_first_runtime(code)
         except BaseException:
@@ -4273,9 +4274,10 @@ class WorkerService:
                                 continue
                             _LOGGER.error(
                                 "Worker-first operation fail-closed: "
-                                "stage=%s class=%s",
+                                "stage=%s class=%s reason=%s",
                                 operation_stage,
                                 type(error).__name__,
+                                _worker_first_safe_error_reason(error),
                             )
                             self._fail_worker_first_runtime(
                                 "worker_first_operation_failed"
