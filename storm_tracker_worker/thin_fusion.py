@@ -7,6 +7,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from .thin_observation import (
+    MAX_GROUND_SOURCE_AGE_SECONDS,
     NormalizedObservation,
     ObservationKind,
     ObservationQuality,
@@ -16,6 +17,13 @@ from .thin_provider_runtime import ProviderResult
 
 MAX_FUSION_AGE_SECONDS = 15 * 60
 MAX_FUTURE_SKEW_SECONDS = 30
+_GROUND_KINDS = frozenset({
+    ObservationKind.TEMPERATURE,
+    ObservationKind.PRESSURE,
+    ObservationKind.RELATIVE_HUMIDITY,
+    ObservationKind.WIND_SPEED,
+    ObservationKind.WIND_DIRECTION,
+})
 
 _QUALITY_WEIGHT = {
     ObservationQuality.GOOD: 1.0,
@@ -115,7 +123,12 @@ def fuse_observations(
         providers[str(provider_id)] = candidate
         for observation in candidate.observations:
             age = evaluated - observation.observed_at
-            if age > MAX_FUSION_AGE_SECONDS:
+            maximum_age = (
+                MAX_GROUND_SOURCE_AGE_SECONDS
+                if observation.kind in _GROUND_KINDS
+                else MAX_FUSION_AGE_SECONDS
+            )
+            if age > maximum_age:
                 rejected.setdefault(str(provider_id), set()).add("stale")
                 continue
             if age < -MAX_FUTURE_SKEW_SECONDS:
