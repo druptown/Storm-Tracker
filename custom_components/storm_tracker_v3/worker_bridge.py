@@ -66,6 +66,7 @@ _POSTGIS_PROJECTION_ERROR_CODES = frozenset({
 })
 _SAFE_WORKER_ERROR_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,95}")
 _SAFE_WORKER_REASON_CODE = re.compile(r"[a-z][a-z0-9_]{0,95}")
+_SAFE_PROVIDER_IDENTIFIER = re.compile(r"[A-Za-z0-9_.:@/-]{1,192}")
 _SNAPSHOT_EXPIRY_HANDLE = "_operational_snapshot_expiry_handle"
 _WORKER_STALE_HANDLE = "_worker_stale_handle"
 _PENDING_OPERATIONAL_SNAPSHOT_PAYLOAD = (
@@ -346,6 +347,133 @@ def _bounded_postgis_projection(value) -> dict | None:
     return result
 
 
+def _bounded_provider_status_snapshot(value) -> dict | None:
+    """Keep one fixed-size provider-health projection from the heartbeat."""
+
+    if not isinstance(value, dict) or set(value) != {
+        "desired_state_sha256",
+        "evaluated_at",
+        "valid_until",
+        "items",
+    }:
+        return None
+    desired_state_sha256 = value.get("desired_state_sha256")
+    evaluated_at = value.get("evaluated_at")
+    valid_until = value.get("valid_until")
+    items = value.get("items")
+    if (
+        not isinstance(desired_state_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", desired_state_sha256) is None
+        or isinstance(evaluated_at, bool)
+        or not isinstance(evaluated_at, (int, float))
+        or not math.isfinite(float(evaluated_at))
+        or float(evaluated_at) < 0.0
+        or isinstance(valid_until, bool)
+        or not isinstance(valid_until, (int, float))
+        or not math.isfinite(float(valid_until))
+        or not float(evaluated_at) < float(valid_until)
+        or float(valid_until) - float(evaluated_at) > 300.0
+        or not isinstance(items, list)
+        or len(items) > 64
+    ):
+        return None
+    result_items: list[dict] = []
+    seen: set[str] = set()
+    exact_keys = {
+        "provider_id",
+        "display_name",
+        "readiness",
+        "state",
+        "freshness",
+        "product_valid_at",
+        "received_at",
+        "error",
+        "reason_codes",
+    }
+    for item in items:
+        if not isinstance(item, dict) or set(item) != exact_keys:
+            return None
+        provider_id = item.get("provider_id")
+        display_name = item.get("display_name")
+        readiness = item.get("readiness")
+        state = item.get("state")
+        freshness = item.get("freshness")
+        error = item.get("error")
+        reason_codes = item.get("reason_codes")
+        if (
+            not isinstance(provider_id, str)
+            or _SAFE_PROVIDER_IDENTIFIER.fullmatch(provider_id) is None
+            or provider_id in seen
+            or not isinstance(display_name, str)
+            or not 1 <= len(display_name) <= 160
+            or display_name != display_name.strip()
+            or readiness not in {"ready", "not_ready"}
+            or state not in {
+                "operational",
+                "degraded",
+                "offline",
+                "stale",
+                "unknown",
+                "api_required",
+            }
+            or freshness not in {"current", "stale", "unknown"}
+            or (
+                state in {"offline", "stale", "unknown", "api_required"}
+                and freshness == "current"
+            )
+            or (
+                error is not None
+                and (
+                    not isinstance(error, str)
+                    or len(error) > 256
+                    or any(ord(character) < 32 for character in error)
+                )
+            )
+            or not isinstance(reason_codes, list)
+            or len(reason_codes) > 32
+            or reason_codes != sorted(set(reason_codes))
+            or any(
+                not isinstance(code, str)
+                or _SAFE_PROVIDER_IDENTIFIER.fullmatch(code) is None
+                for code in reason_codes
+            )
+        ):
+            return None
+        timestamps: dict[str, float | None] = {}
+        for key in ("product_valid_at", "received_at"):
+            timestamp = item.get(key)
+            if timestamp is None:
+                timestamps[key] = None
+                continue
+            if (
+                isinstance(timestamp, bool)
+                or not isinstance(timestamp, (int, float))
+                or not math.isfinite(float(timestamp))
+                or float(timestamp) < 0.0
+            ):
+                return None
+            timestamps[key] = float(timestamp)
+        seen.add(provider_id)
+        result_items.append({
+            "provider_id": provider_id,
+            "display_name": display_name,
+            "readiness": readiness,
+            "state": state,
+            "freshness": freshness,
+            **timestamps,
+            "error": error,
+            "reason_codes": list(reason_codes),
+        })
+    if [item["provider_id"] for item in result_items] != sorted(seen):
+        return None
+    return {
+        "desired_state_sha256": desired_state_sha256,
+        "evaluated_at": float(evaluated_at),
+        "valid_until": float(valid_until),
+        "items": result_items,
+    }
+
+
 def _bounded_parallel_acquisition(value) -> dict | None:
     """Project only fixed, payload-free acquisition concurrency telemetry."""
 
@@ -546,6 +674,13 @@ def _compact_worker_status(status: dict, current: dict, *, now: float) -> dict:
                 compact["postgis_projection_last_error_code"] = (
                     postgis_projection["last_error_code"]
                 )
+        provider_status_snapshot = _bounded_provider_status_snapshot(
+            runtime.get("provider_status_snapshot")
+        )
+        if provider_status_snapshot is not None:
+            compact["runtime_provider_status_snapshot"] = (
+                provider_status_snapshot
+            )
         parallel = _bounded_parallel_acquisition(
             runtime.get("parallel_acquisition")
         )

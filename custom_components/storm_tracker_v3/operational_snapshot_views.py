@@ -203,13 +203,40 @@ def collection_count_view(
 def provider_status_view(
     cache: OperationalSnapshotCache,
     provider_id: str,
+    *,
+    runtime_status_snapshot: Mapping[str, Any] | None = None,
+    now: float | None = None,
 ) -> SnapshotSensorView:
     """Expose one worker-produced provider fact through an O(1) lookup."""
     if not isinstance(cache, OperationalSnapshotCache):
         raise TypeError("cache moet OperationalSnapshotCache zijn")
     if not isinstance(provider_id, str) or not provider_id:
         raise ValueError("provider_id moet niet-lege tekst zijn")
-    provider = cache.get_provider(provider_id)
+    runtime_provider = None
+    runtime_availability = None
+    if isinstance(runtime_status_snapshot, Mapping):
+        items = runtime_status_snapshot.get("items")
+        if isinstance(items, list):
+            runtime_provider = next(
+                (
+                    item
+                    for item in items
+                    if isinstance(item, Mapping)
+                    and item.get("provider_id") == provider_id
+                ),
+                None,
+            )
+        valid_until = runtime_status_snapshot.get("valid_until")
+        if runtime_provider is not None and isinstance(valid_until, (int, float)):
+            reference_now = float(valid_until) if now is None else float(now)
+            runtime_availability = (
+                "current" if reference_now <= float(valid_until) else "stale"
+            )
+    provider = (
+        dict(runtime_provider)
+        if runtime_provider is not None
+        else cache.get_provider(provider_id)
+    )
     if provider is None:
         collection = cache.get_collection_status("providers")
         snapshot_status = cache.get_status()
@@ -249,6 +276,14 @@ def provider_status_view(
             },
         )
     effective_status = provider["state"]
+    reason_codes = list(provider["reason_codes"])
+    freshness = provider["freshness"]
+    if runtime_availability == "stale":
+        effective_status = "stale"
+        freshness = "stale"
+        if "provider_status_expired" not in reason_codes:
+            reason_codes.append("provider_status_expired")
+        reason_codes.sort()
     readiness = provider.get("readiness")
     if readiness is None:
         readiness = (
@@ -257,7 +292,7 @@ def provider_status_view(
             else "not_ready"
         )
     return SnapshotSensorView(
-        native_value=provider["state"],
+        native_value=effective_status,
         available=True,
         attributes={
             **_status_attributes(cache),
@@ -265,11 +300,23 @@ def provider_status_view(
             "provider_name": provider["display_name"],
             "readiness": readiness,
             "effective_status": effective_status,
-            "freshness": provider["freshness"],
+            "freshness": freshness,
             "product_valid_at": provider["product_valid_at"],
             "provider_received_at": provider["received_at"],
             "error": provider["error"],
-            "reason_codes": list(provider["reason_codes"]),
+            "reason_codes": reason_codes,
+            **({
+                "provider_status_availability": runtime_availability,
+                "provider_status_evaluated_at": runtime_status_snapshot.get(
+                    "evaluated_at"
+                ),
+                "provider_status_valid_until": runtime_status_snapshot.get(
+                    "valid_until"
+                ),
+                "provider_status_desired_state_sha256": (
+                    runtime_status_snapshot.get("desired_state_sha256")
+                ),
+            } if runtime_availability is not None else {}),
         },
     )
 

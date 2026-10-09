@@ -15,6 +15,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 import json
 import math
+import time
 from typing import Any
 
 from homeassistant.components.sensor import SensorEntity
@@ -566,7 +567,7 @@ class SnapshotOnlySensorEntity(SensorEntity):
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         self.async_on_remove(self._hub.attach(self))
-        if self._description.kind == _KIND_WORKER:
+        if self._description.kind in {_KIND_WORKER, _KIND_PROVIDER}:
             self.async_on_remove(self.hass.bus.async_listen(
                 WORKER_STATUS_UPDATE_EVENT,
                 self._handle_worker_status_update,
@@ -587,7 +588,22 @@ class SnapshotOnlySensorEntity(SensorEntity):
         elif description.kind == _KIND_PRECIPITATION:
             projected = target_precipitation_view(cache, description.target_id)
         elif description.kind == _KIND_PROVIDER:
-            projected = provider_status_view(cache, description.provider_id)
+            runtime_status_snapshot = None
+            hass = getattr(self, "hass", None)
+            if hass is not None:
+                worker_status = hass.data.get(DOMAIN, {}).get(
+                    "worker_status", {}
+                )
+                if isinstance(worker_status, Mapping):
+                    runtime_status_snapshot = worker_status.get(
+                        "runtime_provider_status_snapshot"
+                    )
+            projected = provider_status_view(
+                cache,
+                description.provider_id,
+                runtime_status_snapshot=runtime_status_snapshot,
+                now=time.time(),
+            )
         else:
             projected = collection_count_view(cache, description.collection)
         return self._fail_closed(projected)
@@ -801,13 +817,17 @@ class SnapshotOnlySensorEntity(SensorEntity):
             ), self._description)
 
         if self._description.kind == _KIND_PROVIDER:
-            snapshot_current = attributes.get("snapshot_availability") == "current"
-            attributes["provider_presentation_valid"] = snapshot_current
+            provider_current = (
+                attributes.get("provider_status_availability") == "current"
+                if "provider_status_availability" in attributes
+                else attributes.get("snapshot_availability") == "current"
+            )
+            attributes["provider_presentation_valid"] = provider_current
             attributes["presentation_reason_codes"] = (
-                [] if snapshot_current else ["snapshot_not_current"]
+                [] if provider_current else ["provider_status_not_current"]
             )
             return _enforce_ha_attribute_budget(SnapshotSensorView(
-                native_value=(projected.native_value if snapshot_current else "unknown"),
+                native_value=(projected.native_value if provider_current else "unknown"),
                 available=True,
                 attributes=attributes,
             ), self._description)
