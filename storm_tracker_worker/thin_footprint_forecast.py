@@ -26,6 +26,12 @@ class TargetPassage:
     footprint: Mapping[str, Any]
     fallback_reason: str | None = None
     horizon_clipped: bool = False
+    motion_status: str = "indeterminate"
+    motion_confidence: str = "indeterminate"
+    motion_method: str | None = None
+    motion_reason_codes: tuple[str, ...] = ()
+    motion_supporting_methods: tuple[str, ...] = ()
+    motion_agreement_angle_deg: float | None = None
 
     def __post_init__(self) -> None:
         if self.exit_at < self.entry_at:
@@ -327,6 +333,21 @@ def forecast_target_passage(
         footprint=MappingProxyType(geometry),
         fallback_reason=fallback_reason,
         horizon_clipped=clipped,
+        motion_status=str(getattr(cell, "motion_status", "indeterminate")),
+        motion_confidence=str(
+            getattr(cell, "motion_confidence", "indeterminate")
+        ),
+        motion_method=getattr(cell, "motion_method", None),
+        motion_reason_codes=tuple(
+            str(item) for item in getattr(cell, "motion_reason_codes", ())
+        ),
+        motion_supporting_methods=tuple(
+            str(item)
+            for item in getattr(cell, "motion_supporting_methods", ())
+        ),
+        motion_agreement_angle_deg=getattr(
+            cell, "motion_agreement_angle_deg", None
+        ),
     )
 
 

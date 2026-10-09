@@ -364,15 +364,16 @@ ON CONFLICT(cell_id,observed_at) DO UPDATE SET
 _INSERT_TRACK = """
 INSERT INTO stv3_track_point(
     cell_id,observed_at,velocity_east_kmh,velocity_north_kmh,
-    speed_kmh,heading_deg,position,region_revision_id
+    speed_kmh,heading_deg,position,region_revision_id,motion_metadata
 ) VALUES(%s,to_timestamp(%s),%s,%s,%s,%s,
-    ST_SetSRID(ST_GeomFromGeoJSON(%s),4326),%s)
+    ST_SetSRID(ST_GeomFromGeoJSON(%s),4326),%s,%s::jsonb)
 ON CONFLICT(cell_id,observed_at) DO UPDATE SET
     velocity_east_kmh=EXCLUDED.velocity_east_kmh,
     velocity_north_kmh=EXCLUDED.velocity_north_kmh,
     speed_kmh=EXCLUDED.speed_kmh,heading_deg=EXCLUDED.heading_deg,
     position=EXCLUDED.position,
-    region_revision_id=EXCLUDED.region_revision_id
+    region_revision_id=EXCLUDED.region_revision_id,
+    motion_metadata=EXCLUDED.motion_metadata
 """
 
 _INSERT_FORECAST = """
@@ -457,6 +458,49 @@ def _json_default(value: Any) -> Any:
 
 def _sha(value: Any) -> str:
     return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+
+
+def _track_motion_metadata(cell: Any) -> dict[str, Any]:
+    """Return the auditable admission decision for every tracked cell."""
+
+    return {
+        "motion_ready": bool(getattr(cell, "motion_ready", False)),
+        "motion_status": str(
+            getattr(cell, "motion_status", "indeterminate")
+        ),
+        "motion_confidence": str(
+            getattr(cell, "motion_confidence", "indeterminate")
+        ),
+        "motion_method": getattr(cell, "motion_method", None),
+        "motion_reason_codes": [
+            str(item)
+            for item in getattr(cell, "motion_reason_codes", ())
+        ],
+        "motion_supporting_methods": [
+            str(item)
+            for item in getattr(cell, "motion_supporting_methods", ())
+        ],
+        "motion_agreement_angle_deg": getattr(
+            cell, "motion_agreement_angle_deg", None
+        ),
+    }
+
+
+def _passage_metadata(passage: Any) -> dict[str, Any]:
+    """Keep a target passage tied to the exact admitted motion evidence."""
+
+    return {
+        "fallback_reason": passage.fallback_reason,
+        "horizon_clipped": passage.horizon_clipped,
+        "motion_status": passage.motion_status,
+        "motion_confidence": passage.motion_confidence,
+        "motion_method": passage.motion_method,
+        "motion_reason_codes": list(passage.motion_reason_codes),
+        "motion_supporting_methods": list(
+            passage.motion_supporting_methods
+        ),
+        "motion_agreement_angle_deg": passage.motion_agreement_angle_deg,
+    }
 
 
 def _known_station_measurements(
@@ -988,6 +1032,7 @@ class ThinPostGISWriter:
                                 "coordinates": [cell.longitude, cell.latitude],
                             }),
                             cell_region_revision_id,
+                            _json(_track_motion_metadata(cell)),
                         ))
                         counts["track_points"] += 1
 
@@ -1041,10 +1086,7 @@ class ThinPostGISWriter:
                             passage.method,
                             passage.predicted_intensity_mm_h,
                             _json(dict(passage.footprint)),
-                            _json({
-                                "fallback_reason": passage.fallback_reason,
-                                "horizon_clipped": passage.horizon_clipped,
-                            }),
+                            _json(_passage_metadata(passage)),
                             passage_region_revision_id,
                         ))
                         counts["target_passages"] += 1
