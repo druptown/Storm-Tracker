@@ -46,6 +46,9 @@ SNAPSHOT_PROVIDER_IDS = {
     "dpc_radar": "radar.dpc.sri",
     "italiameteo_icon2i": "model.openmeteo.italiameteo_icon2i.region",
     "geosphere": "validation.geosphere.location",
+    "italiameteo_dpc_catalog": (
+        "validation.italiameteo.dpc_sri_historical_catalog"
+    ),
     "metoffice_radar": "radar.metoffice.uk_rate",
 }
 

@@ -40,6 +40,10 @@ GEOSPHERE_INCA_ENDPOINT = (
     "https://dataset.api.hub.geosphere.at/v1/timeseries/forecast/"
     "nowcast-v1-15min-1km"
 )
+ITALIAMETEO_DPC_HISTORICAL_CATALOG_ENDPOINT = (
+    "https://meteohub.agenziaitaliameteo.it/api/datasets/"
+    "radar_sri_dpc/opendata"
+)
 OPERA_LISTING_ENDPOINT = "https://s3.waw3-1.cloudferro.com/openradar-24h/"
 OPERA_OBJECT_BASE = "https://s3.waw3-1.cloudferro.com/openradar-24h"
 METAR_ENDPOINT = "https://aviationweather.gov/api/data/metar"
@@ -977,6 +981,58 @@ class GeoSphereNowcastAdapter:
                 maximum_age_seconds=self.MAXIMUM_AGE_SECONDS,
             ))
         return tuple(observations)
+
+
+class ItaliaMeteoDpcHistoricalCatalogAdapter:
+    """Validate the public DPC SRI replay catalog without feeding live fusion."""
+
+    _FILENAME_RE = re.compile(
+        r"^data-\d{8}T\d{6}Z-[A-Za-z0-9-]+\.grib$"
+    )
+
+    def __init__(
+        self,
+        *,
+        endpoint: str = ITALIAMETEO_DPC_HISTORICAL_CATALOG_ENDPOINT,
+    ) -> None:
+        self._endpoint = endpoint
+
+    async def fetch(
+        self,
+        request: ThinProviderRequest,
+        fetcher: AsyncHttpFetcher,
+        *,
+        now: float,
+    ) -> tuple[NormalizedObservation, ...]:
+        del request, now
+        payload = await fetcher.get_json(
+            self._endpoint,
+            maximum_bytes=4 * 1024 * 1024,
+        )
+        if not isinstance(payload, list) or not payload:
+            raise ValueError("italiameteo_catalog_invalid")
+        for item in payload:
+            if not isinstance(item, Mapping):
+                raise ValueError("italiameteo_catalog_entry_invalid")
+            date_text = item.get("date")
+            filename = item.get("filename")
+            variables = item.get("vars")
+            try:
+                datetime.fromisoformat(date_text)
+            except (TypeError, ValueError):
+                raise ValueError("italiameteo_catalog_entry_invalid") from None
+            if (
+                not isinstance(filename, str)
+                or self._FILENAME_RE.fullmatch(filename) is None
+                or not isinstance(variables, list)
+                or not variables
+                or not all(isinstance(value, str) and value for value in variables)
+            ):
+                raise ValueError("italiameteo_catalog_entry_invalid")
+        # This endpoint inventories historical GRIB files for replay. It has
+        # no live meteorological value, so a successful validation deliberately
+        # produces no observation for live fusion.
+        return ()
 
 
 _KMI_COLORS = (
@@ -3504,6 +3560,7 @@ __all__ = [
     "DwdRadolanAdapter",
     "DpcRadarAdapter",
     "GeoSphereNowcastAdapter",
+    "ItaliaMeteoDpcHistoricalCatalogAdapter",
     "ItaliaMeteoIcon2iAdapter",
     "KmiAwsAdapter",
     "KmiRadarAdapter",

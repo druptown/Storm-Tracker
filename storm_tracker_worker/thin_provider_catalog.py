@@ -120,6 +120,12 @@ PROVIDERS: tuple[ThinProviderSpec, ...] = (
         ITALY,
     ),
     ThinProviderSpec(
+        "italiameteo_dpc_catalog",
+        "historical_daily_catalog",
+        86_400.0,
+        ITALY,
+    ),
+    ThinProviderSpec(
         "geosphere",
         "inca_nowcast",
         900.0,
