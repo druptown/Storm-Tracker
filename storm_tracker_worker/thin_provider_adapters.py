@@ -1670,7 +1670,18 @@ class OperaRadarAdapter:
             f"{self._object_base_url}/{key}",
             maximum_bytes=384 * 1024 * 1024,
         )
-        return _decode_opera_targets(data, request, received_at=now)
+        # h5py keeps a process-wide lock.  Decoding OPERA inline can therefore
+        # block the MQTT event loop while another HDF5 radar decoder owns that
+        # lock, freezing heartbeats, control replies and the complete cycle.
+        # Share the bounded radar decode pool used by KNMI/DWD so HDF5 work is
+        # serialized and never executes on the event loop.
+        async with _RADAR_DECODE_SEMAPHORE:
+            return await asyncio.to_thread(
+                _decode_opera_targets,
+                data,
+                request,
+                received_at=now,
+            )
 
 
 def _latest_aemet_frame(payload: bytes) -> tuple[bytes, float]:
