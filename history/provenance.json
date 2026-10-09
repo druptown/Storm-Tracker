@@ -1,8 +1,8 @@
 {
   "kind": "recovered_archive_source",
   "component": "worker",
-  "version": "1.18.80",
-  "source_id": "4047c0529c70eb4d6a6b1cf6aec4d5d24eb265a6b2a9beac9e6fdb726b71a2c8",
+  "version": "1.18.81",
+  "source_id": "ed512a8d8428db44ee3b3be0055c5dd71d2a93f643798ac015a7abf2fc7a3cbd",
   "recovered_on": "2026-10-09",
   "files": [
     {
@@ -32,7 +32,7 @@
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "79ec16c5ac9876d5cd1ba3112088d82592198577943b02d030d78c02fbeaf428",
+      "sha256": "f0e496888044418313efc8d64fc945b9755740a24e27d62489ad8d92a6f50589",
       "size": 64
     },
     {
@@ -272,7 +272,7 @@
     {
       "path": "config.yaml",
       "mode": 420,
-      "sha256": "fe7cae9a6c10d69305c292c6dc5328901e509fb83cf618dd4245e07126659751",
+      "sha256": "a89affd8ae2dc3109f5355d7c84e52b557c09e10434b0d6622a6d7988745335f",
       "size": 2669
     },
     {
@@ -1478,8 +1478,8 @@
     {
       "path": "tracking_core/engine/weather_system_grouping.py",
       "mode": 420,
-      "sha256": "06d2c7aa653a8c592d4898db27d8e9e35052e5b97f0919963c64327fcfefb9a1",
-      "size": 48784
+      "sha256": "d46b3a767b27b27f63a66f9fe7d0dc50b28fb2fa1a50971e1953074f099cd510",
+      "size": 53848
     },
     {
       "path": "tracking_core/geometry/__init__.py",
@@ -1622,12 +1622,12 @@
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_worker_v1.18.80_deploy.tar.gz",
-      "archive_sha256": "3cef76af009007e3a35d49788bc0458533a563a53e14a06402563655e1db39e6",
-      "bytes": 2403001,
+      "filename": "storm_tracker_worker_v1.18.81_deploy.tar.gz",
+      "archive_sha256": "c4bb569c526838158dcc87c1dc6cfa56f1c1c1e24fa5e1912130f334f183c567",
+      "bytes": 2404101,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.152_worker_v1.18.80_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.152_worker_v1.18.81_evidence.json",
           "archive_and_source_match": true
         }
       ]

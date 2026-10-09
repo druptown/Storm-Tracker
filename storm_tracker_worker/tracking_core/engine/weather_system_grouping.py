@@ -619,8 +619,22 @@ def group_weather_systems(
         if previous.analysis_grid_id != grid.grid_id:
             raise ValueError("previous WeatherSystem-snapshot gebruikt ander grid")
 
+    spatial_footprints = {
+        track.track_id: _prepare_spatial_footprint(
+            track.current_footprint_pixels
+        )
+        for track in ordered
+    }
     connections = tuple(
-        _connection(left, right, grid, policy, analysis_time)
+        _connection(
+            left,
+            right,
+            grid,
+            policy,
+            analysis_time,
+            spatial_footprints[left.track_id],
+            spatial_footprints[right.track_id],
+        )
         for index, left in enumerate(ordered)
         for right in ordered[index + 1 :]
     )
@@ -805,12 +819,24 @@ class _Candidate:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _SpatialFootprint:
+    pixels: frozenset[Pixel]
+    rectangles: tuple[tuple[int, int, int, int], ...]
+    minimum_row: int
+    maximum_row: int
+    minimum_column: int
+    maximum_column: int
+
+
 def _connection(
     left: WeatherSystemTrackInput,
     right: WeatherSystemTrackInput,
     grid: AnalysisGrid,
     policy: WeatherSystemGroupingPolicy,
     analysis_time: float,
+    left_spatial: _SpatialFootprint,
+    right_spatial: _SpatialFootprint,
 ) -> WeatherSystemConnectionEvidence:
     shared_shields = tuple(
         sorted(
@@ -818,15 +844,15 @@ def _connection(
             & set(right.rain_shield_detection_ids)
         )
     )
-    left_pixels = set(left.current_footprint_pixels)
-    right_pixels = set(right.current_footprint_pixels)
+    left_pixels = left_spatial.pixels
+    right_pixels = right_spatial.pixels
     overlap = len(left_pixels & right_pixels)
-    touching = _footprints_touch(
-        left_pixels,
-        right_pixels,
+    touching = _prepared_footprints_touch(
+        left_spatial,
+        right_spatial,
         policy.pixel_connectivity,
     )
-    gap = _footprint_gap_m(left_pixels, right_pixels, grid)
+    gap = _prepared_footprint_gap_m(left_spatial, right_spatial, grid)
     time_difference = abs(left.valid_at - right.valid_at)
     motion_coherence, motion_time_difference, motion_difference = (
         _motion_coherence(left, right, policy, analysis_time)
@@ -1200,7 +1226,26 @@ def _footprints_touch(
     right: set[Pixel],
     connectivity: int,
 ) -> bool:
-    if left & right:
+    return _prepared_footprints_touch(
+        _prepare_spatial_footprint(left),
+        _prepare_spatial_footprint(right),
+        connectivity,
+    )
+
+
+def _prepared_footprints_touch(
+    left: _SpatialFootprint,
+    right: _SpatialFootprint,
+    connectivity: int,
+) -> bool:
+    if left.pixels & right.pixels:
+        return False
+    if (
+        left.maximum_row + 1 < right.minimum_row
+        or right.maximum_row + 1 < left.minimum_row
+        or left.maximum_column + 1 < right.minimum_column
+        or right.maximum_column + 1 < left.minimum_column
+    ):
         return False
     offsets = (
         ((-1, 0), (0, -1), (0, 1), (1, 0))
@@ -1216,9 +1261,14 @@ def _footprints_touch(
             (1, 1),
         )
     )
+    smaller, larger = (
+        (left.pixels, right.pixels)
+        if len(left.pixels) <= len(right.pixels)
+        else (right.pixels, left.pixels)
+    )
     return any(
-        (row + row_delta, column + column_delta) in right
-        for row, column in left
+        (row + row_delta, column + column_delta) in larger
+        for row, column in smaller
         for row_delta, column_delta in offsets
     )
 
@@ -1228,16 +1278,129 @@ def _footprint_gap_m(
     right: set[Pixel],
     grid: AnalysisGrid,
 ) -> float:
-    return min(
-        math.hypot(
-            max(0, abs(left_column - right_column) - 1)
-            * grid.x_resolution_m,
-            max(0, abs(left_row - right_row) - 1)
-            * grid.y_resolution_m,
-        )
-        for left_row, left_column in left
-        for right_row, right_column in right
+    return _prepared_footprint_gap_m(
+        _prepare_spatial_footprint(left),
+        _prepare_spatial_footprint(right),
+        grid,
     )
+
+
+def _prepared_footprint_gap_m(
+    left: _SpatialFootprint,
+    right: _SpatialFootprint,
+    grid: AnalysisGrid,
+) -> float:
+    best_squared = math.inf
+    for left_rectangle in left.rectangles:
+        for right_rectangle in right.rectangles:
+            vertical_m = max(
+                0,
+                max(left_rectangle[0], right_rectangle[0])
+                - min(left_rectangle[1], right_rectangle[1]),
+            ) * grid.y_resolution_m
+            vertical_squared = vertical_m * vertical_m
+            if vertical_squared >= best_squared:
+                continue
+            horizontal_m = max(
+                0,
+                max(left_rectangle[2], right_rectangle[2])
+                - min(left_rectangle[3], right_rectangle[3]),
+            ) * grid.x_resolution_m
+            squared = vertical_squared + horizontal_m * horizontal_m
+            if squared < best_squared:
+                best_squared = squared
+                if best_squared == 0.0:
+                    return 0.0
+    return math.sqrt(best_squared)
+
+
+def _prepare_spatial_footprint(
+    footprint: Iterable[Pixel],
+) -> _SpatialFootprint:
+    pixels = frozenset(footprint)
+    if not pixels:
+        raise ValueError("spatial footprint mag niet leeg zijn")
+    rows = _columns_by_row(pixels)
+    active: dict[tuple[int, int], int] = {}
+    rectangles: list[tuple[int, int, int, int]] = []
+    previous_row: int | None = None
+    for row in sorted(rows):
+        if previous_row is not None and row != previous_row + 1:
+            rectangles.extend(
+                (start_row, previous_row + 1, start_column, end_column)
+                for (start_column, end_column), start_row in active.items()
+            )
+            active.clear()
+        runs = _column_runs(rows[row])
+        for run in tuple(active):
+            if run not in runs:
+                rectangles.append(
+                    (active.pop(run), row, run[0], run[1])
+                )
+        for run in runs:
+            active.setdefault(run, row)
+        previous_row = row
+    assert previous_row is not None
+    rectangles.extend(
+        (start_row, previous_row + 1, start_column, end_column)
+        for (start_column, end_column), start_row in active.items()
+    )
+    row_values = tuple(row for row, _column in pixels)
+    column_values = tuple(column for _row, column in pixels)
+    return _SpatialFootprint(
+        pixels=pixels,
+        rectangles=tuple(sorted(rectangles)),
+        minimum_row=min(row_values),
+        maximum_row=max(row_values),
+        minimum_column=min(column_values),
+        maximum_column=max(column_values),
+    )
+
+
+def _column_runs(
+    columns: tuple[int, ...],
+) -> tuple[tuple[int, int], ...]:
+    runs: list[tuple[int, int]] = []
+    start = previous = columns[0]
+    for column in columns[1:]:
+        if column != previous + 1:
+            runs.append((start, previous + 1))
+            start = column
+        previous = column
+    runs.append((start, previous + 1))
+    return tuple(runs)
+
+
+def _columns_by_row(
+    footprint: Iterable[Pixel],
+) -> dict[int, tuple[int, ...]]:
+    columns_by_row: dict[int, list[int]] = {}
+    for row, column in footprint:
+        columns_by_row.setdefault(row, []).append(column)
+    return {
+        row: tuple(sorted(columns))
+        for row, columns in columns_by_row.items()
+    }
+
+
+def _minimum_column_gap_pixels(
+    left: tuple[int, ...],
+    right: tuple[int, ...],
+) -> int:
+    left_index = right_index = 0
+    best = math.inf
+    while left_index < len(left) and right_index < len(right):
+        left_column = left[left_index]
+        right_column = right[right_index]
+        gap = max(0, abs(left_column - right_column) - 1)
+        if gap == 0:
+            return 0
+        best = min(best, gap)
+        if left_column < right_column:
+            left_index += 1
+        else:
+            right_index += 1
+    return int(best)
 
 
 def _pixels(values: object, field: str) -> tuple[Pixel, ...]:
