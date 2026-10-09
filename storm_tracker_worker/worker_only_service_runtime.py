@@ -452,6 +452,55 @@ class WorkerOnlyServiceRuntime:
         assert self._output is not None
         return await self._settle_snapshot_runtime(self._output, output)
 
+    def _snapshot_provider_projection_missing(self) -> bool:
+        """Return whether the durable head is only the safe empty fallback."""
+
+        if self._snapshot_store is None:
+            return True
+        head = self._snapshot_store.head()
+        if not isinstance(head, Mapping):
+            return True
+        snapshot = head.get("snapshot")
+        if not isinstance(snapshot, Mapping):
+            return True
+        providers = snapshot.get("providers")
+        if not isinstance(providers, Mapping):
+            return True
+        items = providers.get("items")
+        return not isinstance(items, list) or len(items) != SOURCE_COUNT
+
+    async def _restore_provider_projection_if_missing(self) -> bool:
+        """Replace an authority-race fallback with the complete status view.
+
+        Settling an MQTT publication while Life360 updates desired-state can
+        legitimately publish an all-unknown fallback for the newest authority.
+        That fallback contains no provider rows.  Rebuild those rows from the
+        already retained capture/error state; this performs no provider I/O.
+        """
+
+        if not self._snapshot_provider_projection_missing():
+            return False
+        if self._output is None:
+            raise WorkerOnlyServiceRuntimeError("worker_only_output_unavailable")
+        for _ in range(MAX_SNAPSHOT_SETTLE_TICKS):
+            if not self._snapshot_provider_projection_missing():
+                return True
+            if not await self._stage_cycle():
+                return False
+            before = self._output.diagnostics()["publication"][
+                "snapshot_revision"
+            ]
+            output = await self._output.async_publish_ready_fact()
+            output = await self._settle_snapshot_output(output)
+            after = output["publication"]["snapshot_revision"]
+            if after > before:
+                self._increment("snapshots_published")
+        if self._snapshot_provider_projection_missing():
+            raise WorkerOnlyServiceRuntimeError(
+                "worker_only_snapshot_output_not_ready"
+            )
+        return True
+
     def _new_snapshot_output(
         self,
         *,
@@ -1194,6 +1243,8 @@ class WorkerOnlyServiceRuntime:
                     output = await self._output.async_start()
                     stage = "output_settle"
                     await self._settle_snapshot_output(output)
+                stage = "snapshot_provider_projection"
+                await self._restore_provider_projection_if_missing()
                 # Startup establishes the durable control plane and publishes
                 # a bounded fallback snapshot only.  Replaying retained METAR
                 # or radar captures can consume the full low-priority science
@@ -1324,6 +1375,8 @@ class WorkerOnlyServiceRuntime:
                     output = await self._output.async_tick()
                     stage = "snapshot_settle"
                     await self._settle_snapshot_output(output)
+                stage = "snapshot_provider_projection"
+                await self._restore_provider_projection_if_missing()
                 await self._flush_postgis_projection_noncritical()
                 self._state = "running"
                 self._last_error_code = None

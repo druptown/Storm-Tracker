@@ -1,8 +1,8 @@
 {
   "kind": "recovered_archive_source",
   "component": "worker",
-  "version": "1.17.51",
-  "source_id": "a88aafa53043c95e23864210e01da7c9f7a9b16160a25618ffca1efee96a2f8c",
+  "version": "1.17.52",
+  "source_id": "e1d7129a25207ba300fa1cb5ebe81bbb1c2342ad017cecfb0addac4854cfc2c1",
   "recovered_on": "2026-10-09",
   "files": [
     {
@@ -32,7 +32,7 @@
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "7d0db7f60d671b4a5e629bdaeb6d073c0d5ae0a2c14b684cdea5b1f2f7f588ec",
+      "sha256": "c5adf6f81e6352856943e0b6d5aca189b6e930ca90f8467c106c4c38baedc975",
       "size": 64
     },
     {
@@ -290,7 +290,7 @@
     {
       "path": "config.yaml",
       "mode": 420,
-      "sha256": "fe616e3d10fb4d9133802ba06a12c4d144619d4e1305ad61081ce92766561566",
+      "sha256": "2d30d0e71e8d14254f70b2e26d58cc61f4406510cefed6a59b6e7f6dca54ffa5",
       "size": 2861
     },
     {
@@ -1412,22 +1412,22 @@
     {
       "path": "worker_only_service_runtime.py",
       "mode": 420,
-      "sha256": "f4a47c7c262fc30c293fda6b9a477ac4d3a2ca815d06d13aafc397654ca9fd26",
-      "size": 62802
+      "sha256": "aa28b8962ce8ca53eb1c6d670fb00342c30809fdb01555736fa2404b7383383e",
+      "size": 65187
     }
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_worker_v1.17.51_deploy.tar.gz",
-      "archive_sha256": "ab367bf9e374366636391a0bd3798c080f9686cb57f761b6d56786ac8a94995a",
-      "bytes": 2245449,
+      "filename": "storm_tracker_worker_v1.17.52_deploy.tar.gz",
+      "archive_sha256": "4df6db08de293cea59f772177f34c8fe9e47b77f70a6802e30287b44695246b6",
+      "bytes": 2245853,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.51_worker_v1.17.51_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.52_worker_v1.17.52_evidence.json",
           "archive_and_source_match": true
         },
         {
-          "manifest": "storm_tracker_release_v1.14.51_worker_v1.17.51_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.52_worker_v1.17.52_evidence.json",
           "archive_and_source_match": true
         }
       ]
