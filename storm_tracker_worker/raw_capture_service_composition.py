@@ -88,7 +88,7 @@ from .worker_first_service_composition import (
 
 _LOGGER = logging.getLogger(__name__)
 
-CONFIG_CONTRACT: Final = "stv3-worker-raw-capture-service-config-v4"
+CONFIG_CONTRACT: Final = "stv3-worker-raw-capture-service-config-v5"
 RUNTIME_CONTRACT: Final = "stv3-worker-raw-capture-runtime-v5"
 MODE: Final = "service_raw_capture_shadow"
 SCIENCE_MODE: Final = "disabled"
@@ -172,6 +172,7 @@ _RETENTION_FIELDS = frozenset({
     "automatic_reclaim",
     "capacity_exhaustion",
     "host_operational_free_reserve_bytes",
+    "retained_payload_claim_bytes",
     "source_reclaim_authorized",
 })
 _TIMEOUT_FIELDS = frozenset({"acquisition_seconds", "stop_seconds"})
@@ -352,6 +353,7 @@ class RawCaptureServiceConfig:
     blitzortung_ingress_limits: BlitzortungEventIngressLimits
     blitzortung_enabled: bool
     host_operational_free_reserve_bytes: int
+    retained_payload_claim_bytes: int | None = None
     blitzortung_keepalive_seconds: int = BLITZORTUNG_DEFAULT_KEEPALIVE_SECONDS
     allowed_workload_ids: tuple[str, ...] = RAW_CAPTURE_ALLOWED_WORKLOAD_IDS
     acquisition_timeout_seconds: float = ACQUISITION_LANE_TIMEOUT_SECONDS
@@ -370,6 +372,21 @@ class RawCaptureServiceConfig:
         ):
             raise RawCaptureServiceConfigError(
                 "raw_capture_host_operational_free_reserve_invalid"
+            )
+        if self.retained_payload_claim_bytes is None:
+            object.__setattr__(
+                self,
+                "retained_payload_claim_bytes",
+                self.raw_store_limits.max_total_bytes,
+            )
+        elif (
+            type(self.retained_payload_claim_bytes) is not int
+            or not self.raw_store_limits.max_object_bytes
+            <= self.retained_payload_claim_bytes
+            <= self.raw_store_limits.max_total_bytes
+        ):
+            raise RawCaptureServiceConfigError(
+                "raw_capture_retained_payload_claim_invalid"
             )
         try:
             WorkerFirstServiceCompositionConfig(
@@ -468,7 +485,7 @@ class RawCaptureServiceConfig:
             + BLITZORTUNG_CONTROL_STAGING_RECOVERY_EXTRA_ENTRIES
         ) * BLITZORTUNG_CONTROL_RECEIPT_MAX_BYTES
         combined_capacity_bytes = (
-            self.raw_store_limits.max_total_bytes
+            self.cadence_retained_payload_claim_bytes
             + self.raw_store_limits.max_catalog_bytes
         )
         combined_object_entries = self.raw_store_limits.max_object_entries
@@ -593,6 +610,9 @@ class RawCaptureServiceConfig:
                 "host_operational_free_reserve_bytes": retention[
                     "host_operational_free_reserve_bytes"
                 ],
+                "retained_payload_claim_bytes": retention[
+                    "retained_payload_claim_bytes"
+                ],
                 "source_reclaim_authorized": False,
             }
             or type(allowed) is not list
@@ -629,6 +649,9 @@ class RawCaptureServiceConfig:
                 blitzortung_enabled=blitzortung["enabled"],
                 host_operational_free_reserve_bytes=retention[
                     "host_operational_free_reserve_bytes"
+                ],
+                retained_payload_claim_bytes=retention[
+                    "retained_payload_claim_bytes"
                 ],
                 blitzortung_keepalive_seconds=blitzortung[
                     "keepalive_seconds"
@@ -699,6 +722,9 @@ class RawCaptureServiceConfig:
                 "host_operational_free_reserve_bytes": (
                     self.host_operational_free_reserve_bytes
                 ),
+                "retained_payload_claim_bytes": (
+                    self.cadence_retained_payload_claim_bytes
+                ),
                 "source_reclaim_authorized": False,
             },
             "science_mode": SCIENCE_MODE,
@@ -715,6 +741,12 @@ class RawCaptureServiceConfig:
         return hashlib.sha256(_canonical(self.to_mapping())).hexdigest()
 
     @property
+    def cadence_retained_payload_claim_bytes(self) -> int:
+        if self.retained_payload_claim_bytes is None:
+            return self.raw_store_limits.max_total_bytes
+        return self.retained_payload_claim_bytes
+
+    @property
     def storage_capacity_diagnostics(self) -> dict[str, Any]:
         control_receipt_bytes = (
             self.blitzortung_ingress_limits.max_control_receipts
@@ -725,7 +757,7 @@ class RawCaptureServiceConfig:
             + BLITZORTUNG_CONTROL_STAGING_RECOVERY_EXTRA_ENTRIES
         ) * BLITZORTUNG_CONTROL_RECEIPT_MAX_BYTES
         combined_bytes = (
-            self.raw_store_limits.max_total_bytes
+            self.cadence_retained_payload_claim_bytes
             + self.raw_store_limits.max_catalog_bytes
         )
         combined_entries = self.raw_store_limits.max_object_entries

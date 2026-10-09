@@ -35,16 +35,15 @@ from .worker_first_composition import (
 from .worker_first_service_composition import WorkerFirstServiceSourcePaths
 
 
-CONTRACT = "stv3-worker-only-bootstrap-v3"
+CONTRACT = "stv3-worker-only-bootstrap-v4"
 DEFAULT_ROOT = Path("/data/storm_tracker_worker_runtime_production_v1")
 CONFIG_FILENAME = "worker-only-config.json"
-# Keep the configured envelope comfortably below the actual 160 GB NAS VM
-# filesystem.  The retention guard reserves the complete unused RAW envelope,
-# both 4 GiB catalog ceilings and 2 GiB of host headroom before it admits a
-# provider cycle.  A 128 GiB RAW ceiling therefore required roughly 138 GiB
-# free and incorrectly blocked an otherwise empty 160 GB installation.
-PRODUCTION_RAW_CAPACITY_BYTES = 96 * 1024 * 1024 * 1024
-_LEGACY_PRODUCTION_RAW_CAPACITY_BYTES = 128 * 1024 * 1024 * 1024
+# Existing raw and capacity-ledger catalogs bind this physical ceiling into
+# their immutable schema. Keep it unchanged so every retained byte remains
+# readable. Admission uses the lower claim below, leaving ample NAS headroom.
+PRODUCTION_RAW_CAPACITY_BYTES = 128 * 1024 * 1024 * 1024
+PRODUCTION_RETENTION_CLAIM_BYTES = 96 * 1024 * 1024 * 1024
+_FAILED_INTERMEDIATE_RAW_CAPACITY_BYTES = 96 * 1024 * 1024 * 1024
 PRODUCTION_ENTRY_CAPACITY = 1_000_000
 PRODUCTION_RESERVATION_CAPACITY = 250_000
 PRODUCTION_CAPTURE_CAPACITY = 250_000
@@ -184,6 +183,7 @@ def _build_worker_only_config(
     root: str | Path,
     *,
     raw_capacity_bytes: int,
+    retained_payload_claim_bytes: int | None,
 ) -> RawCaptureServiceConfig:
     supplied = Path(root)
     if not supplied.is_absolute():
@@ -217,6 +217,7 @@ def _build_worker_only_config(
         blitzortung_ingress_limits=BlitzortungEventIngressLimits(),
         blitzortung_enabled=False,
         host_operational_free_reserve_bytes=2 * 1024 * 1024 * 1024,
+        retained_payload_claim_bytes=retained_payload_claim_bytes,
     )
 
 
@@ -224,7 +225,18 @@ def build_worker_only_config(root: str | Path) -> RawCaptureServiceConfig:
     return _build_worker_only_config(
         root,
         raw_capacity_bytes=PRODUCTION_RAW_CAPACITY_BYTES,
+        retained_payload_claim_bytes=PRODUCTION_RETENTION_CLAIM_BYTES,
     )
+
+
+def _legacy_v4_payload(config: RawCaptureServiceConfig) -> bytes:
+    mapping = config.to_mapping()
+    mapping["contract"] = "stv3-worker-raw-capture-service-config-v4"
+    retention = mapping["retention"]
+    if not isinstance(retention, dict):
+        raise WorkerOnlyBootstrapError("legacy bootstrap mapping invalid")
+    retention.pop("retained_payload_claim_bytes", None)
+    return _canonical(mapping)
 
 
 def _publish_identical(
@@ -291,15 +303,24 @@ def materialize_worker_only_runtime(root: str | Path = DEFAULT_ROOT) -> dict[str
         expected_config_sha256=config.worker_first.fingerprint,
     )
     payload = _canonical(config.to_mapping())
-    legacy_payload = _canonical(_build_worker_only_config(
+    original_legacy_payload = _legacy_v4_payload(_build_worker_only_config(
         root,
-        raw_capacity_bytes=_LEGACY_PRODUCTION_RAW_CAPACITY_BYTES,
-    ).to_mapping())
+        raw_capacity_bytes=PRODUCTION_RAW_CAPACITY_BYTES,
+        retained_payload_claim_bytes=None,
+    ))
+    failed_intermediate_payload = _legacy_v4_payload(_build_worker_only_config(
+        root,
+        raw_capacity_bytes=_FAILED_INTERMEDIATE_RAW_CAPACITY_BYTES,
+        retained_payload_claim_bytes=None,
+    ))
     config_path = Path(root) / CONFIG_FILENAME
     _publish_identical(
         config_path,
         payload,
-        accepted_previous=(legacy_payload,),
+        accepted_previous=(
+            original_legacy_payload,
+            failed_intermediate_payload,
+        ),
     )
     return {
         "authority_sha256": authority.authority_sha256,
@@ -334,6 +355,7 @@ __all__ = [
     "PRODUCTION_CATALOG_CAPACITY_BYTES",
     "PRODUCTION_ENTRY_CAPACITY",
     "PRODUCTION_RAW_CAPACITY_BYTES",
+    "PRODUCTION_RETENTION_CLAIM_BYTES",
     "PRODUCTION_RESERVATION_CAPACITY",
     "WorkerOnlyBootstrapError",
     "build_worker_only_config",
