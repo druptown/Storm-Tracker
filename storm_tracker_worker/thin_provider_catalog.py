@@ -18,10 +18,12 @@ class CoverageBox:
     east: float
 
     def contains(self, latitude: float, longitude: float) -> bool:
-        return (
-            self.south <= latitude <= self.north
-            and self.west <= longitude <= self.east
+        longitude_matches = (
+            self.west <= longitude <= self.east
+            if self.west <= self.east
+            else longitude >= self.west or longitude <= self.east
         )
+        return self.south <= latitude <= self.north and longitude_matches
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +97,7 @@ EUMETSAT_MTG_DISK = CoverageBox(
 GOES18_DISK = CoverageBox(
     south=-65.0,
     north=65.0,
-    west=-180.0,
+    west=155.0,
     east=-55.0,
 )
 GOES19_DISK = CoverageBox(
@@ -126,6 +128,10 @@ PROVIDERS: tuple[ThinProviderSpec, ...] = (
     ThinProviderSpec("eumetsat_li", "mtg_li", 60.0, EUMETSAT_MTG_DISK),
     ThinProviderSpec("goes18_glm", "glm_l2", 120.0, GOES18_DISK),
     ThinProviderSpec("goes19_glm", "glm_l2", 120.0, GOES19_DISK),
+    ThinProviderSpec("goes18_rrqpe", "rrqpe", 600.0, GOES18_DISK),
+    ThinProviderSpec("goes19_rrqpe", "rrqpe", 600.0, GOES19_DISK),
+    ThinProviderSpec("noaa_err", "enterprise_rain_rate", 600.0, None),
+    ThinProviderSpec("hsaf_h40b", "h40b", 600.0, EUMETSAT_MTG_DISK),
     ThinProviderSpec("rainviewer", "visual", 300.0, None),
     ThinProviderSpec("aemet_radar", "radar_composite", 300.0, SPAIN),
     ThinProviderSpec(

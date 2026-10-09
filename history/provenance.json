@@ -1,8 +1,8 @@
 {
   "kind": "recovered_archive_source",
   "component": "worker",
-  "version": "1.18.45",
-  "source_id": "7b9b201f339a74709ad86d767888b458be866d41b1753cf0e4d18b3adfcb102f",
+  "version": "1.18.46",
+  "source_id": "b7150bfa0c0278783772690ff85afe27e1844d6fc0b380ac2c8a74af7a34d7af",
   "recovered_on": "2026-10-09",
   "files": [
     {
@@ -32,7 +32,7 @@
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "2d1b191b35df09df0de703b6ba8aaa6b7146b583f2753ca88363b71dd845450d",
+      "sha256": "b1175225b41d6676335eaf0cd1f944b7f63ead868c71e8960d0aee4c5b1aa99d",
       "size": 64
     },
     {
@@ -272,7 +272,7 @@
     {
       "path": "config.yaml",
       "mode": 420,
-      "sha256": "10048b5ccf07bc9f2a9b909b292c5e2dfd6e825ca06a8bf3c471dd7c6c9c2486",
+      "sha256": "88901cdb0e71e1a22d014adac0b0912fb34f7c6e4809d398ea94b5004560882f",
       "size": 2669
     },
     {
@@ -914,8 +914,8 @@
     {
       "path": "satellite_radar.py",
       "mode": 420,
-      "sha256": "bb73160d6363501eea10d7e49b527a527a21f36859f8b42279ea6a247ff21fa4",
-      "size": 27010
+      "sha256": "ac91b2be4f1d9ed88cdfc3cb0f866178f046872994152743a0e4c745895b7412",
+      "size": 30544
     },
     {
       "path": "science_operational_fact_bridge.py",
@@ -1058,8 +1058,8 @@
     {
       "path": "thin_mqtt_service.py",
       "mode": 420,
-      "sha256": "87f7e4f85bc73d1fec7b1b1693e439b4a0294838a0df583aa2de5516f6440654",
-      "size": 22709
+      "sha256": "3b81d2e66459867107ef8ee26ebdeea75fa3645e3270d92da16599b5b2b932ee",
+      "size": 22955
     },
     {
       "path": "thin_nowcast.py",
@@ -1076,8 +1076,8 @@
     {
       "path": "thin_operational_runtime.py",
       "mode": 420,
-      "sha256": "65657f445c3ef04806f045d060483ad81e410cd3e699f5d160ae8f605d57ec1c",
-      "size": 36941
+      "sha256": "09919d2e25f701f40f3693d0e3ccb940749855916fd7ed45cfc7444740af5214",
+      "size": 37111
     },
     {
       "path": "thin_postgis.py",
@@ -1094,8 +1094,8 @@
     {
       "path": "thin_provider_catalog.py",
       "mode": 420,
-      "sha256": "b9abc1ca40fb944e34007b2aa1fa95659580d20ef6e09a0c090bed2c6c4b635f",
-      "size": 7211
+      "sha256": "1df675e54562ed0b322d7e58d7f18e79c636f4caf60e181b8e03635c6faad300",
+      "size": 7622
     },
     {
       "path": "thin_provider_runtime.py",
@@ -1124,8 +1124,8 @@
     {
       "path": "thin_satellite_adapters.py",
       "mode": 420,
-      "sha256": "de6e33fed2e0f4f8d923af6051bcc37304967fac039943619286a4382a4db38d",
-      "size": 6415
+      "sha256": "ec9496db558f12b65959e11c418f9c68cc4548529d202d0543619216416dd934",
+      "size": 16546
     },
     {
       "path": "thin_station_bootstrap.py",
@@ -1556,12 +1556,12 @@
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_worker_v1.18.45_deploy.tar.gz",
-      "archive_sha256": "7e5d518303ac5724f50807f1c8a4caee88be5ccca3fc2e9fdb8cd0daff2e10a8",
-      "bytes": 2366641,
+      "filename": "storm_tracker_worker_v1.18.46_deploy.tar.gz",
+      "archive_sha256": "99cf613a0c066aaff431e8d111a2750bc59a89d1f946b2ab775aa612f0fd0b4b",
+      "bytes": 2369021,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.137_worker_v1.18.45_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.138_worker_v1.18.46_evidence.json",
           "archive_and_source_match": true
         }
       ]

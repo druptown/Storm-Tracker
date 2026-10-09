@@ -294,8 +294,9 @@ def _decode_gzip(payload: bytes) -> bytes:
 
 def _hsaf_parse(payload: bytes, areas: tuple[dict, ...], timestamp: float) -> dict:
     _validate_product_time(timestamp, HSAF_MAX_AGE, "H40B")
-    observations, runs = [], []
+    observations, runs, rain_samples = [], [], []
     seen_observations, seen_runs = set(), set()
+    seen_samples = set()
     with h5py.File(io.BytesIO(_decode_gzip(payload)), "r") as product:
         rain = product["rr"]
         quality_dataset = product.get("qind")
@@ -333,6 +334,34 @@ def _hsaf_parse(payload: bytes, areas: tuple[dict, ...], timestamp: float) -> di
                 & (rate >= 0.1)
                 & (quality >= HSAF_MIN_QUALITY)
             )
+            target_x, target_y = forward.transform(
+                float(area["center_lon"]), float(area["center_lat"])
+            )
+            target_column = int(np.argmin(np.abs(x_axis - target_x)))
+            target_row = int(np.argmin(np.abs(y_axis - target_y)))
+            if (
+                y_window.start <= target_row < y_window.stop
+                and x_window.start <= target_column < x_window.stop
+            ):
+                local_row = target_row - y_window.start
+                local_column = target_column - x_window.start
+                sample_key = (
+                    round(float(area["center_lat"]), 6),
+                    round(float(area["center_lon"]), 6),
+                )
+                if valid[local_row, local_column] and sample_key not in seen_samples:
+                    seen_samples.add(sample_key)
+                    rain_samples.append({
+                        "lat": float(area["center_lat"]),
+                        "lon": float(area["center_lon"]),
+                        "timestamp": float(timestamp),
+                        "rain_rate_mm_h": float(rate[local_row, local_column]),
+                        "quality": float(np.clip(
+                            quality[local_row, local_column] / 100.0, 0.0, 1.0
+                        )),
+                        "source": "hsaf_h40b",
+                        "unit": "mm/h",
+                    })
             grid = np.zeros(raw.shape, dtype=np.uint8)
             if valid.any():
                 grid[valid] = np.vectorize(_intensity)(rate[valid]).astype(np.uint8)
@@ -388,6 +417,7 @@ def _hsaf_parse(payload: bytes, areas: tuple[dict, ...], timestamp: float) -> di
     return {
         "provider": "hsaf_h40b",
         "frame_timestamp": timestamp,
+        "rain_samples": rain_samples,
         "observations": observations,
         "overlay": {"source": "hsaf_h40b", "timestamp": timestamp, "runs": runs},
     }
@@ -491,8 +521,9 @@ def _goes_axis(dataset) -> np.ndarray:
 def _goes_parse(payload: bytes, satellite: int, areas: tuple[dict, ...]) -> dict:
     if len(payload) > GOES_MAX_FILE:
         raise ValueError("GOES RRQPE-bestand overschrijdt veiligheidslimiet")
-    observations, runs = [], []
+    observations, runs, rain_samples = [], [], []
     seen_observations, seen_runs = set(), set()
+    seen_samples = set()
     with h5py.File(io.BytesIO(payload), "r") as product:
         timestamp = datetime.fromisoformat(
             _text(product.attrs["time_coverage_start"]).replace("Z", "+00:00")
@@ -530,6 +561,32 @@ def _goes_parse(payload: bytes, satellite: int, areas: tuple[dict, ...]) -> dict
             dqf = np.asarray(quality[y_window, x_window], dtype=np.uint8)
             rate = raw * scale + offset
             valid = (raw != fill) & np.isfinite(rate) & (rate >= 0.1) & (dqf == 0)
+            target_x, target_y = forward.transform(
+                float(area["center_lon"]), float(area["center_lat"])
+            )
+            target_column = int(np.argmin(np.abs(x_axis - target_x)))
+            target_row = int(np.argmin(np.abs(y_axis - target_y)))
+            if (
+                y_window.start <= target_row < y_window.stop
+                and x_window.start <= target_column < x_window.stop
+            ):
+                local_row = target_row - y_window.start
+                local_column = target_column - x_window.start
+                sample_key = (
+                    round(float(area["center_lat"]), 6),
+                    round(float(area["center_lon"]), 6),
+                )
+                if valid[local_row, local_column] and sample_key not in seen_samples:
+                    seen_samples.add(sample_key)
+                    rain_samples.append({
+                        "lat": float(area["center_lat"]),
+                        "lon": float(area["center_lon"]),
+                        "timestamp": float(timestamp),
+                        "rain_rate_mm_h": float(rate[local_row, local_column]),
+                        "quality": 1.0,
+                        "source": f"noaa_goes{satellite}_rrqpe",
+                        "unit": "mm/h",
+                    })
             grid = np.zeros(raw.shape, dtype=np.uint8)
             if valid.any():
                 grid[valid] = np.vectorize(_intensity)(rate[valid]).astype(np.uint8)
@@ -584,6 +641,7 @@ def _goes_parse(payload: bytes, satellite: int, areas: tuple[dict, ...]) -> dict
     return {
         "provider": "noaa_goes_rrqpe",
         "frame_timestamp": timestamp,
+        "rain_samples": rain_samples,
         "observations": observations,
         "overlay": {"source": "noaa_goes_rrqpe", "timestamp": timestamp, "runs": runs},
     }
@@ -605,14 +663,25 @@ def _latest_goes_key(satellite: int) -> str:
 
 def goes_rrqpe_fetch(job) -> dict:
     areas = _validated_areas(job.payload.get("areas"))
-    selected = {
-        satellite: tuple(area for area in areas if _goes_satellite(area["center_lon"]) == satellite)
-        for satellite in GOES_SATELLITES
-    }
+    requested_satellites = job.payload.get("satellites")
+    if requested_satellites is None:
+        selected = {
+            satellite: tuple(area for area in areas if _goes_satellite(area["center_lon"]) == satellite)
+            for satellite in GOES_SATELLITES
+        }
+    else:
+        if (
+            not isinstance(requested_satellites, list)
+            or not requested_satellites
+            or len(requested_satellites) > len(GOES_SATELLITES)
+            or any(int(value) not in GOES_SATELLITES for value in requested_satellites)
+        ):
+            raise ValueError("ongeldige GOES-satellietselectie")
+        selected = {int(satellite): areas for satellite in requested_satellites}
     selected = {satellite: values for satellite, values in selected.items() if values}
     if not selected:
         raise ValueError("targets liggen buiten GOES-dekking")
-    observations, runs, timestamps = [], [], []
+    observations, runs, timestamps, rain_samples = [], [], [], []
     overlays_by_satellite = {}
     downloaded = 0
     current_products = {}
@@ -666,6 +735,7 @@ def goes_rrqpe_fetch(job) -> dict:
             },
         )
         timestamps.append(float(result["frame_timestamp"]))
+        rain_samples.extend(result.get("rain_samples", ()))
         overlays_by_satellite[str(satellite)] = result["overlay"]
     # Bound the persistent process cache to only the latest product per satellite.
     live_keys = set(current_products.items())
@@ -678,6 +748,7 @@ def goes_rrqpe_fetch(job) -> dict:
     result = {
         "provider": "noaa_goes_rrqpe",
         "frame_timestamp": timestamp,
+        "rain_samples": rain_samples,
         "observations": observations,
         "overlay": {"source": "noaa_goes_rrqpe", "timestamp": timestamp, "runs": runs},
         "overlays_by_satellite": overlays_by_satellite,
