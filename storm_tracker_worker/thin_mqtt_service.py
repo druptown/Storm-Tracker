@@ -59,6 +59,39 @@ from .tracking_core.operational_snapshot import encode_control_envelope
 
 _LOGGER = logging.getLogger(__name__)
 
+WORKER_TECHNICAL_SOURCE_CONTRACT = (
+    "stv3-worker-technical-diagnostics-source-v1"
+)
+WORKER_TECHNICAL_SOURCE_FIELDS = frozenset({
+    "build_sha256",
+    "cache_age_seconds",
+    "cache_status",
+    "capacity_alarm",
+    "config_sha256",
+    "contract",
+    "current_version",
+    "desired_state_sha256",
+    "failed_jobs",
+    "frame_age_seconds",
+    "frame_status",
+    "headroom_bytes",
+    "headroom_percent",
+    "next_version",
+    "provider_age_seconds",
+    "provider_status",
+    "queue_depth",
+    "replay_algorithm_version",
+    "replay_contract_version",
+    "retention_alarm",
+    "storage_reason_codes",
+    "terminal_jobs",
+    "transition_reason_codes",
+    "transition_status",
+    "worker_observed_at",
+    "worker_state",
+    "worker_version",
+})
+
 
 class ThinMqttService:
     def __init__(
@@ -85,6 +118,7 @@ class ThinMqttService:
         self._heartbeat_thread: threading.Thread | None = None
         self._job_results: dict[str, dict[str, Any]] = {}
         self._last_snapshot_revision = 0
+        self._last_snapshot_published_at: float | None = None
         self._last_error: str | None = None
         self._last_cycle_summary: tuple[Any, ...] | None = None
         self._last_geojson_feature_count: int | None = None
@@ -97,7 +131,64 @@ class ThinMqttService:
         self._postgis_projection_last_success_at: float | None = None
         self._postgis_projection_last_error_code: str | None = None
 
+    def _technical_diagnostics_source(
+        self,
+        *,
+        state: str,
+        observed_at: float,
+    ) -> dict[str, Any]:
+        snapshot_age = (
+            None
+            if self._last_snapshot_published_at is None
+            else max(0.0, observed_at - self._last_snapshot_published_at)
+        )
+        snapshot_status = (
+            "unknown"
+            if snapshot_age is None
+            else "current" if snapshot_age <= 300.0 else "stale"
+        )
+        desired_state = self.runtime.desired_state_snapshot()
+        desired_state_sha256 = (
+            desired_state.get("state_sha256")
+            if isinstance(desired_state, dict)
+            and desired_state.get("status") == "configured"
+            else None
+        )
+        source = {
+            "contract": WORKER_TECHNICAL_SOURCE_CONTRACT,
+            "worker_state": state,
+            "worker_observed_at": observed_at,
+            "worker_version": WORKER_VERSION,
+            "build_sha256": None,
+            "config_sha256": None,
+            "desired_state_sha256": desired_state_sha256,
+            "provider_age_seconds": snapshot_age,
+            "provider_status": snapshot_status,
+            "frame_age_seconds": snapshot_age,
+            "frame_status": snapshot_status,
+            "cache_age_seconds": snapshot_age,
+            "cache_status": snapshot_status,
+            "queue_depth": 0,
+            "terminal_jobs": min(1_000_000_000, len(self._job_results)),
+            "failed_jobs": 0 if self._last_error is None else 1,
+            "retention_alarm": None,
+            "capacity_alarm": None,
+            "headroom_bytes": None,
+            "headroom_percent": None,
+            "storage_reason_codes": None,
+            "transition_status": "stable",
+            "current_version": WORKER_VERSION,
+            "next_version": None,
+            "transition_reason_codes": [],
+            "replay_contract_version": None,
+            "replay_algorithm_version": None,
+        }
+        if set(source) != WORKER_TECHNICAL_SOURCE_FIELDS:
+            raise RuntimeError("thin worker technical source schema drift")
+        return source
+
     def _heartbeat(self, state: str = "online") -> bytes:
+        observed_at = time.time()
         snapshot_runtime: dict[str, Any] = {
             "snapshot_revision": self._last_snapshot_revision,
             "snapshot_transport_state": (
@@ -133,6 +224,10 @@ class ThinMqttService:
             cpu_threads=2,
             provider_cycle_seconds=self.cycle_seconds,
             operational_snapshot_runtime=snapshot_runtime,
+            technical_diagnostics=self._technical_diagnostics_source(
+                state=state,
+                observed_at=observed_at,
+            ),
         ))
 
     def _publish_heartbeat(self) -> None:
@@ -296,6 +391,7 @@ class ThinMqttService:
                     qos=1,
                     retain=True,
                 )
+                self._last_snapshot_published_at = time.time()
                 passages_payload = json.dumps({
                     "schema_version": 1,
                     "evaluated_at": result.nowcast.evaluated_at,
@@ -436,9 +532,10 @@ class ThinMqttService:
                 state="failed",
                 error=type(error).__name__,
             )
-        self._job_results[job_id] = status
-        if len(self._job_results) > 256:
-            self._job_results.pop(next(iter(self._job_results)))
+        if status["state"] == "completed":
+            self._job_results[job_id] = status
+            if len(self._job_results) > 256:
+                self._job_results.pop(next(iter(self._job_results)))
         self._publish_job_status(status)
 
     def _publish_job_status(self, status: dict[str, Any]) -> None:

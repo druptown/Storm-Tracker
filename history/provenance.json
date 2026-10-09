@@ -1,8 +1,8 @@
 {
   "kind": "recovered_archive_source",
   "component": "worker",
-  "version": "1.18.70",
-  "source_id": "f9e31e7320a55e8ec7ca74d7f6a66218ff51c1e0e0cab2eb22be4f75e1794e7f",
+  "version": "1.18.71",
+  "source_id": "a6f497a2e0a12bfc35d67052e450d89b9f49f4d796e605e699870f8177064d6c",
   "recovered_on": "2026-10-09",
   "files": [
     {
@@ -32,7 +32,7 @@
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "40cd2979353a8cf681bd636f1f441c77b6254d2c4595fe8ed79de534448eebab",
+      "sha256": "4944c962f262fe3848307febb6b097cc262b5e32eb1f70e634e88e2ae6f3004c",
       "size": 64
     },
     {
@@ -272,7 +272,7 @@
     {
       "path": "config.yaml",
       "mode": 420,
-      "sha256": "c6afda7bc8a47583cafda327faeee04d9c47a7175a6720de9d1fc33f4bea0529",
+      "sha256": "af35b88bc24878de9ab540cafab98d000a38ef8fa9cc8925c2a9a7782f249082",
       "size": 2669
     },
     {
@@ -1082,8 +1082,8 @@
     {
       "path": "thin_mqtt_service.py",
       "mode": 420,
-      "sha256": "46fbaf2de17c47afcba69f14d8c74ba495325a1715e8005830ae4637e067cc80",
-      "size": 23312
+      "sha256": "98d83ff00c805ee120825a1c1a43acb0559ca81f83a709d455f06e3b137f5d1d",
+      "size": 26609
     },
     {
       "path": "thin_nowcast.py",
@@ -1508,8 +1508,8 @@
     {
       "path": "tracking_core/operational_snapshot.py",
       "mode": 420,
-      "sha256": "55718b87bd89146fb0661fc7000d385cc8ca93bc4f09c317ff1aa85fc5ee0d78",
-      "size": 65258
+      "sha256": "8de55b9b0bc20bdc883dbbb12eda23c0ce02435cde96ccf873b211ab6df9093d",
+      "size": 65256
     },
     {
       "path": "validation_corpus.py",
@@ -1610,16 +1610,12 @@
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_worker_v1.18.70_deploy.tar.gz",
-      "archive_sha256": "925ea7dbd07214a1da14965e6ab59fd67b0539ebc4b045bd8aa4d99841386aa0",
-      "bytes": 2396767,
+      "filename": "storm_tracker_worker_v1.18.71_deploy.tar.gz",
+      "archive_sha256": "fff8149784c532233c129c4d9c9768df0667b71f3f50a3e6eb4be9b48183bb33",
+      "bytes": 2397429,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.150_worker_v1.18.70_evidence.json",
-          "archive_and_source_match": true
-        },
-        {
-          "manifest": "storm_tracker_release_v1.14.149_worker_v1.18.70_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.151_worker_v1.18.71_evidence.json",
           "archive_and_source_match": true
         }
       ]
