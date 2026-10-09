@@ -135,7 +135,6 @@ class ThinRegionalRadarFusionCoordinator:
             completed = self._completed.get(region.region_id)
             if completed is not None and completed.fingerprint == fingerprint:
                 continue
-            self._completed.pop(region.region_id, None)
             future = self._executor.submit(
                 self._fuse,
                 region,
