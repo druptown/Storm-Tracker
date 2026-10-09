@@ -209,6 +209,16 @@ def _worker_first_safe_error_reason(error: BaseException) -> str:
     return reason
 
 
+def _safe_worker_job_error_detail(value: object) -> str | None:
+    """Return only one explicit secret-free reason code for durable logs."""
+
+    if not isinstance(value, str):
+        return None
+    if re.fullmatch(r"[a-z][a-z0-9_]{0,95}", value) is None:
+        return None
+    return value
+
+
 def _raw_capture_executor_factory(wall_seconds: float):
     """Build one fresh raw-capture child with an exact environment allowlist."""
 
@@ -5866,11 +5876,22 @@ class WorkerService:
                 "error",
                 error=error or "worker_job_failed",
             )
-            _LOGGER.error(
-                "Workerjob %s mislukt: %s",
-                job.job_id,
-                error or "worker_job_failed",
+            safe_detail = _safe_worker_job_error_detail(
+                outcome.values.get("error_detail")
             )
+            if safe_detail is None:
+                _LOGGER.error(
+                    "Workerjob %s mislukt: %s",
+                    job.job_id,
+                    error or "worker_job_failed",
+                )
+            else:
+                _LOGGER.error(
+                    "Workerjob %s mislukt: %s reason=%s",
+                    job.job_id,
+                    error or "worker_job_failed",
+                    safe_detail,
+                )
         else:
             self._touch_process(job.job_type, "idle")
 
