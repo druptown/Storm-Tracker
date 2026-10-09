@@ -20,6 +20,7 @@ EARTH_RADIUS_M = 6_371_008.8
 MAX_ASSOCIATION_DISTANCE_KM = 100.0
 MAX_FORECAST_HOURS = 2.0
 THREAT_RADIUS_KM = 20.0
+MAX_REGION_HANDOFF_FORECAST_HOLD_SECONDS = 15 * 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +196,7 @@ class ThinNowcastRuntime:
         self._target_region_ids: dict[str, str] = {}
         self._previous_cells: tuple[_CellFrame, ...] = ()
         self._latest: ThinNowcast | None = None
+        self._held_arrivals: dict[str, tuple[float, TargetNowcast]] = {}
         self._sequence = 0
 
     def update_targets(
@@ -203,6 +205,18 @@ class ThinNowcastRuntime:
         *,
         target_region_ids: Mapping[str, str] | None = None,
     ) -> None:
+        for target_id, (_created_at, forecast) in tuple(
+            self._held_arrivals.items()
+        ):
+            updated = targets.get(target_id)
+            if (
+                updated is None
+                or forecast.target_latitude is None
+                or forecast.target_longitude is None
+                or abs(float(updated[0]) - forecast.target_latitude) > 1e-6
+                or abs(float(updated[1]) - forecast.target_longitude) > 1e-6
+            ):
+                self._held_arrivals.pop(target_id, None)
         self._targets = dict(targets)
         self._target_region_ids = dict(target_region_ids or {})
 
@@ -381,14 +395,18 @@ class ThinNowcastRuntime:
             )
             raining = bool((rain_rate is not None and rain_rate > 0.0) or has_echo)
             target_region_id = self._target_region_ids.get(target_id)
-            passages = tuple(
-                passage
+            eligible_cells = tuple(
+                cell
                 for cell in cells
                 if (
                     target_region_id is None
                     or cell.region_id is None
                     or cell.region_id == target_region_id
                 )
+            )
+            passages = tuple(
+                passage
+                for cell in eligible_cells
                 if cell.motion_ready
                 if (passage := forecast_target_passage(
                     cell=cell,
@@ -405,10 +423,50 @@ class ThinNowcastRuntime:
                 key=lambda item: (item.entry_at, item.exit_at, item.cell_id),
                 default=None,
             )
+            held_result = None
+            held = self._held_arrivals.get(target_id)
+            if arrival is None and not raining and held is not None:
+                held_at, candidate = held
+                same_position = (
+                    candidate.target_latitude is not None
+                    and candidate.target_longitude is not None
+                    and abs(candidate.target_latitude - target_latitude) <= 1e-6
+                    and abs(candidate.target_longitude - target_longitude) <= 1e-6
+                )
+                still_fresh = (
+                    cycle.evaluated_at - held_at
+                    <= MAX_REGION_HANDOFF_FORECAST_HOLD_SECONDS
+                )
+                not_finished = (
+                    candidate.exit_at is not None
+                    and cycle.evaluated_at <= candidate.exit_at
+                )
+                new_motion_available = any(
+                    cell.motion_ready for cell in eligible_cells
+                )
+                if (
+                    same_position
+                    and still_fresh
+                    and not_finished
+                    and not new_motion_available
+                ):
+                    held_result = candidate
+                else:
+                    self._held_arrivals.pop(target_id, None)
             eta_minutes = 0.0 if raining else (
-                None
-                if arrival is None
-                else round(max(0.0, arrival.entry_at - cycle.evaluated_at) / 60.0, 1)
+                round(
+                    max(
+                        0.0,
+                        (
+                            arrival.entry_at
+                            if arrival is not None
+                            else held_result.entry_at
+                        ) - cycle.evaluated_at,
+                    ) / 60.0,
+                    1,
+                )
+                if arrival is not None or held_result is not None
+                else None
             )
             if raining:
                 current_state = "regen"
@@ -417,7 +475,11 @@ class ThinNowcastRuntime:
             elif eta_minutes is not None:
                 current_state = "droog" if fused and fused.status == "operational" else "onbekend"
                 forecast_state = "regen_op_komst"
-                reason = "tracked_cell_arrival"
+                reason = (
+                    "tracked_cell_arrival"
+                    if arrival is not None
+                    else "tracked_cell_arrival_handoff_hold"
+                )
             elif fused is not None and fused.status == "operational":
                 current_state = "droog"
                 forecast_state = "geen_dreiging"
@@ -426,7 +488,8 @@ class ThinNowcastRuntime:
                 current_state = "onbekend"
                 forecast_state = "onvoldoende_data"
                 reason = "insufficient_observations"
-            target_results[target_id] = TargetNowcast(
+            source_arrival = arrival if arrival is not None else held_result
+            result = TargetNowcast(
                 target_id=target_id,
                 current_state=current_state,
                 forecast_state=forecast_state,
@@ -435,18 +498,53 @@ class ThinNowcastRuntime:
                 confidence=(fused.confidence if fused is not None else 0.0),
                 reason_code=reason,
                 contributors=(fused.contributors if fused is not None else ()),
-                arrival_cell_id=None if arrival is None else arrival.cell_id,
-                arrival_provider_id=None if arrival is None else arrival.provider_id,
-                entry_at=None if arrival is None else arrival.entry_at,
-                exit_at=None if arrival is None else arrival.exit_at,
-                passage_method=None if arrival is None else arrival.method,
+                arrival_cell_id=(
+                    None
+                    if source_arrival is None
+                    else (
+                        arrival.cell_id
+                        if arrival is not None
+                        else held_result.arrival_cell_id
+                    )
+                ),
+                arrival_provider_id=(
+                    None
+                    if source_arrival is None
+                    else (
+                        arrival.provider_id
+                        if arrival is not None
+                        else held_result.arrival_provider_id
+                    )
+                ),
+                entry_at=None if source_arrival is None else source_arrival.entry_at,
+                exit_at=None if source_arrival is None else source_arrival.exit_at,
+                passage_method=(
+                    None
+                    if source_arrival is None
+                    else (
+                        arrival.method
+                        if arrival is not None
+                        else held_result.passage_method
+                    )
+                ),
                 passage_fallback_reason=(
-                    None if arrival is None else arrival.fallback_reason
+                    None
+                    if source_arrival is None
+                    else (
+                        arrival.fallback_reason
+                        if arrival is not None
+                        else held_result.passage_fallback_reason
+                    )
                 ),
                 target_latitude=target_latitude,
                 target_longitude=target_longitude,
                 target_accuracy_km=accuracy_buffer_km,
             )
+            target_results[target_id] = result
+            if arrival is not None:
+                self._held_arrivals[target_id] = (cycle.evaluated_at, result)
+            elif held_result is None and raining:
+                self._held_arrivals.pop(target_id, None)
 
         self._sequence += 1
         self._previous_cells = tuple(frames)
