@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import signal
@@ -12,11 +11,9 @@ from typing import Any
 
 from .protocol import decode, encode, envelope, job_payload, topic
 from .thin_operational_runtime import ThinOperationalRuntime
-from .thin_blitzortung import ThinBlitzortungFeed
 from .thin_postgis import ThinPostGISSettings, ThinPostGISWriter
 from .thin_provider_adapters import (
     AioHttpFetcher,
-    BlitzortungAdapter,
     DwdRadolanAdapter,
     KmiRadarAdapter,
     KnmiRadarAdapter,
@@ -42,14 +39,12 @@ class ThinMqttService:
         topic_root: str = "storm_tracker/v1",
         heartbeat_seconds: float = 10.0,
         cycle_seconds: float = 60.0,
-        lightning_feed: Any | None = None,
     ) -> None:
         self.client = client
         self.runtime = runtime
         self.topic_root = topic_root.rstrip("/")
         self.heartbeat_seconds = max(2.0, float(heartbeat_seconds))
         self.cycle_seconds = max(2.0, float(cycle_seconds))
-        self.lightning_feed = lightning_feed
         self._wake = asyncio.Event()
         self._stop = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
@@ -96,9 +91,6 @@ class ThinMqttService:
                 keepalive=60,
             )
         self.client.loop_start()
-        if self.lightning_feed is not None:
-            self.lightning_feed.update_targets(self.runtime.targets)
-            self.lightning_feed.start()
         self.client.publish(
             topic(self.topic_root, "worker/status"),
             self._heartbeat("online"),
@@ -135,8 +127,6 @@ class ThinMqttService:
             task.cancel()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
-        if self.lightning_feed is not None:
-            self.lightning_feed.stop()
         self.client.publish(
             topic(self.topic_root, "worker/status"),
             self._heartbeat("offline"),
@@ -203,21 +193,6 @@ class ThinMqttService:
                     qos=1,
                     retain=True,
                 )
-                geojson_payload = json.dumps(
-                    self.runtime.geojson_collection(),
-                    allow_nan=False,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ).encode("utf-8")
-                if len(geojson_payload) > 900_000:
-                    raise ValueError("geojson_payload_too_large")
-                self.client.publish(
-                    topic(self.topic_root, "operational/geojson"),
-                    geojson_payload,
-                    qos=1,
-                    retain=True,
-                )
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -262,11 +237,7 @@ class ThinMqttService:
                 result = self.runtime.desired_state_snapshot()
             elif job_type == "desired_state_apply":
                 result = self.runtime.apply_desired_state(values["desired_state"])
-                if self.lightning_feed is not None:
-                    self.lightning_feed.update_targets(self.runtime.targets)
                 self._wake.set()
-            elif job_type == "geojson_operational":
-                result = {"collection": self.runtime.geojson_collection()}
             elif job_type == "ping":
                 result = {"pong": True}
             else:
@@ -304,8 +275,7 @@ class ThinMqttService:
         )
 
 
-def _build_runtime() -> tuple[ThinOperationalRuntime, BlitzortungAdapter]:
-    blitzortung = BlitzortungAdapter()
+def _build_runtime() -> ThinOperationalRuntime:
     adapters = {
         "kmi_radar": KmiRadarAdapter(
             forecast_url=os.getenv("STV3_KMI_FORECAST_URL") or None,
@@ -317,7 +287,6 @@ def _build_runtime() -> tuple[ThinOperationalRuntime, BlitzortungAdapter]:
         "open_meteo": OpenMeteoAdapter(),
         "metar": MetarAdapter(),
         "netatmo": NetatmoAdapter(),
-        "blitzortung": blitzortung,
     }
     provider_runtime = ThinProviderRuntime(
         adapters=adapters,
@@ -328,12 +297,9 @@ def _build_runtime() -> tuple[ThinOperationalRuntime, BlitzortungAdapter]:
     )
     settings = ThinPostGISSettings.from_environment()
     writer = ThinPostGISWriter(settings) if settings is not None else None
-    return (
-        ThinOperationalRuntime(
-            provider_runtime=provider_runtime,
-            postgis_writer=writer,
-        ),
-        blitzortung,
+    return ThinOperationalRuntime(
+        provider_runtime=provider_runtime,
+        postgis_writer=writer,
     )
 
 
@@ -346,18 +312,9 @@ async def _async_main() -> None:
         client.username_pw_set(username, os.getenv("STV3_MQTT_PASSWORD", ""))
     if os.getenv("STV3_MQTT_TLS", "false").lower() in {"1", "true", "yes", "on"}:
         client.tls_set()
-    runtime, blitzortung = _build_runtime()
-    lightning_client = mqtt.Client(
-        mqtt.CallbackAPIVersion.VERSION1,
-        protocol=mqtt.MQTTv311,
-    )
     service = ThinMqttService(
         client=client,
-        runtime=runtime,
-        lightning_feed=ThinBlitzortungFeed(
-            client=lightning_client,
-            adapter=blitzortung,
-        ),
+        runtime=_build_runtime(),
         heartbeat_seconds=float(os.getenv("STV3_HEARTBEAT_SECONDS", "10")),
         cycle_seconds=float(os.getenv("STV3_PROVIDER_CYCLE_SECONDS", "60")),
     )
