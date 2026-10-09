@@ -172,7 +172,14 @@ MAX_EXECUTOR_WALL_SECONDS = 300.0
 ADAPTIVE_ATTEMPT_WALL_SECONDS = 20.0
 ADAPTIVE_ATTEMPT_FAILURE_THRESHOLD = 2
 ADAPTIVE_PARALLEL_FALLBACK_LANES = 5
-FULL_PARALLEL_ACQUISITION = True
+# Full parallel was enabled temporarily for the dedicated NAS load probe.  The
+# live result was conclusive: 15 simultaneous provider children produced a
+# growing commit backlog and deadline misses, while the mean lane runtime rose
+# above one minute.  Keep the normal adaptive controller authoritative: start
+# and recover on five lanes, expand to every actually-due workload after a
+# healthy batch, and fall back immediately when the shared RAW commit path is
+# congested.
+FULL_PARALLEL_ACQUISITION = False
 ADAPTIVE_PARALLEL_COOLDOWN_SECONDS = 300.0
 ADAPTIVE_RUNTIME_GROWTH_FACTOR = 1.5
 ADAPTIVE_RUNTIME_GROWTH_MIN_SECONDS = 2.0
