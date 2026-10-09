@@ -51,11 +51,24 @@ class ReplayMetric:
 
 
 @dataclass(frozen=True, slots=True)
+class RadarForecastVerification:
+    cell_id: str
+    actual_cell_id: str
+    provider_id: str
+    forecast_at: float
+    actual_at: float
+    lead_seconds: float
+    footprint_iou: float
+    centroid_error_km: float
+
+
+@dataclass(frozen=True, slots=True)
 class ReplayReport:
     replay_id: str
     algorithm_version: str
     passages: tuple[TargetPassage, ...]
     validations: tuple[ForecastValidation, ...]
+    radar_verifications: tuple[RadarForecastVerification, ...]
     metrics: tuple[ReplayMetric, ...]
 
 
@@ -72,9 +85,23 @@ def _percentile(values: Iterable[float], fraction: float) -> float | None:
     return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
 
 
-def _report_id(frames: tuple[ReplayFrame, ...], algorithm_version: str) -> str:
+def _report_id(
+    frames: tuple[ReplayFrame, ...],
+    algorithm_version: str,
+    radar_verifications: tuple[RadarForecastVerification, ...] = (),
+    radar_cells: tuple[ReplayCell, ...] = (),
+    radar_parameters: tuple[Any, ...] = (),
+) -> str:
     identity = {
         "algorithm_version": algorithm_version,
+        "radar_parameters": radar_parameters,
+        "radar_cells": [{
+            "provider_id": cell.provider_id, "cell_id": cell.cell_id,
+            "observed_at": cell.observed_at, "geometry": dict(cell.geometry),
+            "latitude": cell.latitude, "longitude": cell.longitude,
+            "velocity_east_kmh": cell.velocity_east_kmh,
+            "velocity_north_kmh": cell.velocity_north_kmh,
+        } for cell in sorted(radar_cells, key=lambda c: (c.provider_id, c.observed_at, c.cell_id))],
         "frames": [{
             "evaluated_at": frame.evaluated_at,
             "target_id": frame.target_id,
@@ -91,16 +118,230 @@ def _report_id(frames: tuple[ReplayFrame, ...], algorithm_version: str) -> str:
                 for item in frame.ground_observations
             ),
         } for frame in frames],
+        "radar_verifications": [{
+            "cell_id": item.cell_id,
+            "actual_cell_id": item.actual_cell_id,
+            "provider_id": item.provider_id,
+            "forecast_at": item.forecast_at,
+            "actual_at": item.actual_at,
+            "lead_seconds": item.lead_seconds,
+        } for item in radar_verifications],
     }
     return hashlib.sha256(json.dumps(
         identity, sort_keys=True, separators=(",", ":"), allow_nan=False,
     ).encode("utf-8")).hexdigest()
 
 
+def _radar_shape(cell: ReplayCell) -> Any | None:
+    # GEOS is only loaded by the offline evaluator, never by worker startup.
+    from shapely.geometry import shape
+    from shapely.ops import unary_union
+    from shapely.errors import GEOSException
+
+    try:
+        geometry = shape(dict(cell.geometry))
+        if geometry.geom_type == "MultiPolygon":
+            # Raster runs can share edges. Dissolve valid components without
+            # repairing self-crossing source polygons or filling real holes.
+            if not all(part.is_valid for part in geometry.geoms):
+                return None
+            geometry = unary_union(geometry.geoms)
+        if (
+            geometry.geom_type not in {"Polygon", "MultiPolygon"}
+            or not geometry.is_valid or geometry.is_empty
+            or not math.isfinite(geometry.area) or geometry.area <= 0.0
+            or not all(math.isfinite(x) for x in geometry.bounds)
+        ):
+            return None
+        return geometry
+    except (GEOSException, TypeError, ValueError, KeyError, IndexError):
+        return None
+
+
+def _shape_iou(first: Any, second: Any) -> float:
+    intersection = first.intersection(second).area
+    union = first.area + second.area - intersection
+    return max(0.0, min(1.0, intersection / union)) if union > 0.0 else 0.0
+
+
+def _distance_km(
+    first_latitude: float,
+    first_longitude: float,
+    second_latitude: float,
+    second_longitude: float,
+) -> float:
+    first_lat = math.radians(first_latitude)
+    second_lat = math.radians(second_latitude)
+    latitude_delta = second_lat - first_lat
+    longitude_delta = math.radians(second_longitude - first_longitude)
+    haversine = (
+        math.sin(latitude_delta / 2.0) ** 2
+        + math.cos(first_lat) * math.cos(second_lat)
+        * math.sin(longitude_delta / 2.0) ** 2
+    )
+    return 6371.0088 * 2.0 * math.asin(min(1.0, math.sqrt(haversine)))
+
+
+def _evaluate_radar_forecasts(
+    cells: Iterable[ReplayCell],
+    *,
+    lead_seconds: Iterable[float],
+    match_tolerance_seconds: float,
+    maximum_match_distance_km: float,
+) -> tuple[tuple[RadarForecastVerification, ...], tuple[ReplayMetric, ...]]:
+    """Score archived cell advection; matching alone cannot prove storm identity."""
+    from collections import Counter
+    from shapely.affinity import translate
+    from shapely.ops import unary_union
+
+    ordered = tuple(sorted(cells, key=lambda c: (c.provider_id, c.observed_at, c.cell_id)))
+    leads = tuple(sorted(set(float(value) for value in lead_seconds)))
+    tolerance = float(match_tolerance_seconds)
+    maximum_distance = float(maximum_match_distance_km)
+    if (
+        any(not math.isfinite(value) or value <= 0 for value in leads)
+        or not math.isfinite(tolerance) or tolerance < 0
+        or not math.isfinite(maximum_distance) or maximum_distance < 0
+    ):
+        raise ValueError("radar_replay_parameters_invalid")
+    frames: dict[str, dict[float, list[ReplayCell]]] = {}
+    shapes = {}
+    for cell in ordered:
+        frames.setdefault(cell.provider_id, {}).setdefault(cell.observed_at, []).append(cell)
+        shapes[(cell.provider_id, cell.observed_at, cell.cell_id)] = _radar_shape(cell)
+
+    def geometry(cell: ReplayCell) -> Any:
+        return shapes[(cell.provider_id, cell.observed_at, cell.cell_id)]
+
+    results: list[RadarForecastVerification] = []
+    metrics: list[ReplayMetric] = []
+    for provider, provider_frames in sorted(frames.items()):
+        times = sorted(provider_frames)
+        for lead in leads:
+            counts = Counter({
+                name: 0 for name in (
+                    "frame_pair_count", "missing_future_frame_count",
+                    "forecast_cell_count", "actual_cell_count",
+                    "invalid_forecast_count", "invalid_actual_count",
+                    "matched_count", "zero_overlap_match_count",
+                    "unmatched_forecast_count", "unmatched_actual_count",
+                    "unscored_frame_pair_count",
+                )
+            })
+            frame_scores, baseline_scores, pairs = [], [], []
+            for anchor_time in times:
+                truth_times = [
+                    t for t in times
+                    if t > anchor_time and abs(t - anchor_time - lead) <= tolerance
+                ]
+                if not truth_times:
+                    counts["missing_future_frame_count"] += 1
+                    continue
+                truth_time = min(truth_times, key=lambda t: (abs(t-anchor_time-lead), t))
+                anchors, actuals = provider_frames[anchor_time], provider_frames[truth_time]
+                counts["frame_pair_count"] += 1
+                counts["forecast_cell_count"] += len(anchors)
+                counts["actual_cell_count"] += len(actuals)
+                valid_actuals = [c for c in actuals if geometry(c) is not None]
+                bad_actuals = len(actuals) - len(valid_actuals)
+                counts["invalid_actual_count"] += bad_actuals
+                projected, originals = {}, []
+                for anchor in anchors:
+                    source_shape = geometry(anchor)
+                    scale = 111.320 * math.cos(math.radians(anchor.latitude))
+                    if (
+                        source_shape is None or abs(scale) < 1e-9
+                        or not all(math.isfinite(value) for value in (
+                            anchor.latitude, anchor.longitude,
+                            anchor.velocity_east_kmh, anchor.velocity_north_kmh,
+                        ))
+                    ):
+                        counts["invalid_forecast_count"] += 1
+                        continue
+                    hours = (truth_time - anchor_time) / 3600.0
+                    dx = anchor.velocity_east_kmh * hours / scale
+                    dy = anchor.velocity_north_kmh * hours / 110.574
+                    projected[anchor.cell_id] = (
+                        translate(source_shape, xoff=dx, yoff=dy),
+                        anchor.latitude + dy, anchor.longitude + dx,
+                    )
+                    originals.append(source_shape)
+                # Full-frame score includes all cells, including unmatched ones.
+                # Invalid data makes the frame unscorable, never artificially dry.
+                if len(projected) != len(anchors) or bad_actuals:
+                    counts["unscored_frame_pair_count"] += 1
+                else:
+                    actual_union = unary_union([geometry(c) for c in valid_actuals])
+                    prediction_union = unary_union([item[0] for item in projected.values()])
+                    frame_scores.append(_shape_iou(prediction_union, actual_union))
+                    baseline_scores.append(_shape_iou(unary_union(originals), actual_union))
+                candidates = []
+                for anchor_id, (predicted, latitude, longitude) in projected.items():
+                    for actual in valid_actuals:
+                        distance = _distance_km(latitude, longitude, actual.latitude, actual.longitude)
+                        if distance <= maximum_distance:
+                            overlap = _shape_iou(predicted, geometry(actual))
+                            candidates.append((-overlap, distance, anchor_id, actual.cell_id))
+                used_anchors, used_actuals = set(), set()
+                for negative_iou, distance, anchor_id, actual_id in sorted(candidates):
+                    if anchor_id in used_anchors or actual_id in used_actuals:
+                        continue
+                    used_anchors.add(anchor_id)
+                    used_actuals.add(actual_id)
+                    counts["matched_count"] += 1
+                    counts["zero_overlap_match_count"] += int(negative_iou == 0.0)
+                    pairs.append(RadarForecastVerification(
+                        cell_id=anchor_id, actual_cell_id=actual_id,
+                        provider_id=provider, forecast_at=anchor_time,
+                        actual_at=truth_time, lead_seconds=lead,
+                        footprint_iou=-negative_iou, centroid_error_km=distance,
+                    ))
+                counts["unmatched_forecast_count"] += len(projected) - len(used_anchors)
+                counts["unmatched_actual_count"] += len(valid_actuals) - len(used_actuals)
+
+            dimension = MappingProxyType({"provider_id": provider, "lead_seconds": lead})
+            metrics.extend(ReplayMetric("radar_" + name, float(count), count, dimension)
+                           for name, count in sorted(counts.items()))
+            for name, values in (
+                ("frame_iou_mean", frame_scores),
+                ("persistence_frame_iou_mean", baseline_scores),
+                ("frame_iou_gain_mean", [a-b for a,b in zip(frame_scores, baseline_scores)]),
+                ("footprint_iou_mean", [item.footprint_iou for item in pairs]),
+            ):
+                if values:
+                    metrics.append(ReplayMetric("radar_" + name, sum(values)/len(values),
+                                                len(values), dimension))
+            p90 = _percentile((item.centroid_error_km for item in pairs), 0.9)
+            if p90 is not None:
+                metrics.append(ReplayMetric("radar_centroid_error_p90_km", p90, len(pairs), dimension))
+            results.extend(pairs)
+    return tuple(sorted(results, key=lambda r: (
+        r.forecast_at, r.provider_id, r.cell_id, r.lead_seconds,
+    ))), tuple(metrics)
+
+
+def verify_radar_forecasts(
+    cells: Iterable[ReplayCell],
+    *,
+    lead_seconds: Iterable[float] = (300.0, 900.0, 1800.0, 2700.0, 3600.0),
+    match_tolerance_seconds: float = 150.0,
+    maximum_match_distance_km: float = 75.0,
+) -> tuple[RadarForecastVerification, ...]:
+    return _evaluate_radar_forecasts(
+        cells, lead_seconds=lead_seconds,
+        match_tolerance_seconds=match_tolerance_seconds,
+        maximum_match_distance_km=maximum_match_distance_km,
+    )[0]
+
+
 def run_replay(
     frames: Iterable[ReplayFrame],
     *,
     algorithm_version: str,
+    radar_cells: Iterable[ReplayCell] = (),
+    radar_lead_seconds: Iterable[float] = (300.0, 900.0, 1800.0, 2700.0, 3600.0),
+    radar_match_tolerance_seconds: float = 150.0,
+    radar_maximum_match_distance_km: float = 75.0,
 ) -> ReplayReport:
     ordered = tuple(sorted(
         frames, key=lambda item: (item.evaluated_at, item.target_id),
@@ -151,6 +392,15 @@ def run_replay(
         {item.validation_key: item for item in validations}.values(),
         key=lambda item: item.validation_key,
     ))
+    radar_cells = tuple(radar_cells)
+    requested_radar_leads = tuple(sorted(set(radar_lead_seconds)))
+    radar_verifications, radar_metrics = ((), ())
+    if radar_cells:
+        radar_verifications, radar_metrics = _evaluate_radar_forecasts(
+            radar_cells, lead_seconds=requested_radar_leads,
+            match_tolerance_seconds=radar_match_tolerance_seconds,
+            maximum_match_distance_km=radar_maximum_match_distance_km,
+        )
     outcome_counts: dict[str, int] = {}
     for validation in unique_validations:
         outcome_counts[validation.outcome] = outcome_counts.get(validation.outcome, 0) + 1
@@ -186,12 +436,34 @@ def run_replay(
                 metrics.append(ReplayMetric(
                     f"{name}_{suffix}", value, len(values),
                 ))
-    metrics.sort(key=lambda item: item.metric_name)
+    radar_leads = sorted({item.lead_seconds for item in radar_verifications})
+    for lead in radar_leads:
+        samples = tuple(item for item in radar_verifications if item.lead_seconds == lead)
+        dimension = MappingProxyType({"lead_seconds": lead})
+        metrics.append(ReplayMetric(
+            "radar_matched_count", float(len(samples)), len(samples), dimension,
+        ))
+        metrics.append(ReplayMetric(
+            "radar_footprint_iou_mean",
+            sum(item.footprint_iou for item in samples) / len(samples),
+            len(samples), dimension,
+        ))
+        centroid_errors = [item.centroid_error_km for item in samples]
+        p90 = _percentile(centroid_errors, 0.9)
+        if p90 is not None:
+            metrics.append(ReplayMetric(
+                "radar_centroid_error_p90_km", p90, len(samples), dimension,
+            ))
+    metrics.extend(radar_metrics)
+    metrics.sort(key=lambda item: (item.metric_name, json.dumps(dict(item.dimension), sort_keys=True)))
     return ReplayReport(
-        replay_id=_report_id(ordered, algorithm_version),
+        replay_id=_report_id(ordered, algorithm_version, radar_verifications, radar_cells,
+                             (requested_radar_leads,
+                              radar_match_tolerance_seconds, radar_maximum_match_distance_km)),
         algorithm_version=algorithm_version,
         passages=unique_passages,
         validations=unique_validations,
+        radar_verifications=radar_verifications,
         metrics=tuple(metrics),
     )
 
@@ -215,7 +487,7 @@ FROM stv3_storm_cell AS cell
 JOIN stv3_track_point AS track
   ON track.cell_id=cell.cell_id AND track.observed_at=cell.observed_at
 WHERE cell.observed_at>=to_timestamp(%s) AND cell.observed_at<to_timestamp(%s)
-  AND (%s IS NULL OR cell.provider_id=%s)
+  AND (%s::text IS NULL OR cell.provider_id=%s)
 ORDER BY cell.observed_at,cell.cell_id
 """
 
@@ -342,6 +614,43 @@ class ReplayRepository:
             ),
         ) for row in positions)
 
+    def load_radar_cells(
+        self,
+        *,
+        from_at: float,
+        until_at: float,
+        provider_id: str | None = None,
+    ) -> tuple[ReplayCell, ...]:
+        start = float(from_at)
+        end = float(until_at)
+        if not start < end:
+            raise ValueError("replay_range_invalid")
+        connection = self._connect_factory(**self._connect_kwargs)
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    _SELECT_CELLS,
+                    (start, end, provider_id, provider_id),
+                )
+                rows = tuple(cursor.fetchall())
+        finally:
+            connection.close()
+        return tuple(ReplayCell(
+            cell_id=str(row[0]),
+            provider_id=str(row[1]),
+            observed_at=float(row[2]),
+            precipitation_rate_mm_h=(None if row[3] is None else float(row[3])),
+            reflectivity_dbz=(None if row[4] is None else float(row[4])),
+            radar_level=(None if row[5] is None else float(row[5])),
+            geometry=MappingProxyType(dict(_decoded_json(row[6]))),
+            velocity_east_kmh=float(row[7]),
+            velocity_north_kmh=float(row[8]),
+            speed_kmh=float(row[9]),
+            heading_deg=None if row[10] is None else float(row[10]),
+            latitude=float(row[11]),
+            longitude=float(row[12]),
+        ) for row in rows)
+
     def persist_report(
         self,
         report: ReplayReport,
@@ -377,6 +686,8 @@ __all__ = [
     "ReplayCell",
     "ReplayMetric",
     "ReplayReport",
+    "RadarForecastVerification",
     "ReplayRepository",
     "run_replay",
+    "verify_radar_forecasts",
 ]

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -191,7 +191,10 @@ class ThinNowcastRuntime:
         if explicit_id:
             expected = f"{provider_id}:{explicit_id}"
             for previous in self._previous_cells:
-                if previous.cell_id == expected and previous.cell_id not in claimed:
+                if (
+                    previous.cell_id == expected and previous.cell_id not in claimed
+                    and previous.observed_at < current.observed_at
+                ):
                     return previous
         candidates = [
             previous
@@ -217,6 +220,10 @@ class ThinNowcastRuntime:
         cells: list[StormCell] = [] if tracked_cells is None else list(tracked_cells)
         frames: list[_CellFrame] = []
         claimed: set[str] = set()
+        cached_cells = {
+            (cell.provider_id, cell.observed_at, cell.latitude, cell.longitude): cell
+            for cell in (() if self._latest is None else self._latest.storm_cells)
+        }
         for observation in (() if tracked_cells is not None else cycle.observations):
             if not _is_spatial_weather(observation):
                 continue
@@ -238,6 +245,17 @@ class ThinNowcastRuntime:
                 x_m=x_value,
                 y_m=y_value,
             )
+            geometry = observation.as_dict().get("geometry") or _point(longitude, latitude)
+            cached = cached_cells.get((
+                observation.provider_id, observation.observed_at, latitude, longitude,
+            ))
+            if cached is not None and cached.cell_id not in claimed and cached.geometry == geometry:
+                # A new processing cycle is not a new meteorological frame.
+                # Retain motion and identity until this provider supplies a newer image.
+                cells.append(cached)
+                frames.append(replace(provisional, cell_id=cached.cell_id))
+                claimed.add(cached.cell_id)
+                continue
             previous = self._associate(
                 observation.provider_id,
                 explicit_id,
@@ -280,7 +298,6 @@ class ThinNowcastRuntime:
                 north_kmh = track.vy_m_s * 3.6
                 heading = track.heading_deg
                 claimed.add(previous.cell_id)
-            geometry = observation.as_dict().get("geometry") or _point(longitude, latitude)
             cells.append(StormCell(
                 cell_id=cell_id,
                 provider_id=observation.provider_id,

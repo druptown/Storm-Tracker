@@ -219,6 +219,7 @@ def _centerline_interval(
     velocity_north_kmh: float,
     radius_km: float,
     horizon_seconds: float,
+    elapsed_seconds: float = 0.0,
 ) -> tuple[float, float, bool] | None:
     x_value, y_value = _local_km(
         cell_longitude,
@@ -228,6 +229,8 @@ def _centerline_interval(
     )
     vx = velocity_east_kmh / 3600.0
     vy = velocity_north_kmh / 3600.0
+    x_value += vx * elapsed_seconds
+    y_value += vy * elapsed_seconds
     a = vx * vx + vy * vy
     c = x_value * x_value + y_value * y_value - radius_km * radius_km
     if a < 1e-12:
@@ -264,7 +267,8 @@ def forecast_target_passage(
     buffer_km = max(0.0, float(accuracy_buffer_km))
     if horizon <= 0.0:
         raise ValueError("forecast_horizon_invalid")
-    if evaluated - float(cell.observed_at) > MAX_CELL_AGE_SECONDS:
+    age_seconds = max(0.0, evaluated - float(cell.observed_at))
+    if age_seconds > MAX_CELL_AGE_SECONDS:
         return None
     geometry = dict(cell.geometry)
     polygons = _rings(
@@ -273,6 +277,14 @@ def forecast_target_passage(
         origin_latitude=float(target_latitude),
     )
     if polygons:
+        # Geometry belongs to observed_at, not to this processing tick. Advance
+        # it to evaluation time before computing the remaining passage interval.
+        dx = float(cell.velocity_east_kmh) * age_seconds / 3600.0
+        dy = float(cell.velocity_north_kmh) * age_seconds / 3600.0
+        polygons = tuple(
+            tuple(tuple((x + dx, y + dy) for x, y in ring) for ring in polygon)
+            for polygon in polygons
+        )
         interval = _polygon_interval(
             polygons,
             velocity_east_kmh=float(cell.velocity_east_kmh),
@@ -292,6 +304,7 @@ def forecast_target_passage(
             velocity_north_kmh=float(cell.velocity_north_kmh),
             radius_km=max(float(centerline_radius_km), buffer_km),
             horizon_seconds=horizon,
+            elapsed_seconds=age_seconds,
         )
         method = "centerline_fallback"
         fallback_reason = "polygon_unavailable"

@@ -9,7 +9,7 @@ import time
 from typing import Any, Callable, Mapping
 
 from .desired_state import METHOD, DesiredState, DesiredStateConflict, parse_desired_state
-from .thin_fusion import FusionCycle, fuse_observations
+from .thin_fusion import MAX_FUSION_AGE_SECONDS, FusionCycle, fuse_observations
 from .thin_ground_validation import ForecastValidation, GroundValidationRuntime
 from .thin_nowcast import StormCell, ThinNowcast, ThinNowcastRuntime
 from .thin_observation import ObservationKind
@@ -355,8 +355,12 @@ class ThinOperationalRuntime:
             target_ids=tuple(item.target_id for item in active_targets),
         )
         tracked_cells: list[StormCell] = []
-        for result in fresh_results.values():
+        # Provider I/O is less frequent than processing. Cached, still-current
+        # native frames must keep their tracks between fetches.
+        for result in self._latest_provider_results.values():
             for field in result.radar_fields:
+                if not 0 <= fusion.evaluated_at - field.observed_at <= MAX_FUSION_AGE_SECONDS:
+                    continue
                 for target in active_targets:
                     try:
                         self._radar_tracker.advance(field, target)
@@ -657,6 +661,12 @@ class ThinOperationalRuntime:
                 receipt = max((item.received_at for item in result.observations), default=None)
                 error = result.reason_code if result.status == "error" else None
                 reasons = [result.reason_code] if result.reason_code else []
+                if freshness == "current" and not any(
+                    item.provider_id == spec.provider_id for item in observations
+                ):
+                    # Fusion may have aged out a cached result since its fetch.
+                    freshness = "stale" if result.observations else "unknown"
+                    reasons.append("no_current_observations")
             provider_items.append({
                 "provider_id": _snapshot_provider_id(spec.provider_id),
                 "display_name": spec.provider_id.replace("_", " ").title(),
