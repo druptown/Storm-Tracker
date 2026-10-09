@@ -21,6 +21,7 @@ DEFAULT_UNAVAILABLE_GRACE_SECONDS = 15.0 * 60.0
 DEFAULT_WARNING_BUFFER_KM = 10.0
 DEFAULT_MAX_STORM_SPEED_KMH = 80.0
 DEFAULT_LOOKAHEAD_MINUTES = 45.0
+DEFAULT_RADAR_ANALYSIS_RADIUS_KM = 250.0
 
 
 def _haversine_km(
@@ -68,6 +69,7 @@ class ThinAcquisitionRegion:
     observation_radius_km: float
     targets: tuple[Target, ...]
     stale_target_ids: tuple[str, ...]
+    radar_analysis_radius_km: float | None = None
 
     @property
     def target_ids(self) -> tuple[str, ...]:
@@ -132,6 +134,7 @@ class ThinRegionPlanner:
         warning_buffer_km: float = DEFAULT_WARNING_BUFFER_KM,
         maximum_storm_speed_kmh: float = DEFAULT_MAX_STORM_SPEED_KMH,
         lookahead_minutes: float = DEFAULT_LOOKAHEAD_MINUTES,
+        radar_analysis_radius_km: float = DEFAULT_RADAR_ANALYSIS_RADIUS_KM,
     ) -> None:
         values = {
             "home_radius_km": home_radius_km,
@@ -143,6 +146,7 @@ class ThinRegionPlanner:
             "warning_buffer_km": warning_buffer_km,
             "maximum_storm_speed_kmh": maximum_storm_speed_kmh,
             "lookahead_minutes": lookahead_minutes,
+            "radar_analysis_radius_km": radar_analysis_radius_km,
         }
         if any(not math.isfinite(float(value)) or float(value) < 0.0 for value in values.values()):
             raise ValueError("region_planner_settings_must_be_finite_non_negative")
@@ -159,6 +163,7 @@ class ThinRegionPlanner:
         self._warning_radius_km = float(warning_buffer_km) + (
             float(maximum_storm_speed_kmh) * float(lookahead_minutes) / 60.0
         )
+        self._radar_analysis_radius_km = float(radar_analysis_radius_km)
         self._last_available: dict[str, tuple[Target, float]] = {}
         self._previous_assignments: dict[str, str] = {}
         self._external_centers: dict[str, tuple[float, float]] = {}
@@ -253,10 +258,18 @@ class ThinRegionPlanner:
         targets: tuple[Target, ...],
         statuses: Mapping[str, str],
     ) -> ThinAcquisitionRegion:
+        target_offsets = tuple(
+            _haversine_km(center[0], center[1], target.latitude, target.longitude)
+            for target in targets
+        )
         radius = max(
             self._warning_radius_km
-            + _haversine_km(center[0], center[1], target.latitude, target.longitude)
-            for target in targets
+            + offset
+            for offset in target_offsets
+        )
+        radar_analysis_radius = max(
+            self._radar_analysis_radius_km + offset
+            for offset in target_offsets
         )
         return ThinAcquisitionRegion(
             region_id=region_id,
@@ -270,6 +283,7 @@ class ThinRegionPlanner:
                 for target in targets
                 if statuses.get(target.target_id) == "stale"
             ),
+            radar_analysis_radius_km=radar_analysis_radius,
         )
 
     def plan(self, state: DesiredState, *, now: float) -> ThinRegionPlan:

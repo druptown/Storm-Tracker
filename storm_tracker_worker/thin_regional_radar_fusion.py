@@ -178,7 +178,12 @@ def build_regional_analysis_grid(
         raise ValueError("minimum_resolution_m_invalid")
     if isinstance(maximum_cells, bool) or not isinstance(maximum_cells, int) or maximum_cells < 1:
         raise ValueError("maximum_cells_invalid")
-    radius_m = float(region.observation_radius_km) * 1_000.0
+    analysis_radius_km = (
+        region.observation_radius_km
+        if region.radar_analysis_radius_km is None
+        else region.radar_analysis_radius_km
+    )
+    radius_m = float(analysis_radius_km) * 1_000.0
     if not math.isfinite(radius_m) or radius_m <= 0.0:
         raise ValueError("region_radius_invalid")
 
@@ -218,6 +223,7 @@ def build_regional_analysis_grid(
         "center_latitude": round(float(region.center_latitude), 8),
         "center_longitude": round(float(region.center_longitude), 8),
         "observation_radius_km": round(float(region.observation_radius_km), 6),
+        "radar_analysis_radius_km": round(float(analysis_radius_km), 6),
         "crs": crs,
         "resolution_m": resolution,
         "width": width,

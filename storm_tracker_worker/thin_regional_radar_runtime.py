@@ -54,6 +54,7 @@ def _input_fingerprint(
         "region_id": region.region_id,
         "center": [region.center_latitude, region.center_longitude],
         "radius_km": region.observation_radius_km,
+        "radar_analysis_radius_km": region.radar_analysis_radius_km,
         "fields": sorted(fields),
     }
     encoded = json.dumps(
