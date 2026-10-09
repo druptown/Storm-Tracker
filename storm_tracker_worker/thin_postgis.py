@@ -394,6 +394,12 @@ ON CONFLICT(target_id,evaluated_at) DO UPDATE SET
     region_revision_id=EXCLUDED.region_revision_id
 """
 
+_SELECT_SCIENTIFIC_PASSAGE_SCHEMA = """
+SELECT
+    to_regclass('public.stv3_target_forecast_issue') IS NOT NULL
+    AND to_regclass('public.stv3_target_passage_issue') IS NOT NULL
+"""
+
 _INSERT_FORECAST_ISSUE = """
 INSERT INTO stv3_target_forecast_issue(
     forecast_issue_id,target_id,issued_at,algorithm_version,policy_version,
@@ -762,6 +768,11 @@ class ThinPostGISWriter:
         }
         try:
             with connection.cursor() as cursor:
+                cursor.execute(_SELECT_SCIENTIFIC_PASSAGE_SCHEMA)
+                schema_row = cursor.fetchone()
+                scientific_passage_schema = bool(
+                    schema_row is not None and schema_row[0]
+                )
                 seen_instance_ids: set[str] = set()
                 seen_revision_ids: set[str] = set()
                 seen_memberships: set[tuple[str, str]] = set()
@@ -1184,20 +1195,21 @@ class ThinPostGISWriter:
                         ):
                             raise ValueError("passage_forecast_issue_mismatch")
                         issue_ids[target_id] = issue_id
-                        cursor.execute(_INSERT_FORECAST_ISSUE, (
-                            issue_id,
-                            target_id,
-                            nowcast.evaluated_at,
-                            PASSAGE_ALGORITHM_VERSION,
-                            PASSAGE_POLICY_VERSION,
-                            target_region_revision_id,
-                            _bounded_json(list(input_fingerprints)),
-                            _bounded_json({
-                                "schema_version": 1,
-                                "forecast": forecast.as_dict(),
-                            }),
-                        ))
-                        counts["forecast_issues"] += 1
+                        if scientific_passage_schema:
+                            cursor.execute(_INSERT_FORECAST_ISSUE, (
+                                issue_id,
+                                target_id,
+                                nowcast.evaluated_at,
+                                PASSAGE_ALGORITHM_VERSION,
+                                PASSAGE_POLICY_VERSION,
+                                target_region_revision_id,
+                                _bounded_json(list(input_fingerprints)),
+                                _bounded_json({
+                                    "schema_version": 1,
+                                    "forecast": forecast.as_dict(),
+                                }),
+                            ))
+                            counts["forecast_issues"] += 1
                         if (
                             forecast.target_latitude is not None
                             and forecast.target_longitude is not None
@@ -1234,30 +1246,31 @@ class ThinPostGISWriter:
                         if passage_id != calculated_passage_id:
                             raise ValueError("passage_id_mismatch")
                         passage_metadata = _passage_metadata(passage)
-                        cursor.execute(_INSERT_PASSAGE_ISSUE, (
-                            passage_id,
-                            issue_id,
-                            passage.target_id,
-                            passage_system_id,
-                            passage.interval_ordinal,
-                            passage.passage_status,
-                            passage.entry_at,
-                            passage.exit_at,
-                            passage.entry_bracket_lower_at,
-                            passage.entry_bracket_upper_at,
-                            passage.exit_bracket_lower_at,
-                            passage.exit_bracket_upper_at,
-                            passage.left_censored,
-                            passage.right_censored,
-                            passage.coverage_censored,
-                            passage.predicted_intensity_mm_h,
-                            passage.peak_intensity_mm_h,
-                            passage.quantity,
-                            passage.unit,
-                            _json(dict(passage.footprint)),
-                            _bounded_json(passage_metadata),
-                        ))
-                        counts["passage_issues"] += 1
+                        if scientific_passage_schema:
+                            cursor.execute(_INSERT_PASSAGE_ISSUE, (
+                                passage_id,
+                                issue_id,
+                                passage.target_id,
+                                passage_system_id,
+                                passage.interval_ordinal,
+                                passage.passage_status,
+                                passage.entry_at,
+                                passage.exit_at,
+                                passage.entry_bracket_lower_at,
+                                passage.entry_bracket_upper_at,
+                                passage.exit_bracket_lower_at,
+                                passage.exit_bracket_upper_at,
+                                passage.left_censored,
+                                passage.right_censored,
+                                passage.coverage_censored,
+                                passage.predicted_intensity_mm_h,
+                                passage.peak_intensity_mm_h,
+                                passage.quantity,
+                                passage.unit,
+                                _json(dict(passage.footprint)),
+                                _bounded_json(passage_metadata),
+                            ))
+                            counts["passage_issues"] += 1
                         if (
                             passage.exit_at is not None
                             and not passage.left_censored

@@ -1,8 +1,8 @@
 {
   "kind": "recovered_archive_source",
   "component": "worker",
-  "version": "1.18.89",
-  "source_id": "c19be30ee62e59ee949624daaf9bd9bf8809d733cb0a473bf6a58b278775f37f",
+  "version": "1.18.90",
+  "source_id": "a21a0dcc8520863a595b8408d8b1feb96f22c993acaa3f02288053ebb1c0a0a6",
   "recovered_on": "2026-10-09",
   "files": [
     {
@@ -32,7 +32,7 @@
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "c3750655ad421715c99b1807bb658786606f5f810e33edd37bf2d632f58aa3ad",
+      "sha256": "1384c56e1e81c0ddca5dffb3508fcdc126a32cf45d8d1859bfd4510cf653dfbe",
       "size": 64
     },
     {
@@ -272,7 +272,7 @@
     {
       "path": "config.yaml",
       "mode": 420,
-      "sha256": "18e995298ef23293d19e7559af71ae610e986f74109ddcf2d6697fde31cf0656",
+      "sha256": "782324b5034fcf9db54dabe4b53cb13df7cfdcf75c04e4e5334f7e3c60464fd7",
       "size": 2669
     },
     {
@@ -1082,8 +1082,8 @@
     {
       "path": "thin_ground_station_runtime.py",
       "mode": 420,
-      "sha256": "b27a1fb279373cf96f76fd64512f1a08fe800732b14441cc4bdcf30d040c52f0",
-      "size": 4711
+      "sha256": "f26f66b8c7d630150910b03256f66c646b74bae04167ce45563ccd4c1c1a4530",
+      "size": 8546
     },
     {
       "path": "thin_ground_validation.py",
@@ -1136,8 +1136,8 @@
     {
       "path": "thin_postgis.py",
       "mode": 420,
-      "sha256": "997252efc04372a0ad8097f6e3b0d77591d82fd7c2e7f17541d3d4a4acb7f63c",
-      "size": 54909
+      "sha256": "f093aebcf1e6320eaf9b34bd12f2a8ce1ab150525ddfcbfbaad88a4b333c9c46",
+      "size": 55596
     },
     {
       "path": "thin_postgis_station_migration.py",
@@ -1652,12 +1652,12 @@
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_worker_v1.18.89_deploy.tar.gz",
-      "archive_sha256": "f5a393008f21821654b93ad52b40d349cc9376e2dd20004142179f7e376a33f8",
-      "bytes": 2419699,
+      "filename": "storm_tracker_worker_v1.18.90_deploy.tar.gz",
+      "archive_sha256": "c11d6a6cc587966b9428d3ce0b68016a1cf386c71d07aa7a5774c563ef3c082b",
+      "bytes": 2420623,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.154_worker_v1.18.89_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.155_worker_v1.18.90_evidence.json",
           "archive_and_source_match": true
         }
       ]
