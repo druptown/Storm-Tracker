@@ -2019,7 +2019,7 @@ class WorkerService:
         }:
             raise ValueError("worker-computeprofiel is ongeldig")
         for name, value, minimum, maximum in (
-            ("cpu_limit_percent", cpu_limit_percent, 1, 100),
+            ("cpu_limit_percent", cpu_limit_percent, 1, 200),
             ("worker_nice", worker_nice, 0, 19),
             ("cpu_threads", cpu_threads, 1, 64),
         ):
