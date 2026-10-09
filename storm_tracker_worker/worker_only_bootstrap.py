@@ -145,7 +145,9 @@ def _capacity_contract(
         maximum_object_bytes * 2,
     )
     global_entries = max(PRODUCTION_ENTRY_CAPACITY, required_entries * 2)
-    providers = tuple(sorted({rule.provider_id for rule in active}))
+    # Keep the removed AWN provider as storage-only ledger history. No AWN
+    # workload remains executable, so this can never schedule new AWN data.
+    providers = tuple(sorted({rule.provider_id for rule in active} | {"awn"}))
     return (
         RawCapacityProfile(
             global_max_bytes=global_bytes,
@@ -253,30 +255,22 @@ def _previous_awn_payload(config: RawCaptureServiceConfig) -> bytes:
     providers = capacity.get("providers")
     global_max_bytes = capacity.get("global_max_bytes")
     global_max_entries = capacity.get("global_max_entries")
+    if not isinstance(providers, list):
+        raise WorkerOnlyBootstrapError("previous AWN bootstrap mapping invalid")
+    awn_providers = [
+        item
+        for item in providers
+        if isinstance(item, dict) and item.get("provider") == "awn"
+    ]
     if (
-        not isinstance(providers, list)
-        or not isinstance(global_max_bytes, int)
+        not isinstance(global_max_bytes, int)
         or not isinstance(global_max_entries, int)
         or "ground.awn.api" in workload_ids
-        or any(
-            isinstance(item, dict) and item.get("provider") == "awn"
-            for item in providers
-        )
+        or len(awn_providers) != 1
     ):
         raise WorkerOnlyBootstrapError("previous AWN bootstrap mapping invalid")
     acquisition["allowed_workload_ids"] = sorted(
         [*workload_ids, "ground.awn.api"]
-    )
-    capacity["providers"] = sorted(
-        [
-            *providers,
-            {
-                "max_bytes": global_max_bytes,
-                "max_entries": global_max_entries,
-                "provider": "awn",
-            },
-        ],
-        key=lambda item: str(item["provider"]),
     )
     return _canonical(mapping)
 
