@@ -694,7 +694,16 @@ class ThinOperationalRuntime:
                     if not 0 <= fusion.evaluated_at - field.observed_at <= field_maximum_age:
                         continue
                     current_native_fields.append(field)
-                    track_field(field, region.targets)
+            # Regional fusion normally replaces this path on the next tick.
+            # While it is pending, track only the freshest native field once
+            # per region instead of re-segmenting every national raster for
+            # every target. All fields remain available below for direct
+            # rain-at-target fallback.
+            if current_native_fields:
+                track_field(
+                    max(current_native_fields, key=lambda item: item.observed_at),
+                    region.targets,
+                )
             native_fallback_fields[region.region_id] = tuple(
                 current_native_fields
             )
