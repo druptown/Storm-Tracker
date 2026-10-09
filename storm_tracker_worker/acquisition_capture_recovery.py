@@ -4047,24 +4047,40 @@ class CaptureCapacityReconciler:
                 for binding in self._bindings.values()
             )
         )
-        selected_origin_jobs: set[str] = set()
-        for receipt in selected_receipts:
-            binding, member = _binding_member_for_receipt(
-                receipt, self._bindings
-            )
-            raw_job_id, _filename = _validate_receipt(receipt, binding, member)
-            for reservation in reservations:
+        # Build the reservation aliases once.  The former receipt-by-
+        # reservation nested scan was O(receipts * reservations) and made a
+        # fully valid archive take many minutes to start once both tables had
+        # grown into the thousands.  The key below contains the exact same
+        # closed binding envelope and derived raw identity, so no admission
+        # or integrity check is relaxed.
+        reservation_origins: dict[tuple[str, str], set[str]] = {}
+        for reservation in reservations:
+            for binding in self._bindings.values():
                 if (
                     reservation.provider == binding.ledger_provider
                     and reservation.requested_bytes
                     == binding.maximum_transport_bytes
                     and reservation.requested_entries
                     == binding.maximum_artifacts
-                    and _raw_identity_for_origin(
-                        binding, reservation.job_identity
-                    ) == raw_job_id
                 ):
-                    selected_origin_jobs.add(reservation.job_identity)
+                    raw_identity = _raw_identity_for_origin(
+                        binding, reservation.job_identity
+                    )
+                    reservation_origins.setdefault(
+                        (binding.handler_id, raw_identity), set()
+                    ).add(reservation.job_identity)
+
+        selected_origin_jobs: set[str] = set()
+        for receipt in selected_receipts:
+            binding, member = _binding_member_for_receipt(
+                receipt, self._bindings
+            )
+            raw_job_id, _filename = _validate_receipt(receipt, binding, member)
+            selected_origin_jobs.update(
+                reservation_origins.get(
+                    (binding.handler_id, raw_job_id), ()
+                )
+            )
         selected_reservations: list[CapacityReservationReceipt] = []
         selected_ids = set(self._bindings)
         for reservation in reservations:
