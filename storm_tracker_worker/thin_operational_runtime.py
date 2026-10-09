@@ -76,6 +76,16 @@ SNAPSHOT_PROVIDER_IDS = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class _RadarTrackingScope:
+    """One tracking identity and analysis window per acquisition region."""
+
+    target_id: str
+    latitude: float
+    longitude: float
+    observation_radius_km: float
+
+
 def _snapshot_provider_id(provider_id: str) -> str:
     return SNAPSHOT_PROVIDER_IDS.get(provider_id, provider_id)
 
@@ -640,44 +650,52 @@ class ThinOperationalRuntime:
         regional_summaries: list[RegionalFusionSummary] = []
         native_fallback_fields: dict[str, tuple[Any, ...]] = {}
 
-        def track_field(field: Any, targets: tuple[Any, ...]) -> None:
-            for target in targets:
-                try:
-                    self._radar_tracker.advance(field, target)
-                except (ValueError, RuntimeError):
-                    continue
-                for item in self._radar_tracker.tracks(field, target.target_id):
-                    speed = math.hypot(
-                        item.velocity_east_kmh, item.velocity_north_kmh,
-                    )
-                    heading = (
-                        None
-                        if speed < 0.5
-                        else math.degrees(math.atan2(
-                            item.velocity_east_kmh,
-                            item.velocity_north_kmh,
-                        )) % 360.0
-                    )
-                    tracked_cells.append(StormCell(
-                        cell_id=f"{item.provider_id}:{target.target_id}:{item.track_id}",
-                        provider_id=item.provider_id,
-                        observed_at=item.observed_at,
-                        latitude=item.latitude,
-                        longitude=item.longitude,
-                        geometry=item.geometry,
-                        precipitation_rate_mm_h=item.rain_rate_mm_h,
-                        reflectivity_dbz=None,
-                        radar_level=None,
-                        velocity_east_kmh=item.velocity_east_kmh,
-                        velocity_north_kmh=item.velocity_north_kmh,
-                        speed_kmh=speed,
-                        heading_deg=heading,
-                    ))
+        def track_field(field: Any, region: Any) -> None:
+            scope = _RadarTrackingScope(
+                target_id=region.region_id,
+                latitude=region.center_latitude,
+                longitude=region.center_longitude,
+                observation_radius_km=float(
+                    region.radar_analysis_radius_km
+                    or region.observation_radius_km
+                ),
+            )
+            try:
+                self._radar_tracker.advance(field, scope)
+            except (ValueError, RuntimeError):
+                return
+            for item in self._radar_tracker.tracks(field, scope.target_id):
+                speed = math.hypot(
+                    item.velocity_east_kmh, item.velocity_north_kmh,
+                )
+                heading = (
+                    None
+                    if speed < 0.5
+                    else math.degrees(math.atan2(
+                        item.velocity_east_kmh,
+                        item.velocity_north_kmh,
+                    )) % 360.0
+                )
+                tracked_cells.append(StormCell(
+                    cell_id=f"{item.provider_id}:{scope.target_id}:{item.track_id}",
+                    provider_id=item.provider_id,
+                    observed_at=item.observed_at,
+                    latitude=item.latitude,
+                    longitude=item.longitude,
+                    geometry=item.geometry,
+                    precipitation_rate_mm_h=item.rain_rate_mm_h,
+                    reflectivity_dbz=None,
+                    radar_level=None,
+                    velocity_east_kmh=item.velocity_east_kmh,
+                    velocity_north_kmh=item.velocity_north_kmh,
+                    speed_kmh=speed,
+                    heading_deg=heading,
+                ))
 
         for region in region_plan.regions:
             regional = completed_regional.get(region.region_id)
             if regional is not None and regional.field is not None:
-                track_field(regional.field, region.targets)
+                track_field(regional.field, region)
                 regional_summaries.append(regional.summary)
                 continue
 
@@ -705,7 +723,7 @@ class ThinOperationalRuntime:
             ):
                 track_field(
                     max(current_native_fields, key=lambda item: item.observed_at),
-                    region.targets,
+                    region,
                 )
             native_fallback_fields[region.region_id] = tuple(
                 current_native_fields

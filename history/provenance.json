@@ -1,8 +1,8 @@
 {
   "kind": "recovered_archive_source",
   "component": "worker",
-  "version": "1.18.63",
-  "source_id": "d485fa2691ce87197a1874907923ac05d0cc0359a506fc8f74ab5ad09b4d885b",
+  "version": "1.18.64",
+  "source_id": "67e179c5b9c3b43b601bd8baeba66745955e17ad560bc7757e4d5561129d2672",
   "recovered_on": "2026-10-09",
   "files": [
     {
@@ -32,7 +32,7 @@
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "9faa5ec1b6c7ebfee89e4e82e4b68ed76796673427d88a07f252b2fab51b3fff",
+      "sha256": "4d0a67b7e27da90f3c4d49bdcb5e495b021f78c9213ba0eeac97a1b6982390db",
       "size": 64
     },
     {
@@ -272,7 +272,7 @@
     {
       "path": "config.yaml",
       "mode": 420,
-      "sha256": "108bcf3e8b6a06ee801a7f3fe0d7189787f642be0dbec956e06cec621090b21c",
+      "sha256": "f83878f031ea566e3f7e627f739a5ed3532b998eebeb1d39bbb5aec4f9cf9a80",
       "size": 2669
     },
     {
@@ -1100,8 +1100,8 @@
     {
       "path": "thin_operational_runtime.py",
       "mode": 420,
-      "sha256": "f4089cd0f606d243a6b9368e94afb68ca14943b53cb6b55d1345441710fe095c",
-      "size": 52979
+      "sha256": "fad8960e07a47796771bca21710b4eb043d50b0f904d595b9d01b2e619ac2054",
+      "size": 53388
     },
     {
       "path": "thin_postgis.py",
@@ -1610,12 +1610,16 @@
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_worker_v1.18.63_deploy.tar.gz",
-      "archive_sha256": "a116181ff2151f58033c8357c971880c893c5ead813242008aba9d5efa6e3f22",
-      "bytes": 2394582,
+      "filename": "storm_tracker_worker_v1.18.64_deploy.tar.gz",
+      "archive_sha256": "e041a3bdd27c0ca91603ed8fb344ba82daffe3ac7ec2b1d1346c65ad15284a68",
+      "bytes": 2394695,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.148_worker_v1.18.63_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.149_worker_v1.18.64_evidence.json",
+          "archive_and_source_match": true
+        },
+        {
+          "manifest": "storm_tracker_release_v1.14.149_worker_v1.18.64_evidence.json",
           "archive_and_source_match": true
         }
       ]
