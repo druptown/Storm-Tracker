@@ -57,7 +57,6 @@ _ZERO_RADAR_OBSERVATION_STATE = "geen_positieve_neerslag_waargenomen"
 WORKER_STATUS_UPDATE_EVENT = f"{DOMAIN}_worker_status_update"
 
 WORKER_ONLY_PROVIDER_IDS = (
-    "ground.awn.authorized_devices",
     "ground.kmi.aws_10min",
     "ground.metar.global",
     "ground.netatmo.region",

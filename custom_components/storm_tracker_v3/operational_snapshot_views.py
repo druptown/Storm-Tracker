@@ -206,6 +206,28 @@ def provider_status_view(
         raise ValueError("provider_id moet niet-lege tekst zijn")
     provider = cache.get_provider(provider_id)
     if provider is None:
+        collection = cache.get_collection_status("providers")
+        snapshot_status = cache.get_status()
+        transport_omitted = (
+            isinstance(collection, Mapping)
+            and collection.get("complete") is False
+            and collection.get("overflow_count", 0) > 0
+        )
+        safe_initial_fallback = (
+            isinstance(collection, Mapping)
+            and collection.get("complete") is True
+            and collection.get("item_count") == 0
+            and snapshot_status.get("provenance_complete") is False
+        )
+        if transport_omitted:
+            reason_code = "provider_projection_omitted_for_transport"
+            error = None
+        elif safe_initial_fallback:
+            reason_code = "awaiting_meteorological_evidence"
+            error = None
+        else:
+            reason_code = "provider_snapshot_missing"
+            error = reason_code
         return SnapshotSensorView(
             native_value="unknown",
             available=True,
@@ -215,8 +237,8 @@ def provider_status_view(
                 "freshness": "unknown",
                 "product_valid_at": None,
                 "provider_received_at": None,
-                "error": "provider_snapshot_missing",
-                "reason_codes": ["provider_snapshot_missing"],
+                "error": error,
+                "reason_codes": [reason_code],
             },
         )
     return SnapshotSensorView(

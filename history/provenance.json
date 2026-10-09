@@ -1,14 +1,14 @@
 {
   "kind": "recovered_archive_source",
   "component": "integration",
-  "version": "1.14.53",
-  "source_id": "b4bd77e8e9af21116812c05f1d18e6bbb8ff5f0c74b7662233066bcbabee01d6",
+  "version": "1.14.54",
+  "source_id": "bca6142025811fdc68abf2789e94eb348b8f8b72f06330304d95b050e92c5838",
   "recovered_on": "2026-10-09",
   "files": [
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "2cf242a5990e0af687a8e993076d1f7658b471b286f6013c5f89dc9a6b0bada3",
+      "sha256": "bf9bba924e1afb5f7d4169c59ec83833c093a3ab38158a249a0b0c2aab6b5918",
       "size": 268460
     },
     {
@@ -20,7 +20,7 @@
     {
       "path": "const.py",
       "mode": 420,
-      "sha256": "f6a476dc04a9f356729157835b61b11c4940eeae7a460d4af85202e3bd75a129",
+      "sha256": "79c77dfd59177a763d69440335a2a3187f3e59a21f19c1d378b047953644bfc1",
       "size": 2461
     },
     {
@@ -416,7 +416,7 @@
     {
       "path": "manifest.json",
       "mode": 420,
-      "sha256": "b06caa7a3ea55039e50b7b8cb498f5bc10701ed5e147989abc0dee56a134603d",
+      "sha256": "209cdb5ea0a3e26e062d383b52dc6d3aef2d424303ec0c538db042b327a4c99a",
       "size": 467
     },
     {
@@ -428,14 +428,14 @@
     {
       "path": "operational_snapshot_sensors.py",
       "mode": 420,
-      "sha256": "6439b227216a93c74a8cbec826b29436795464544967d09fd82bb49a0000764a",
-      "size": 35856
+      "sha256": "7ccd3ef643898a3821f13d12805af76f494bf04728876e2bcecc45967066ccc3",
+      "size": 35819
     },
     {
       "path": "operational_snapshot_views.py",
       "mode": 420,
-      "sha256": "ad6b7b47b063ec090fb93764869f9c43ad2abcd0a109f44dc5af8905e3e59beb",
-      "size": 9580
+      "sha256": "9f06152f51b37e6dac648a3ae261f6c634a7dc2a002b78ff204d9375bea562cb",
+      "size": 10445
     },
     {
       "path": "plogger/__init__.py",
@@ -710,16 +710,16 @@
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_v3_v1.14.53_deploy.zip",
-      "archive_sha256": "592a415431cb2f194584ff77e6981cafb679c2a2492a6243fd5d1594c781ebef",
-      "bytes": 676438,
+      "filename": "storm_tracker_v3_v1.14.54_deploy.zip",
+      "archive_sha256": "e2d2a4294a94479618b42088f354966d6f90973f2b0e47982a132b1db83eaa95",
+      "bytes": 676608,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.53_worker_v1.17.53_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.54_worker_v1.17.54_evidence.json",
           "archive_and_source_match": true
         },
         {
-          "manifest": "storm_tracker_release_v1.14.53_worker_v1.17.53_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.54_worker_v1.17.54_evidence.json",
           "archive_and_source_match": true
         }
       ]
