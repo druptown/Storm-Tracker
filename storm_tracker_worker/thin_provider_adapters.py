@@ -2424,6 +2424,26 @@ def _rainviewer_tile_observations(
     return tuple(observations)
 
 
+def _rainviewer_spatial_observations(
+    decoded: Mapping[tuple[int, int], Any],
+    request: ThinProviderRequest,
+    *,
+    observed_at: float,
+    received_at: float,
+) -> tuple[NormalizedObservation, ...]:
+    spatial: list[NormalizedObservation] = []
+    for (tile_x, tile_y), levels in decoded.items():
+        spatial.extend(_rainviewer_tile_observations(
+            levels,
+            request,
+            tile_x=tile_x,
+            tile_y=tile_y,
+            observed_at=observed_at,
+            received_at=received_at,
+        ))
+    return tuple(spatial)
+
+
 class RainViewerRadarAdapter:
     def __init__(self, *, manifest_url: str = RAINVIEWER_MANIFEST_ENDPOINT) -> None:
         self._manifest_url = manifest_url
@@ -2473,7 +2493,11 @@ class RainViewerRadarAdapter:
                 f"/{RAINVIEWER_TILE_SIZE}/{RAINVIEWER_ZOOM}/{tile_x}/{tile_y}/2/0_0.png"
             )
             payload = await fetcher.get_bytes(url, maximum_bytes=4 * 1024 * 1024)
-            decoded[(tile_x, tile_y)] = _decode_rainviewer_levels(payload)
+            async with _RADAR_DECODE_SEMAPHORE:
+                decoded[(tile_x, tile_y)] = await asyncio.to_thread(
+                    _decode_rainviewer_levels,
+                    payload,
+                )
 
         observations: list[NormalizedObservation] = []
         for target in request.targets:
@@ -2509,16 +2533,14 @@ class RainViewerRadarAdapter:
                     },
                     maximum_age_seconds=RAINVIEWER_MAX_FRAME_AGE_SECONDS,
                 ))
-        spatial = []
-        for (tile_x, tile_y), levels in decoded.items():
-            spatial.extend(_rainviewer_tile_observations(
-                levels,
+        async with _RADAR_DECODE_SEMAPHORE:
+            spatial = await asyncio.to_thread(
+                _rainviewer_spatial_observations,
+                decoded,
                 request,
-                tile_x=tile_x,
-                tile_y=tile_y,
                 observed_at=observed_at,
                 received_at=now,
-            ))
+            )
         observations.extend(sorted(
             spatial,
             key=lambda item: (item.value, item.metadata.get("block_count", 0)),

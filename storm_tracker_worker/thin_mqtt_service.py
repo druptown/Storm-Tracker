@@ -525,7 +525,10 @@ def _build_runtime() -> tuple[ThinOperationalRuntime, BlitzortungAdapter]:
     provider_runtime = ThinProviderRuntime(
         adapters=adapters,
         fetcher=fetcher,
-        max_parallel=8,
+        # NAS-HA is dedicated to Storm Tracker.  Start every provider that is
+        # actually due in the same I/O wave; the adapter-level radar decode
+        # semaphore still caps CPU-heavy decoding at two threads.
+        max_parallel=len(adapters),
         timeout_seconds=45.0,
         retries=1,
         request_preparer=station_runtime,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import json
+import logging
 import math
 import time
 from types import MappingProxyType
@@ -30,6 +31,9 @@ from .thin_postgis import PostGISWriteResult
 from .thin_provider_catalog import PROVIDERS, build_due_requests
 from .thin_region_planner import ThinRegionPlan, ThinRegionPlanner
 from .tracking_core.operational_snapshot import MAX_UI_STORM_SUMMARIES, validate_snapshot
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 # A full applicable-provider batch can legitimately take several minutes.
@@ -599,12 +603,26 @@ class ThinOperationalRuntime:
             last_attempts=self._last_attempts,
             region_plan=region_plan,
         )
+        cycle_started = time.monotonic()
+        if requests:
+            _LOGGER.info(
+                "Bronbatch gestart: due=%d regio's=%d targets=%d",
+                len(requests),
+                len(region_plan.regions),
+                len(active_targets),
+            )
         for request in requests:
             self._last_attempts[request.provider_id] = now
         fresh_results = self._scope_provider_results(
             dict(await self._providers.fetch(requests)),
             region_plan,
         )
+        if requests:
+            _LOGGER.info(
+                "Bronbatch opgehaald: due=%d duur=%.1fs",
+                len(requests),
+                time.monotonic() - cycle_started,
+            )
         self._latest_provider_results.update(fresh_results)
         fusion = fuse_observations(
             self._latest_provider_results,
@@ -736,6 +754,13 @@ class ThinOperationalRuntime:
                 validations,
                 regional_radar=tuple(regional_summaries),
                 region_plan=region_plan,
+            )
+        if requests:
+            _LOGGER.info(
+                "Bronbatch verwerkt: due=%d totaal=%.1fs postgis=%s",
+                len(requests),
+                time.monotonic() - cycle_started,
+                postgis.status,
             )
         self._revision += 1
         snapshot = self._build_snapshot(
