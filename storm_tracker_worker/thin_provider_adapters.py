@@ -837,6 +837,27 @@ def _attribute_text(value: Any) -> str:
     return value.strip()
 
 
+def _attribute_number(value: Any) -> float:
+    """Read either a scalar or KNMI's live one-item numeric attribute."""
+    if hasattr(value, "size"):
+        if int(value.size) != 1:
+            raise ValueError("radar_attribute_invalid")
+        value = value.reshape(-1)[0]
+    elif isinstance(value, (list, tuple)):
+        if len(value) != 1:
+            raise ValueError("radar_attribute_invalid")
+        value = value[0]
+    if hasattr(value, "item"):
+        value = value.item()
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("radar_attribute_invalid") from error
+    if not math.isfinite(result):
+        raise ValueError("radar_attribute_invalid")
+    return result
+
+
 def _validate_radar_time(observed_at: float, received_at: float, *, prefix: str) -> None:
     if not math.isfinite(observed_at):
         raise ValueError(f"{prefix}_frame_time_invalid")
@@ -1119,18 +1140,18 @@ def _decode_knmi_rtcor(
             raise ValueError("knmi_quantity_invalid")
         observed_at = _parse_knmi_timestamp(overview["product_datetime_end"])
         _validate_radar_time(observed_at, received_at, prefix="knmi")
-        rows = int(geographic["geo_number_rows"])
-        columns = int(geographic["geo_number_columns"])
+        rows = int(_attribute_number(geographic["geo_number_rows"]))
+        columns = int(_attribute_number(geographic["geo_number_columns"]))
         if (rows, columns) != (765, 700):
             raise ValueError("knmi_grid_invalid")
         raw = np.asarray(image["image_data"])
         if raw.shape != (rows, columns):
             raise ValueError("knmi_grid_invalid")
         calibration = image["calibration"].attrs
-        if _attribute_text(calibration["calibration_formulas"]).replace(" ", "") != "GEO=0.010000*PV+0":
+        if _attribute_text(calibration["calibration_formulas"]).replace(" ", "") != "GEO=0.010000*PV+0.000000":
             raise ValueError("knmi_calibration_invalid")
-        missing = int(calibration["calibration_missing_data"])
-        outside = int(calibration["calibration_out_of_image"])
+        missing = int(_attribute_number(calibration["calibration_missing_data"]))
+        outside = int(_attribute_number(calibration["calibration_out_of_image"]))
         rain_rate = raw.astype(float) * 0.01 * 12.0
         valid = (
             (raw != missing)
@@ -1140,13 +1161,15 @@ def _decode_knmi_rtcor(
         )
         if not np.any(valid):
             return ()
-        pixel_x_km = float(geographic["geo_pixel_size_x"])
-        pixel_y_km = float(geographic["geo_pixel_size_y"])
-        column_offset_km = float(geographic["geo_column_offset"])
-        row_offset_km = float(geographic["geo_row_offset"])
+        pixel_x_km = _attribute_number(geographic["geo_pixel_size_x"])
+        pixel_y_km = _attribute_number(geographic["geo_pixel_size_y"])
+        column_offset_km = _attribute_number(geographic["geo_column_offset"])
+        row_offset_km = _attribute_number(geographic["geo_row_offset"])
         proj4 = _attribute_text(root["geographic/map_projection"].attrs["projection_proj4_params"])
-        geographic_crs = CRS.from_proj4("+proj=longlat +a=6378.388 +b=6356.906 +no_defs")
         projected_crs = CRS.from_user_input(proj4)
+        geographic_crs = projected_crs.geodetic_crs
+        if geographic_crs is None:
+            raise ValueError("knmi_projection_invalid")
         forward = Transformer.from_crs(geographic_crs, projected_crs, always_xy=True)
         inverse = Transformer.from_crs(projected_crs, geographic_crs, always_xy=True)
 
