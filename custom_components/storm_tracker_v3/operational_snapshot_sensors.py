@@ -290,9 +290,13 @@ def _worker_runtime_attribute_projection(hass: Any) -> dict[str, Any]:
             and 0 <= value <= 1_000_000_000
         ):
             projection[key] = value
-    for key in ("snapshot_transport_state", "raw_calibration_status"):
+    for key in (
+        "snapshot_transport_state",
+        "raw_calibration_status",
+        "last_acquisition",
+    ):
         value = status.get(key)
-        if isinstance(value, str) and 0 < len(value) <= 32:
+        if isinstance(value, str) and 0 < len(value) <= 96:
             projection[key] = value
     latest_raw = status.get("raw_calibration_latest_received_at")
     if (

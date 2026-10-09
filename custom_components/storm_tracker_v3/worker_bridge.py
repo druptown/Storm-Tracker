@@ -168,6 +168,14 @@ def _compact_worker_status(status: dict, current: dict, *, now: float) -> dict:
         "last_ping_requested_at": current.get("last_ping_requested_at"),
         "last_ping_response_at": current.get("last_ping_response_at"),
     }
+    for key in (
+        "last_ping_job_id",
+        "last_ping_state",
+        "last_ping_requested_at",
+        "last_ping_response_at",
+    ):
+        if compact[key] is None:
+            compact.pop(key)
     version = _bounded_worker_text(
         status.get("worker_version", status.get("version"))
     )
@@ -214,6 +222,14 @@ def _compact_worker_status(status: dict, current: dict, *, now: float) -> dict:
         )
         if transport_state is not None:
             compact["snapshot_transport_state"] = transport_state
+        last_source = _bounded_worker_text(
+            runtime.get("last_tick_workload_id"), maximum=48
+        )
+        last_reason = _bounded_worker_text(
+            runtime.get("last_tick_reason_code"), maximum=47
+        )
+        if last_source is not None and last_reason is not None:
+            compact["last_acquisition"] = f"{last_source}|{last_reason}"[:96]
         cycle_counts = runtime.get("cycle_status_counts")
         if isinstance(cycle_counts, dict):
             for status_name in (
