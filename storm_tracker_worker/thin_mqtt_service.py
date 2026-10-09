@@ -130,6 +130,7 @@ class ThinMqttService:
         self._postgis_projection_projected = 0
         self._postgis_projection_last_success_at: float | None = None
         self._postgis_projection_last_error_code: str | None = None
+        self._provider_status_snapshot: dict[str, Any] | None = None
 
     def _technical_diagnostics_source(
         self,
@@ -210,6 +211,10 @@ class ThinMqttService:
                 "last_success_at": self._postgis_projection_last_success_at,
                 "last_error_code": self._postgis_projection_last_error_code,
             }
+        if self._provider_status_snapshot is not None:
+            snapshot_runtime["provider_status_snapshot"] = (
+                self._provider_status_snapshot
+            )
         return encode(envelope(
             "worker_status",
             state=state,
@@ -359,6 +364,14 @@ class ThinMqttService:
                     else None
                 )
                 provider_items = result.snapshot.get("providers", {}).get("items", [])
+                self._provider_status_snapshot = {
+                    "desired_state_sha256": result.snapshot[
+                        "desired_state_sha256"
+                    ],
+                    "evaluated_at": result.snapshot["evaluated_at"],
+                    "valid_until": result.snapshot["valid_until"],
+                    "items": [dict(item) for item in provider_items],
+                }
                 provider_summary = tuple(
                     sorted(
                         (

@@ -1,8 +1,8 @@
 {
   "kind": "recovered_archive_source",
   "component": "worker",
-  "version": "1.18.71",
-  "source_id": "a6f497a2e0a12bfc35d67052e450d89b9f49f4d796e605e699870f8177064d6c",
+  "version": "1.18.72",
+  "source_id": "bd903bebe7c6cf26b376650ca1e5bceaa3202450697d99d367ccf29531176c7f",
   "recovered_on": "2026-10-09",
   "files": [
     {
@@ -32,7 +32,7 @@
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "4944c962f262fe3848307febb6b097cc262b5e32eb1f70e634e88e2ae6f3004c",
+      "sha256": "0b92103d9e23ea47488fcf18cfb36941fe88ac0b429325c696c461df908a4d73",
       "size": 64
     },
     {
@@ -272,7 +272,7 @@
     {
       "path": "config.yaml",
       "mode": 420,
-      "sha256": "af35b88bc24878de9ab540cafab98d000a38ef8fa9cc8925c2a9a7782f249082",
+      "sha256": "2ea0862172c7c661899d6c33b4ae814c8c56f749b3e733aa32ae62954421c3ae",
       "size": 2669
     },
     {
@@ -1082,8 +1082,8 @@
     {
       "path": "thin_mqtt_service.py",
       "mode": 420,
-      "sha256": "98d83ff00c805ee120825a1c1a43acb0559ca81f83a709d455f06e3b137f5d1d",
-      "size": 26609
+      "sha256": "464e8eb0ddb088f8dabee96e63250f5e8f724350d03a71b569be5f4d6006911d",
+      "size": 27261
     },
     {
       "path": "thin_nowcast.py",
@@ -1610,12 +1610,12 @@
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_worker_v1.18.71_deploy.tar.gz",
-      "archive_sha256": "fff8149784c532233c129c4d9c9768df0667b71f3f50a3e6eb4be9b48183bb33",
-      "bytes": 2397429,
+      "filename": "storm_tracker_worker_v1.18.72_deploy.tar.gz",
+      "archive_sha256": "6ab37ff5a04722ff2dac5a86da902b8be8a000a4c753186e3745313f1e93ae83",
+      "bytes": 2397579,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.151_worker_v1.18.71_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.152_worker_v1.18.72_evidence.json",
           "archive_and_source_match": true
         }
       ]
