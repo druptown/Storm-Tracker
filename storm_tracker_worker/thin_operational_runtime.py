@@ -234,7 +234,7 @@ def _sample_regional_radar_at_target(
     field = regional.field
     if field is None:
         return None
-    rain_rate = _sample_radar_field_at_target(field, target)
+    rain_rate = _sample_radar_field_value_at_target(field, target)
     if rain_rate is None:
         return None
     transformer = Transformer.from_crs("EPSG:4326", field.crs, always_xy=True)
@@ -260,6 +260,16 @@ def _sample_radar_field_at_target(
     field: Any,
     target: Any,
 ) -> float | None:
+    rain_rate = _sample_radar_field_value_at_target(field, target)
+    if rain_rate is None or rain_rate <= 0.0:
+        return None
+    return rain_rate
+
+
+def _sample_radar_field_value_at_target(
+    field: Any,
+    target: Any,
+) -> float | None:
     transformer = Transformer.from_crs("EPSG:4326", field.crs, always_xy=True)
     target_x_m, target_y_m = transformer.transform(
         float(target.longitude), float(target.latitude),
@@ -276,9 +286,31 @@ def _sample_radar_field_at_target(
     if not bool(field.valid_mask[row, column]):
         return None
     rain_rate = float(field.rain_rate_mm_h[row, column])
-    if not math.isfinite(rain_rate) or rain_rate <= 0.0:
+    if not math.isfinite(rain_rate) or rain_rate < 0.0:
         return None
     return rain_rate
+
+
+def _ground_rain_samples(
+    fusion: FusionCycle,
+    target_id: str,
+) -> tuple[Any, ...]:
+    """Return the newest rain measurement per physical station."""
+
+    latest_by_site: dict[tuple[str, str], Any] = {}
+    for observation in fusion.observations:
+        station_id = observation.metadata.get("station_id")
+        if (
+            observation.target_id != target_id
+            or observation.kind is not ObservationKind.RAIN_RATE
+            or not station_id
+        ):
+            continue
+        key = (observation.provider_id, str(station_id))
+        previous = latest_by_site.get(key)
+        if previous is None or observation.observed_at > previous.observed_at:
+            latest_by_site[key] = observation
+    return tuple(latest_by_site.values())
 
 
 def _apply_regional_radar_to_targets(
@@ -322,13 +354,22 @@ def _apply_regional_radar_to_targets(
                 provider_id: regional.field.observed_at
                 for provider_id in contributors
             })
+            ground_samples = _ground_rain_samples(fusion, target.target_id)
+            for observation in ground_samples:
+                source_times[observation.provider_id] = max(
+                    source_times.get(observation.provider_id, 0.0),
+                    observation.observed_at,
+                )
+            rain_rate = max((
+                rain_rate,
+                *(observation.value for observation in ground_samples),
+            ))
             targets[target.target_id] = replace(
                 current,
                 status="operational",
-                precipitation_rate_mm_h=max(
-                    rain_rate,
-                    float(current.precipitation_rate_mm_h or 0.0),
-                ),
+                precipitation_rate_mm_h=rain_rate,
+                reflectivity_dbz=None,
+                radar_level=None,
                 confidence=max(current.confidence, radar_confidence),
                 contributors=tuple(sorted(
                     set(current.contributors).union(contributors)
@@ -359,17 +400,21 @@ def _apply_native_radar_to_targets(
         if not fields:
             continue
         for target in region.targets:
-            positive_samples = tuple(
+            samples = tuple(
                 (field, rain_rate)
                 for field in fields
-                if (rain_rate := _sample_radar_field_at_target(field, target))
+                if (
+                    rain_rate := _sample_radar_field_value_at_target(
+                        field, target,
+                    )
+                )
                 is not None
             )
-            if not positive_samples:
+            if not samples:
                 continue
-            rain_rate = max(sample for _, sample in positive_samples)
+            rain_rate = max(sample for _, sample in samples)
             contributors = tuple(sorted({
-                field.provider_id for field, _ in positive_samples
+                field.provider_id for field, _ in samples
             }))
             current = targets.get(target.target_id)
             if current is None:
@@ -391,15 +436,24 @@ def _apply_native_radar_to_targets(
             source_times = dict(current.source_observed_at)
             source_times.update({
                 field.provider_id: field.observed_at
-                for field, _ in positive_samples
+                for field, _ in samples
             })
+            ground_samples = _ground_rain_samples(fusion, target.target_id)
+            for observation in ground_samples:
+                source_times[observation.provider_id] = max(
+                    source_times.get(observation.provider_id, 0.0),
+                    observation.observed_at,
+                )
+            rain_rate = max((
+                rain_rate,
+                *(observation.value for observation in ground_samples),
+            ))
             targets[target.target_id] = replace(
                 current,
                 status="operational",
-                precipitation_rate_mm_h=max(
-                    rain_rate,
-                    float(current.precipitation_rate_mm_h or 0.0),
-                ),
+                precipitation_rate_mm_h=rain_rate,
+                reflectivity_dbz=None,
+                radar_level=None,
                 contributors=tuple(sorted(
                     set(current.contributors).union(contributors)
                 )),
@@ -417,21 +471,7 @@ def _ground_evidence(
     target_id: str,
     current_is_rain: bool,
 ) -> dict[str, Any]:
-    latest_by_site = {}
-    for observation in fusion.observations:
-        station_id = observation.metadata.get("station_id")
-        if (
-            observation.target_id != target_id
-            or observation.kind is not ObservationKind.RAIN_RATE
-            or not station_id
-        ):
-            continue
-        site_key = (observation.provider_id, str(station_id))
-        previous = latest_by_site.get(site_key)
-        if previous is None or observation.observed_at > previous.observed_at:
-            latest_by_site[site_key] = observation
-
-    sites = tuple(latest_by_site.values())
+    sites = _ground_rain_samples(fusion, target_id)
     if not sites:
         return {
             "status": "unknown",
