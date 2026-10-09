@@ -170,6 +170,106 @@ def _point(longitude: float, latitude: float) -> dict[str, Any]:
     return {"type": "Point", "coordinates": [longitude, latitude]}
 
 
+def _component_polygon_geometry(
+    component: list[tuple[int, int]],
+    corner_to_lonlat: Any,
+) -> dict[str, Any]:
+    """Trace the exact outer edge (and holes) of a 4-connected grid shape."""
+    edges: set[
+        tuple[tuple[int, int], tuple[int, int]]
+    ] = set()
+    for row, column in component:
+        for edge in (
+            ((row, column), (row, column + 1)),
+            ((row, column + 1), (row + 1, column + 1)),
+            ((row + 1, column + 1), (row + 1, column)),
+            ((row + 1, column), (row, column)),
+        ):
+            reverse = (edge[1], edge[0])
+            if reverse in edges:
+                edges.remove(reverse)
+            else:
+                edges.add(edge)
+
+    outgoing: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    for start, end in edges:
+        outgoing.setdefault(start, []).append(end)
+    direction_index = {
+        (0, 1): 0,
+        (1, 0): 1,
+        (0, -1): 2,
+        (-1, 0): 3,
+    }
+    # Keep filled cells on the right at vertices where two loops touch.
+    turn_rank = {1: 0, 0: 1, 3: 2, 2: 3}
+    unused = set(edges)
+    rings: list[list[tuple[int, int]]] = []
+    while unused:
+        first = min(unused)
+        unused.remove(first)
+        ring = [first[0], first[1]]
+        while ring[-1] != ring[0]:
+            candidates = [
+                (ring[-1], end)
+                for end in outgoing.get(ring[-1], ())
+                if (ring[-1], end) in unused
+            ]
+            if not candidates:
+                raise ValueError("radar_component_contour_invalid")
+            previous = (
+                ring[-1][0] - ring[-2][0],
+                ring[-1][1] - ring[-2][1],
+            )
+            previous_index = direction_index[previous]
+
+            def rank(edge: tuple[tuple[int, int], tuple[int, int]]) -> tuple[Any, ...]:
+                following = (
+                    edge[1][0] - edge[0][0],
+                    edge[1][1] - edge[0][1],
+                )
+                turn = (direction_index[following] - previous_index) % 4
+                return turn_rank[turn], edge
+
+            next_edge = min(candidates, key=rank)
+            unused.remove(next_edge)
+            ring.append(next_edge[1])
+            if len(ring) > len(edges) + 1:
+                raise ValueError("radar_component_contour_invalid")
+
+        simplified: list[tuple[int, int]] = []
+        for index, current in enumerate(ring[:-1]):
+            previous = ring[index - 1 if index else -2]
+            following = ring[(index + 1) % (len(ring) - 1)]
+            if (
+                previous[0] == current[0] == following[0]
+                or previous[1] == current[1] == following[1]
+            ):
+                continue
+            simplified.append(current)
+        if len(simplified) < 3:
+            raise ValueError("radar_component_contour_invalid")
+        simplified.append(simplified[0])
+        rings.append(simplified)
+
+    def signed_area(ring: list[tuple[int, int]]) -> float:
+        return sum(
+            column1 * row2 - column2 * row1
+            for (row1, column1), (row2, column2) in zip(ring, ring[1:])
+        ) / 2.0
+
+    rings.sort(key=lambda ring: signed_area(ring), reverse=True)
+    if not rings or signed_area(rings[0]) <= 0.0:
+        raise ValueError("radar_component_contour_invalid")
+    coordinates = []
+    for ring in rings:
+        projected = []
+        for row, column in ring:
+            longitude, latitude = corner_to_lonlat(row, column)
+            projected.append([float(longitude), float(latitude)])
+        coordinates.append(projected)
+    return {"type": "Polygon", "coordinates": coordinates}
+
+
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     radius = 6371.0088
     lat1_r, lat2_r = math.radians(lat1), math.radians(lat2)
@@ -514,21 +614,23 @@ def _decode_opera_targets(
                 while stack:
                     component_row, component_column = stack.pop()
                     component.append((component_row, component_column))
-                    for delta_row in (-1, 0, 1):
-                        for delta_column in (-1, 0, 1):
-                            if delta_row == delta_column == 0:
-                                continue
-                            neighbour_row = component_row + delta_row
-                            neighbour_column = component_column + delta_column
-                            if not (
-                                0 <= neighbour_row < mask.shape[0]
-                                and 0 <= neighbour_column < mask.shape[1]
-                                and mask[neighbour_row, neighbour_column]
-                                and not visited[neighbour_row, neighbour_column]
-                            ):
-                                continue
-                            visited[neighbour_row, neighbour_column] = True
-                            stack.append((neighbour_row, neighbour_column))
+                    for delta_row, delta_column in (
+                        (-1, 0),
+                        (1, 0),
+                        (0, -1),
+                        (0, 1),
+                    ):
+                        neighbour_row = component_row + delta_row
+                        neighbour_column = component_column + delta_column
+                        if not (
+                            0 <= neighbour_row < mask.shape[0]
+                            and 0 <= neighbour_column < mask.shape[1]
+                            and mask[neighbour_row, neighbour_column]
+                            and not visited[neighbour_row, neighbour_column]
+                        ):
+                            continue
+                        visited[neighbour_row, neighbour_column] = True
+                        stack.append((neighbour_row, neighbour_column))
 
                 component_rows = [item[0] for item in component]
                 component_columns = [item[1] for item in component]
@@ -550,19 +652,28 @@ def _decode_opera_targets(
                     radar.shape[0],
                     row0 + (max(component_rows) + 1) * block_size,
                 )
-                corners = []
-                for pixel_column, pixel_row in (
-                    (minimum_column, minimum_row),
-                    (maximum_column, minimum_row),
-                    (maximum_column, maximum_row),
-                    (minimum_column, maximum_row),
-                    (minimum_column, minimum_row),
-                ):
+                def corner_to_lonlat(
+                    grid_row: int,
+                    grid_column: int,
+                ) -> tuple[float, float]:
+                    pixel_column = min(
+                        radar.shape[1],
+                        column0 + grid_column * block_size,
+                    )
+                    pixel_row = min(
+                        radar.shape[0],
+                        row0 + grid_row * block_size,
+                    )
                     corner_lon, corner_lat = inverse_transformer.transform(
                         pixel_column * xscale,
                         -pixel_row * yscale,
                     )
-                    corners.append([corner_lon, corner_lat])
+                    return float(corner_lon), float(corner_lat)
+
+                geometry = _component_polygon_geometry(
+                    component,
+                    corner_to_lonlat,
+                )
                 maximum_dbz = max(
                     float(pooled_dbz[item_row, item_column])
                     for item_row, item_column in component
@@ -588,7 +699,7 @@ def _decode_opera_targets(
                         if mean_quality >= 0.5
                         else ObservationQuality.SUSPECT
                     ),
-                    geometry={"type": "Polygon", "coordinates": [corners]},
+                    geometry=geometry,
                     metadata={
                         "quality_index": mean_quality,
                         "spatial_cell": True,
@@ -953,20 +1064,22 @@ def _national_radar_observations(
             while stack:
                 component_row, component_column = stack.pop()
                 component.append((component_row, component_column))
-                for delta_row in (-1, 0, 1):
-                    for delta_column in (-1, 0, 1):
-                        if delta_row == delta_column == 0:
-                            continue
-                        neighbour_row = component_row + delta_row
-                        neighbour_column = component_column + delta_column
-                        if (
-                            0 <= neighbour_row < mask.shape[0]
-                            and 0 <= neighbour_column < mask.shape[1]
-                            and mask[neighbour_row, neighbour_column]
-                            and not visited[neighbour_row, neighbour_column]
-                        ):
-                            visited[neighbour_row, neighbour_column] = True
-                            stack.append((neighbour_row, neighbour_column))
+                for delta_row, delta_column in (
+                    (-1, 0),
+                    (1, 0),
+                    (0, -1),
+                    (0, 1),
+                ):
+                    neighbour_row = component_row + delta_row
+                    neighbour_column = component_column + delta_column
+                    if (
+                        0 <= neighbour_row < mask.shape[0]
+                        and 0 <= neighbour_column < mask.shape[1]
+                        and mask[neighbour_row, neighbour_column]
+                        and not visited[neighbour_row, neighbour_column]
+                    ):
+                        visited[neighbour_row, neighbour_column] = True
+                        stack.append((neighbour_row, neighbour_column))
 
             component_rows = [item[0] for item in component]
             component_columns = [item[1] for item in component]
@@ -977,16 +1090,25 @@ def _national_radar_observations(
             center_pixel_row = (minimum_row + maximum_row) / 2.0
             center_pixel_column = (minimum_column + maximum_column) / 2.0
             longitude, latitude = pixel_to_lonlat(center_pixel_row, center_pixel_column)
-            corners = []
-            for pixel_row, pixel_column in (
-                (minimum_row, minimum_column),
-                (minimum_row, maximum_column),
-                (maximum_row, maximum_column),
-                (maximum_row, minimum_column),
-                (minimum_row, minimum_column),
-            ):
+            def corner_to_lonlat(
+                grid_row: int,
+                grid_column: int,
+            ) -> tuple[float, float]:
+                pixel_row = min(
+                    height,
+                    row0 + grid_row * block_rows,
+                )
+                pixel_column = min(
+                    width,
+                    column0 + grid_column * block_columns,
+                )
                 corner_lon, corner_lat = pixel_to_lonlat(pixel_row, pixel_column)
-                corners.append([float(corner_lon), float(corner_lat)])
+                return float(corner_lon), float(corner_lat)
+
+            geometry = _component_polygon_geometry(
+                component,
+                corner_to_lonlat,
+            )
             maximum_rate = max(float(pooled[row, column]) for row, column in component)
             key = (round(float(latitude) * 100), round(float(longitude) * 100))
             candidate = NormalizedObservation.create(
@@ -1001,7 +1123,7 @@ def _national_radar_observations(
                 latitude=float(latitude),
                 longitude=float(longitude),
                 quality=ObservationQuality.GOOD,
-                geometry={"type": "Polygon", "coordinates": [corners]},
+                geometry=geometry,
                 metadata={
                     "spatial_cell": True,
                     "block_count": len(component),
