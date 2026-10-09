@@ -143,9 +143,10 @@ def _geometry_centroid(observation: NormalizedObservation) -> tuple[float, float
 
 def _is_spatial_weather(observation: NormalizedObservation) -> bool:
     if observation.kind in {ObservationKind.REFLECTIVITY, ObservationKind.RADAR_LEVEL}:
-        return True
+        return observation.target_id is None
     return (
         observation.kind is ObservationKind.RAIN_RATE
+        and observation.target_id is None
         and observation.metadata.get("role") != "model_guidance"
     )
 

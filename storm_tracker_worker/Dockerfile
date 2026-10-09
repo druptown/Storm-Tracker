@@ -11,7 +11,7 @@ LABEL \
 RUN apk add --no-cache cpulimit python3 py3-pip util-linux \
   && python3 -m venv /opt/storm-tracker \
   && /opt/storm-tracker/bin/pip install --no-cache-dir \
-    paho-mqtt==2.1.0 numpy==2.5.1 h5py==3.16.0 pyproj==3.7.2 Pillow==11.3.0 \
+    paho-mqtt==2.1.0 aiohttp==3.14.3 numpy==2.5.1 h5py==3.16.0 pyproj==3.7.2 Pillow==11.3.0 \
     "psycopg[binary]==3.3.4"
 
 COPY . /opt/storm_tracker_worker
