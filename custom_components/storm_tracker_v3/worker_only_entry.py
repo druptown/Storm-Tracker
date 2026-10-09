@@ -761,7 +761,7 @@ class WorkerOnlyEntryRuntime:
             isinstance(controller, Mapping)
             and controller.get("retry_blocked") is True
             and controller.get("last_error_code")
-            in {"worker_offline", "worker_timeout"}
+            in {"worker_offline", "worker_timeout", "worker_job_failed"}
         )
 
     def _register_listeners(self) -> None:

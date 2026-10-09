@@ -1518,7 +1518,7 @@ def _degraded_state(state: _CacheState, *, reason: str, worker_state: str) -> _C
     for provider_id, frozen in state.providers.items():
         provider = _copy_record(frozen)
         provider.update({
-            "state": "offline" if worker_state == "offline" else "unknown",
+            "state": "offline" if worker_state == "offline" else "stale",
             "freshness": "stale",
             "error": reason,
         })
