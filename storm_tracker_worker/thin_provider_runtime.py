@@ -13,6 +13,7 @@ from .thin_provider_adapters import (
     ProviderStale,
     ThinAdapterResult,
     ThinRadarField,
+    ThinVisualRadarField,
 )
 from .thin_provider_catalog import ThinProviderRequest
 
@@ -27,6 +28,7 @@ class ProviderResult:
     attempted_at: float
     completed_at: float
     radar_fields: tuple[ThinRadarField, ...] = ()
+    visual_radar_fields: tuple[ThinVisualRadarField, ...] = ()
 
 
 class ThinProviderRuntime:
@@ -102,9 +104,11 @@ class ThinProviderRuntime:
                     if isinstance(adapter_result, ThinAdapterResult):
                         result = adapter_result.observations
                         radar_fields = adapter_result.radar_fields
+                        visual_radar_fields = adapter_result.visual_radar_fields
                     else:
                         result = tuple(adapter_result)
                         radar_fields = ()
+                        visual_radar_fields = ()
                     if not all(isinstance(item, NormalizedObservation) for item in result):
                         raise TypeError("adapter_returned_invalid_observation")
                     self._failure_counts.pop(request.provider_id, None)
@@ -118,6 +122,7 @@ class ThinProviderRuntime:
                         attempted_at=attempted_at,
                         completed_at=float(self._clock()),
                         radar_fields=radar_fields,
+                        visual_radar_fields=visual_radar_fields,
                     )
                 except ProviderBlocked as error:
                     return ProviderResult(

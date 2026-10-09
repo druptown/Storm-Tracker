@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+import math
 from typing import Any, Iterable
 
 import numpy as np
 from pyproj import Transformer
 
-from .thin_provider_adapters import ThinRadarField
+from .thin_provider_adapters import ThinRadarField, ThinVisualRadarField
 
 
 RAIN_RATE_LEVELS_MM_H = (0.1, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0)
 
 
-def _intensity_levels(field: ThinRadarField) -> np.ndarray:
+def _intensity_levels(field: ThinRadarField | ThinVisualRadarField) -> np.ndarray:
+    if isinstance(field, ThinVisualRadarField):
+        return field.levels
     rates = field.rain_rate_mm_h
     eligible = (
         field.valid_mask
@@ -24,6 +28,40 @@ def _intensity_levels(field: ThinRadarField) -> np.ndarray:
     for intensity, threshold in enumerate(RAIN_RATE_LEVELS_MM_H, start=1):
         levels[eligible & (rates >= threshold)] = intensity
     return levels
+
+
+def crop_visual_radar_field(field: ThinVisualRadarField, region: Any) -> ThinVisualRadarField | None:
+    """Keep native visual pixels in the selected region, not all of Spain."""
+    radius = float(region.radar_analysis_radius_km or region.observation_radius_km)
+    latitude = region.center_latitude
+    longitude = region.center_longitude
+    delta_lat = math.degrees(radius / 6371.0088)
+    delta_lon = math.degrees(math.asin(min(
+        1.0, math.sin(radius / 6371.0088) / max(0.001, math.cos(math.radians(latitude))),
+    )))
+    height, width = field.levels.shape
+    row0 = max(0, math.floor((field.latitude_top - latitude - delta_lat) / field.latitude_scale))
+    row1 = min(height, math.ceil((field.latitude_top - latitude + delta_lat) / field.latitude_scale))
+    col0 = max(0, math.floor((longitude - delta_lon - field.longitude_left) / field.longitude_scale))
+    col1 = min(width, math.ceil((longitude + delta_lon - field.longitude_left) / field.longitude_scale))
+    if row0 >= row1 or col0 >= col1:
+        return None
+    rows, columns = np.indices((row1 - row0, col1 - col0))
+    latitudes = np.radians(field.latitude_top - (rows + row0 + 0.5) * field.latitude_scale)
+    longitudes = np.radians(field.longitude_left + (columns + col0 + 0.5) * field.longitude_scale)
+    center_latitude = math.radians(latitude)
+    haversine = (
+        np.sin((latitudes - center_latitude) / 2) ** 2
+        + np.cos(latitudes) * math.cos(center_latitude)
+        * np.sin((longitudes - math.radians(longitude)) / 2) ** 2
+    )
+    within = 6371.0088 * 2 * np.arcsin(np.sqrt(np.clip(haversine, 0, 1))) <= radius
+    return replace(
+        field,
+        longitude_left=field.longitude_left + col0 * field.longitude_scale,
+        latitude_top=field.latitude_top - row0 * field.latitude_scale,
+        levels=np.where(within, field.levels[row0:row1, col0:col1], 0).astype(np.uint8),
+    )
 
 
 def _rectangles_for_levels(
@@ -87,7 +125,7 @@ def _max_pool(levels: np.ndarray, factor: int) -> np.ndarray:
 
 
 def _overlay_at_factor(
-    field: ThinRadarField,
+    field: ThinRadarField | ThinVisualRadarField,
     source_levels: np.ndarray,
     factor: int,
     *,
@@ -97,17 +135,22 @@ def _overlay_at_factor(
     if rectangles is None:
         rectangles = _rectangles_for_levels(levels)
 
-    inverse = Transformer.from_crs(field.crs, "EPSG:4326", always_xy=True)
+    visual = isinstance(field, ThinVisualRadarField)
+    inverse = None if visual else Transformer.from_crs(field.crs, "EPSG:4326", always_xy=True)
+    origin_x = field.longitude_left if visual else field.origin_x_m
+    origin_y = field.latitude_top if visual else field.origin_y_m
+    x_resolution = field.longitude_scale if visual else field.x_resolution_m
+    y_resolution = field.latitude_scale if visual else field.y_resolution_m
     runs = []
     for first_row, last_row, first_column, last_column, intensity in rectangles:
-        left = field.origin_x_m + first_column * factor * field.x_resolution_m
-        right = field.origin_x_m + min(
+        left = origin_x + first_column * factor * x_resolution
+        right = origin_x + min(
             last_column * factor, source_levels.shape[1],
-        ) * field.x_resolution_m
-        top = field.origin_y_m - first_row * factor * field.y_resolution_m
-        bottom = field.origin_y_m - min(
+        ) * x_resolution
+        top = origin_y - first_row * factor * y_resolution
+        bottom = origin_y - min(
             last_row * factor, source_levels.shape[0],
-        ) * field.y_resolution_m
+        ) * y_resolution
         ring = []
         for x_value, y_value in (
             (left, top),
@@ -116,7 +159,8 @@ def _overlay_at_factor(
             (left, bottom),
             (left, top),
         ):
-            longitude, latitude = inverse.transform(x_value, y_value)
+            longitude, latitude = ((x_value, y_value) if visual
+                                   else inverse.transform(x_value, y_value))
             # Six decimals are substantially finer than the 500 m analysis
             # pixels and keep the shared MQTT payload compact.
             ring.append([round(float(latitude), 6), round(float(longitude), 6)])
@@ -126,7 +170,8 @@ def _overlay_at_factor(
         "provider_id": field.provider_id,
         "product_id": field.product_id,
         "observed_at": float(field.observed_at),
-        "threshold_mm_h": RAIN_RATE_LEVELS_MM_H[0],
+        **({"quantity": "visual_class", "unit": "level"} if visual
+           else {"threshold_mm_h": RAIN_RATE_LEVELS_MM_H[0]}),
         "downsample_factor": factor,
         "source_shape": list(source_levels.shape),
         "runs": runs,
@@ -167,7 +212,7 @@ def build_radar_overlay(
 
 
 def build_radar_overlays(
-    fields: Iterable[tuple[str, ThinRadarField]],
+    fields: Iterable[tuple[str, ThinRadarField | ThinVisualRadarField]],
     *,
     maximum_total_runs: int = 4_000,
 ) -> dict[str, dict[str, Any]]:

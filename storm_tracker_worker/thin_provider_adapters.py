@@ -336,12 +336,40 @@ class ThinRadarField:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ThinVisualRadarField:
+    """Native display classes, deliberately not quantitative precipitation."""
+
+    provider_id: str
+    product_id: str
+    observed_at: float
+    longitude_left: float
+    latitude_top: float
+    longitude_scale: float
+    latitude_scale: float
+    levels: Any
+
+    def __post_init__(self) -> None:
+        import numpy as np
+
+        if not isinstance(self.levels, np.ndarray) or self.levels.ndim != 2 or not self.levels.size:
+            raise ValueError("visual_radar_grid_invalid")
+        if not all(math.isfinite(value) for value in (
+            self.observed_at, self.longitude_left, self.latitude_top,
+            self.longitude_scale, self.latitude_scale,
+        )) or min(self.longitude_scale, self.latitude_scale) <= 0:
+            raise ValueError("visual_radar_georeference_invalid")
+        if np.any((self.levels < 0) | (self.levels > 8)):
+            raise ValueError("visual_radar_classes_invalid")
+
+
 @dataclass(frozen=True, slots=True, eq=False)
 class ThinAdapterResult(Sequence[NormalizedObservation]):
     """Adapter result that remains a sequence for older direct callers."""
 
     observations: tuple[NormalizedObservation, ...]
     radar_fields: tuple[ThinRadarField, ...] = ()
+    visual_radar_fields: tuple[ThinVisualRadarField, ...] = ()
 
     def __iter__(self) -> Iterator[NormalizedObservation]:
         return iter(self.observations)
@@ -354,7 +382,9 @@ class ThinAdapterResult(Sequence[NormalizedObservation]):
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, ThinAdapterResult):
-            return self.observations == other.observations and self.radar_fields == other.radar_fields
+            return (self.observations == other.observations
+                    and self.radar_fields == other.radar_fields
+                    and self.visual_radar_fields == other.visual_radar_fields)
         return self.observations == other
 
 
@@ -1942,7 +1972,7 @@ def _decode_aemet_radar(
     *,
     observed_at: float,
     received_at: float,
-) -> tuple[NormalizedObservation, ...]:
+) -> ThinAdapterResult:
     import numpy as np
     from PIL import Image
 
@@ -1999,7 +2029,7 @@ def _decode_aemet_radar(
         pixel_height_m=latitude_scale * 110_574.0,
         maximum_age_seconds=AEMET_MAX_FRAME_AGE_SECONDS,
     )
-    return tuple(
+    observations = tuple(
         NormalizedObservation.create(
             provider_id=item.provider_id,
             product_id=item.product_id,
@@ -2017,6 +2047,19 @@ def _decode_aemet_radar(
             maximum_age_seconds=AEMET_MAX_FRAME_AGE_SECONDS,
         )
         for item in level_observations
+    )
+    return ThinAdapterResult(
+        observations=observations,
+        visual_radar_fields=(ThinVisualRadarField(
+            provider_id=request.provider_id,
+            product_id=request.product_id,
+            observed_at=observed_at,
+            longitude_left=longitude_left,
+            latitude_top=latitude_top,
+            longitude_scale=longitude_scale,
+            latitude_scale=latitude_scale,
+            levels=np.where(valid, values, 0).astype(np.uint8),
+        ),),
     )
 
 

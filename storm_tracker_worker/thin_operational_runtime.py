@@ -24,7 +24,7 @@ from .thin_ground_validation import ForecastValidation, GroundValidationRuntime
 from .thin_nowcast import StormCell, ThinNowcast, ThinNowcastRuntime
 from .thin_observation import ObservationKind
 from .thin_radar_tracking import ThinRadarTracker
-from .thin_radar_overlay import build_radar_overlays
+from .thin_radar_overlay import build_radar_overlays, crop_visual_radar_field
 from .thin_regional_radar_fusion import RegionalFusionSummary
 from .thin_regional_radar_runtime import ThinRegionalRadarFusionCoordinator
 from .thin_postgis import (
@@ -1124,8 +1124,42 @@ class ThinOperationalRuntime:
             )
             if result.field is not None
         ]
+        # Display-class products are not mm/h and cannot enter quantitative
+        # fusion/tracking. Preserve their native pixels on the map instead of
+        # losing them whenever another region has quantitative tracked cells.
+        display_fields = dict(overlay_fields)
+        for region in region_plan.regions:
+            candidates = []
+            for result in self._latest_provider_results.values():
+                for field in result.visual_radar_fields:
+                    maximum_age = PROVIDER_FUSION_AGE_SECONDS.get(
+                        field.provider_id, MAX_FUSION_AGE_SECONDS,
+                    )
+                    spec = _PROVIDER_SPEC_BY_ID.get(field.provider_id)
+                    if not 0 <= fusion.evaluated_at - field.observed_at <= maximum_age:
+                        continue
+                    if spec is not None and not any(spec.applies_to(t) for t in region.targets):
+                        continue
+                    candidates.append(field)
+            if not candidates:
+                continue
+            visual = min(candidates, key=lambda f: (
+                _NATIVE_RADAR_FALLBACK_RANK.get(f.provider_id, 999), -f.observed_at,
+            ))
+            quantitative = display_fields.get(region.region_id)
+            if quantitative is not None:
+                source_ids = quantitative.identity.source_composition
+                quantitative_rank = min(
+                    (_NATIVE_RADAR_FALLBACK_RANK.get(p, 999) for p in source_ids),
+                    default=999,
+                )
+                if quantitative_rank < _NATIVE_RADAR_FALLBACK_RANK.get(visual.provider_id, 999):
+                    continue
+            cropped = crop_visual_radar_field(visual, region)
+            if cropped is not None:
+                display_fields[region.region_id] = cropped
         radar_overlays = build_radar_overlays(
-            overlay_fields,
+            sorted(display_fields.items()),
             maximum_total_runs=MAX_TOTAL_RADAR_OVERLAY_RUNS,
         )
         target_features: list[dict[str, Any]] = []
