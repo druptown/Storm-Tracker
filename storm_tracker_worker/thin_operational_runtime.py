@@ -887,7 +887,9 @@ class ThinOperationalRuntime:
                     transition.candidate_edge_count,
                     ",".join(transition.reason_codes),
                 )
-            system_reader = getattr(self._radar_tracker, "systems", None)
+            system_reader = getattr(self._radar_tracker, "forecast_tracks", None)
+            if system_reader is None:
+                system_reader = getattr(self._radar_tracker, "systems", None)
             forecast_tracks = (
                 system_reader(field, scope.target_id)
                 if system_reader is not None

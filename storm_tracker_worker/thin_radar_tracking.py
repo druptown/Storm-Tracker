@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field as dataclass_field
+from dataclasses import dataclass, field as dataclass_field, replace
 import hashlib
 import json
 import math
@@ -463,6 +463,57 @@ class ThinRadarTracker:
                 radar_field=field,
             ))
         return tuple(systems)
+
+    def forecast_tracks(self, field: ThinRadarField, target_id: str) -> tuple[RadarTrack, ...]:
+        """Keep full systems, adding only admitted current shields of blocked ones.
+
+        Never apply a usable member's vector to its untracked neighbours. The
+        blocked aggregate remains diagnostic only (motion_ready=False), while
+        each partial forecast retains its own quantitative pixels and vector.
+        """
+        systems = self.systems(field, target_id)
+        if not systems:
+            return self.tracks(field, target_id)
+        state = self._states[(field.provider_id, target_id)]
+        assert state.weather_systems is not None
+        systems_by_id = {item.track_id: item for item in systems}
+        members_by_id = {
+            item.track_id: item for item in self.tracks(field, target_id)
+            if item.motion_ready
+        }
+        result = list(systems)
+        selected: set[str] = set()
+        for system in state.weather_systems.systems:
+            aggregate = systems_by_id.get(system.system_id)
+            if aggregate is None or aggregate.motion_ready:
+                continue
+            for member in system.member_tracks:
+                track = members_by_id.get(member.track_id)
+                if (
+                    member.object_kind != "rain_shield"
+                    or track is None
+                    or track.track_id in selected
+                    or not math.isclose(
+                        track.observed_at, system.valid_at,
+                        rel_tol=0.0, abs_tol=1e-6,
+                    )
+                ):
+                    continue
+                selected.add(track.track_id)
+                result.append(replace(
+                    track,
+                    motion_reason_codes=tuple(sorted(set((
+                        *track.motion_reason_codes,
+                        "partial_system_member_forecast",
+                    )))),
+                    lineage_status="partial_system",
+                    predecessor_system_ids=aggregate.predecessor_system_ids,
+                    lineage_reason_codes=tuple(sorted(set((
+                        *aggregate.lineage_reason_codes,
+                        *aggregate.motion_reason_codes,
+                    )))),
+                ))
+        return tuple(result)
 
 
 def _digest(value: Any) -> str:
