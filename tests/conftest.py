@@ -65,6 +65,17 @@ def observation_module():
 
 
 @pytest.fixture(scope="session")
+def bounded_payload_module():
+    """Laadt het pure begrensde byte- en decompressiecontract."""
+    _ensure_stub_package(PKG_NAME)
+    _ensure_stub_package(f"{PKG_NAME}.engine")
+    return _load_module(
+        f"{PKG_NAME}.engine.bounded_payload",
+        PKG_ROOT / "engine" / "bounded_payload.py",
+    )
+
+
+@pytest.fixture(scope="session")
 def base_module(observation_module):
     """Laadt het echte providers/base.py."""
     _ensure_stub_package(f"{PKG_NAME}.providers")
@@ -75,7 +86,12 @@ def base_module(observation_module):
 
 
 @pytest.fixture(scope="session")
-def opera_module(observation_module):
+def opera_module(
+    observation_module,
+    raster_components_module,
+    bounded_payload_module,
+    polygon_module,
+):
     """Laadt het echte providers/opera.py."""
     _ensure_stub_package(f"{PKG_NAME}.providers")
     return _load_module(
@@ -128,6 +144,16 @@ def hull_module(distance_module):
 
 
 @pytest.fixture(scope="session")
+def polygon_module():
+    _ensure_stub_package(PKG_NAME)
+    _ensure_stub_package(f"{PKG_NAME}.geometry")
+    return _load_module(
+        f"{PKG_NAME}.geometry.polygon",
+        PKG_ROOT / "geometry" / "polygon.py",
+    )
+
+
+@pytest.fixture(scope="session")
 def geocode_module():
     _ensure_stub_package(f"{PKG_NAME}.geometry")
     return _load_module(
@@ -147,8 +173,8 @@ def location_resolver_module():
 # ── Engine-modules ─────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="session")
-def storm_module():
-    """engine/storm.py heeft geen relatieve imports (alleen stdlib)."""
+def storm_module(polygon_module):
+    """Laadt engine/storm.py nadat de gedeelde footprintgeometrie bestaat."""
     _ensure_stub_package(f"{PKG_NAME}.engine")
     return _load_module(
         f"{PKG_NAME}.engine.storm",
@@ -253,27 +279,47 @@ def raster_components_module():
 
 
 @pytest.fixture(scope="session")
-def kmi_module(observation_module, raster_components_module):
+def kmi_module(
+    observation_module,
+    raster_components_module,
+    bounded_payload_module,
+):
     _ensure_stub_package(f"{PKG_NAME}.providers")
     return _load_module(f"{PKG_NAME}.providers.kmi", PKG_ROOT / "providers" / "kmi.py")
 
 
 @pytest.fixture(scope="session")
-def knmi_module(observation_module, raster_components_module):
+def knmi_module(
+    observation_module,
+    raster_components_module,
+    bounded_payload_module,
+):
     _ensure_stub_package(f"{PKG_NAME}.providers")
     return _load_module(f"{PKG_NAME}.providers.knmi", PKG_ROOT / "providers" / "knmi.py")
 
 
 @pytest.fixture(scope="session")
-def rainviewer_module(observation_module, raster_components_module):
+def rainviewer_module(
+    observation_module,
+    raster_components_module,
+    bounded_payload_module,
+):
     _ensure_stub_package(f"{PKG_NAME}.providers")
     return _load_module(f"{PKG_NAME}.providers.rainviewer", PKG_ROOT / "providers" / "rainviewer.py")
 
 
 @pytest.fixture(scope="session")
-def netatmo_module(observation_module):
+def netatmo_module(observation_module, bounded_payload_module):
     _ensure_stub_package(f"{PKG_NAME}.providers")
     return _load_module(f"{PKG_NAME}.providers.netatmo", PKG_ROOT / "providers" / "netatmo.py")
+
+
+@pytest.fixture(scope="session")
+def netatmo_local_module(distance_module, polygon_module):
+    return _load_module(
+        f"{PKG_NAME}.engine.netatmo_local",
+        PKG_ROOT / "engine" / "netatmo_local.py",
+    )
 
 
 @pytest.fixture(scope="session")
@@ -283,7 +329,7 @@ def blitzortung_module(observation_module):
 
 
 @pytest.fixture(scope="session")
-def eumetsat_li_module(observation_module):
+def eumetsat_li_module(observation_module, bounded_payload_module):
     _ensure_stub_package(f"{PKG_NAME}.providers")
     return _load_module(
         f"{PKG_NAME}.providers.eumetsat_li",
@@ -292,7 +338,7 @@ def eumetsat_li_module(observation_module):
 
 
 @pytest.fixture(scope="session")
-def noaa_goes_glm_module(observation_module):
+def noaa_goes_glm_module(observation_module, bounded_payload_module):
     _ensure_stub_package(f"{PKG_NAME}.providers")
     return _load_module(
         f"{PKG_NAME}.providers.noaa_goes_glm",
@@ -301,7 +347,12 @@ def noaa_goes_glm_module(observation_module):
 
 
 @pytest.fixture(scope="session")
-def dwd_radolan_module(observation_module, base_module, raster_components_module):
+def dwd_radolan_module(
+    observation_module,
+    base_module,
+    raster_components_module,
+    bounded_payload_module,
+):
     _ensure_stub_package(f"{PKG_NAME}.providers")
     return _load_module(
         f"{PKG_NAME}.providers.dwd_radolan",
@@ -319,7 +370,12 @@ def odim_hdf5_module(observation_module, raster_components_module):
 
 
 @pytest.fixture(scope="session")
-def met_office_radar_module(observation_module, base_module, odim_hdf5_module):
+def met_office_radar_module(
+    observation_module,
+    base_module,
+    odim_hdf5_module,
+    bounded_payload_module,
+):
     return _load_module(
         f"{PKG_NAME}.providers.met_office_radar",
         PKG_ROOT / "providers" / "met_office_radar.py",
@@ -327,7 +383,12 @@ def met_office_radar_module(observation_module, base_module, odim_hdf5_module):
 
 
 @pytest.fixture(scope="session")
-def meteofrance_radar_module(observation_module, base_module, odim_hdf5_module):
+def meteofrance_radar_module(
+    observation_module,
+    base_module,
+    odim_hdf5_module,
+    bounded_payload_module,
+):
     return _load_module(
         f"{PKG_NAME}.providers.meteofrance_radar",
         PKG_ROOT / "providers" / "meteofrance_radar.py",
@@ -335,7 +396,7 @@ def meteofrance_radar_module(observation_module, base_module, odim_hdf5_module):
 
 
 @pytest.fixture(scope="session")
-def meteolux_module(observation_module, base_module):
+def meteolux_module(observation_module, base_module, bounded_payload_module):
     return _load_module(
         f"{PKG_NAME}.providers.meteolux",
         PKG_ROOT / "providers" / "meteolux.py",
@@ -343,7 +404,11 @@ def meteolux_module(observation_module, base_module):
 
 
 @pytest.fixture(scope="session")
-def geosphere_at_module(observation_module, base_module):
+def geosphere_at_module(
+    observation_module,
+    base_module,
+    bounded_payload_module,
+):
     return _load_module(
         f"{PKG_NAME}.providers.geosphere_at",
         PKG_ROOT / "providers" / "geosphere_at.py",
@@ -351,7 +416,11 @@ def geosphere_at_module(observation_module, base_module):
 
 
 @pytest.fixture(scope="session")
-def italiameteo_module(observation_module, base_module):
+def italiameteo_module(
+    observation_module,
+    base_module,
+    bounded_payload_module,
+):
     return _load_module(
         f"{PKG_NAME}.providers.italiameteo",
         PKG_ROOT / "providers" / "italiameteo.py",
@@ -359,7 +428,13 @@ def italiameteo_module(observation_module, base_module):
 
 
 @pytest.fixture(scope="session")
-def dpc_radar_module(observation_module, base_module, odim_hdf5_module, raster_components_module):
+def dpc_radar_module(
+    observation_module,
+    base_module,
+    odim_hdf5_module,
+    raster_components_module,
+    bounded_payload_module,
+):
     return _load_module(
         f"{PKG_NAME}.providers.dpc_radar",
         PKG_ROOT / "providers" / "dpc_radar.py",
@@ -367,7 +442,12 @@ def dpc_radar_module(observation_module, base_module, odim_hdf5_module, raster_c
 
 
 @pytest.fixture(scope="session")
-def aemet_radar_module(observation_module, base_module, raster_components_module):
+def aemet_radar_module(
+    observation_module,
+    base_module,
+    raster_components_module,
+    bounded_payload_module,
+):
     return _load_module(
         f"{PKG_NAME}.providers.aemet_radar",
         PKG_ROOT / "providers" / "aemet_radar.py",
@@ -376,7 +456,11 @@ def aemet_radar_module(observation_module, base_module, raster_components_module
 
 @pytest.fixture(scope="session")
 def hsaf_h40b_module(
-    observation_module, base_module, odim_hdf5_module, raster_components_module
+    observation_module,
+    base_module,
+    odim_hdf5_module,
+    raster_components_module,
+    bounded_payload_module,
 ):
     return _load_module(
         f"{PKG_NAME}.providers.hsaf_h40b",
@@ -386,7 +470,11 @@ def hsaf_h40b_module(
 
 @pytest.fixture(scope="session")
 def noaa_goes_rrqpe_module(
-    observation_module, base_module, odim_hdf5_module, raster_components_module
+    observation_module,
+    base_module,
+    odim_hdf5_module,
+    raster_components_module,
+    bounded_payload_module,
 ):
     return _load_module(
         f"{PKG_NAME}.providers.noaa_goes_rrqpe",
@@ -404,8 +492,8 @@ def engine_radar_policy_module():
 
 
 @pytest.fixture(scope="session")
-def open_meteo_module():
-    """open_meteo.py heeft geen relatieve imports naar engine/observation."""
+def open_meteo_module(bounded_payload_module):
+    """Load Open-Meteo with its provider-neutral bounded transport helper."""
     _ensure_stub_package(f"{PKG_NAME}.providers")
     return _load_module(f"{PKG_NAME}.providers.open_meteo", PKG_ROOT / "providers" / "open_meteo.py")
 
@@ -428,12 +516,42 @@ def radar_calibration_module():
     )
 
 
+@pytest.fixture(scope="session")
+def radar_fusion_module(observation_module):
+    _ensure_stub_package(f"{PKG_NAME}.providers")
+    return _load_module(
+        f"{PKG_NAME}.providers.radar_fusion",
+        PKG_ROOT / "providers" / "radar_fusion.py",
+    )
+
+
 @pytest.fixture
 def radar_frame_module():
     """Laadt het zuivere pySTEPS-invoercontract zonder Home Assistant."""
     return _load_module(
         f"{PKG_NAME}.engine.radar_frame",
         PKG_ROOT / "engine" / "radar_frame.py",
+    )
+
+
+@pytest.fixture
+def mcs_store_module():
+    """Laadt de dunne opslagadapter met een minimale HA Store-stub."""
+    homeassistant = _ensure_stub_package("homeassistant")
+    helpers = _ensure_stub_package("homeassistant.helpers")
+    storage = types.ModuleType("homeassistant.helpers.storage")
+
+    class Store:
+        pass
+
+    storage.Store = Store
+    helpers.storage = storage
+    homeassistant.helpers = helpers
+    sys.modules["homeassistant.helpers.storage"] = storage
+    _load_module(f"{PKG_NAME}.const", PKG_ROOT / "const.py")
+    return _load_module(
+        f"{PKG_NAME}.engine.mcs_store",
+        PKG_ROOT / "engine" / "mcs_store.py",
     )
 
 
@@ -454,8 +572,24 @@ def provider_bias_module():
 
 
 @pytest.fixture
-def calibration_store_module(provider_bias_module):
+def calibration_store_module(provider_bias_module, bounded_payload_module):
     return _load_module(
         f"{PKG_NAME}.engine.calibration_store",
         PKG_ROOT / "engine" / "calibration_store.py",
+    )
+
+
+@pytest.fixture
+def durable_processing_module(observation_module):
+    return _load_module(
+        f"{PKG_NAME}.engine.durable_processing",
+        PKG_ROOT / "engine" / "durable_processing.py",
+    )
+
+
+@pytest.fixture
+def virtual_probe_module():
+    return _load_module(
+        f"{PKG_NAME}.engine.virtual_probe",
+        PKG_ROOT / "engine" / "virtual_probe.py",
     )

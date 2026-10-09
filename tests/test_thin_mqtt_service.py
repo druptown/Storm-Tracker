@@ -4,12 +4,53 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 
 import storm_tracker_worker.thin_mqtt_service as mqtt_service
 from storm_tracker_worker.protocol import envelope, encode
 from storm_tracker_worker.thin_mqtt_service import ThinMqttService
+
+
+def test_passage_payload_v2_preserves_status_brackets_nulls_and_provenance():
+    passage = SimpleNamespace(
+        target_id="home", cell_id="cell-a", provider_id="fusion:home",
+        entry_at=1_100.0, exit_at=None,
+        entry_bracket_lower_at=1_080.0, entry_bracket_upper_at=1_120.0,
+        exit_bracket_lower_at=None, exit_bracket_upper_at=None,
+        method="advected_labelled_qpe", predicted_intensity_mm_h=2.4,
+        peak_intensity_mm_h=4.8, fallback_reason=None,
+        horizon_clipped=True, left_censored=False, right_censored=True,
+        coverage_censored=False, interval_ordinal=1,
+        quantity="precipitation_rate", unit="mm/h",
+        field_fingerprint="e" * 64, passage_system_id="system:a",
+        passage_status="confirmed", motion_status="ready",
+        forecast_issue_id="forecast-issue:immutable-a",
+        passage_id="passage:immutable-a-1",
+        motion_confidence="medium", motion_method="system_consensus",
+        motion_reason_codes=(), motion_supporting_methods=("centroid",),
+        motion_agreement_angle_deg=4.0,
+    )
+
+    value = mqtt_service._build_passages_contract(SimpleNamespace(
+        evaluated_at=1_000.0, target_passages=(passage,),
+    ))
+
+    assert value["schema_version"] == 2
+    item = value["items"][0]
+    assert item["status"] == "confirmed"
+    assert item["exit_at"] is None
+    assert item["right_censored"] is True
+    assert item["entry_bracket"] == {"lower_at": 1_080.0, "upper_at": 1_120.0}
+    assert item["exit_bracket"] is None
+    assert item["quantity"] == "precipitation_rate"
+    assert item["unit"] == "mm/h"
+    assert item["forecast_issue_id"] == "forecast-issue:immutable-a"
+    assert item["passage_id"] == "passage:immutable-a-1"
+    assert item["policy_label"] == "provisional_unvalidated"
+    assert item["validation_label"] == "unvalidated"
+    assert item["scenario_outcomes"][0]["exit_bracket"] is None
 
 
 def test_heartbeat_version_tracks_the_installed_worker_package():
@@ -82,6 +123,30 @@ def test_runtime_adapter_catalog_includes_meteolux_validation():
     adapters = mqtt_service._build_provider_adapters(object())
 
     assert "meteolux" in adapters
+
+
+def test_live_runtime_starts_all_due_providers_in_one_parallel_wave(monkeypatch):
+    captured = {}
+
+    class CapturingProviderRuntime:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    class FakeOperationalRuntime:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(mqtt_service, "ThinProviderRuntime", CapturingProviderRuntime)
+    monkeypatch.setattr(mqtt_service, "ThinOperationalRuntime", FakeOperationalRuntime)
+    monkeypatch.setattr(
+        mqtt_service.ThinPostGISSettings,
+        "from_environment",
+        classmethod(lambda cls: None),
+    )
+
+    mqtt_service._build_runtime()
+
+    assert captured["max_parallel"] == len(captured["adapters"])
 
 
 class FakeMqtt:
@@ -236,6 +301,52 @@ async def test_desired_state_job_is_answered_and_wakes_immediate_cycle():
     await service.stop()
 
 
+def test_paho_callback_answers_control_job_while_asyncio_loop_is_stalled():
+    """A CPU-bound weather cycle must not block desired-state control I/O."""
+
+    events = []
+    mqtt = FakeMqtt(events)
+    runtime = SlowRuntime(events)
+    service = ThinMqttService(client=mqtt, runtime=runtime)
+
+    class StalledLoop:
+        def __init__(self):
+            self.callbacks = []
+
+        def call_soon_threadsafe(self, callback):
+            self.callbacks.append(callback)
+
+    stalled_loop = StalledLoop()
+    service._loop = stalled_loop
+    request = envelope(
+        "job_request",
+        job_id="control-during-cycle-1",
+        job_type="desired_state_apply",
+        deadline=time.time() + 30,
+        payload={"desired_state": {"contract": "test"}},
+    )
+
+    service._on_message(
+        mqtt,
+        None,
+        SimpleNamespace(
+            topic="storm_tracker/v1/jobs/request",
+            payload=encode(request),
+        ),
+    )
+
+    statuses = [
+        payload
+        for topic, payload, _, _ in mqtt.published
+        if topic == (
+            "storm_tracker/v1/jobs/control-during-cycle-1/status"
+        )
+    ]
+    assert runtime.has_state is True
+    assert statuses[-1]["state"] == "completed"
+    assert statuses[-1]["result"] == {"status": "activated"}
+
+
 @pytest.mark.asyncio
 async def test_job_subscription_is_reapplied_after_async_connect():
     events = []
@@ -337,6 +448,99 @@ def test_heartbeat_exposes_latest_postgis_projection_for_ha_dashboard():
         "last_success_at": 1_789_924_200.0,
         "last_error_code": None,
     }
+
+
+def test_heartbeat_exposes_provider_statuses_independently_from_weather_snapshot():
+    service = ThinMqttService(
+        client=FakeMqtt([]),
+        runtime=SlowRuntime([]),
+    )
+    service._provider_status_snapshot = {
+        "desired_state_sha256": "d" * 64,
+        "evaluated_at": 1_789_924_200.0,
+        "valid_until": 1_789_924_500.0,
+        "items": [{
+            "provider_id": "radar.opera.dbzh",
+            "display_name": "Opera Radar",
+            "readiness": "ready",
+            "state": "operational",
+            "freshness": "current",
+            "product_valid_at": 1_789_924_180.0,
+            "received_at": 1_789_924_190.0,
+            "error": None,
+            "reason_codes": [],
+        }],
+    }
+
+    heartbeat = json.loads(service._heartbeat())
+
+    assert heartbeat["operational_snapshot_runtime"][
+        "provider_status_snapshot"
+    ] == service._provider_status_snapshot
+
+
+def test_heartbeat_exposes_complete_worker_technical_diagnostics_source():
+    service = ThinMqttService(
+        client=FakeMqtt([]),
+        runtime=SlowRuntime([]),
+    )
+    service._last_snapshot_revision = 17
+    service._last_snapshot_published_at = time.time() - 4.0
+
+    heartbeat = json.loads(service._heartbeat())
+    source = heartbeat["technical_diagnostics"]
+
+    assert source["contract"] == (
+        "stv3-worker-technical-diagnostics-source-v1"
+    )
+    assert source["worker_state"] == "online"
+    assert source["worker_version"] == mqtt_service.WORKER_VERSION
+    assert source["worker_observed_at"] <= time.time()
+    assert source["provider_status"] == "current"
+    assert source["frame_status"] == "current"
+    assert source["cache_status"] == "current"
+    assert source["queue_depth"] == 0
+    assert source["failed_jobs"] == 0
+    assert set(source) == mqtt_service.WORKER_TECHNICAL_SOURCE_FIELDS
+
+
+@pytest.mark.asyncio
+async def test_expired_control_job_failure_does_not_poison_same_job_id_retry():
+    events = []
+    mqtt = FakeMqtt(events)
+    service = ThinMqttService(client=mqtt, runtime=SlowRuntime(events))
+    expired = envelope(
+        "job_request",
+        job_id="control-retry-1",
+        job_type="ping",
+        deadline=time.time() - 1,
+        payload={},
+    )
+    fresh = envelope(
+        "job_request",
+        job_id="control-retry-1",
+        job_type="ping",
+        deadline=time.time() + 30,
+        payload={},
+    )
+
+    await service.handle_message(
+        "storm_tracker/v1/jobs/request", encode(expired)
+    )
+    await service.handle_message(
+        "storm_tracker/v1/jobs/request", encode(fresh)
+    )
+
+    statuses = [
+        payload
+        for topic, payload, _, _ in mqtt.published
+        if topic == "storm_tracker/v1/jobs/control-retry-1/status"
+    ]
+    assert [status["state"] for status in statuses] == [
+        "failed",
+        "completed",
+    ]
+    assert statuses[-1]["result"] == {"pong": True}
 
 
 @pytest.mark.asyncio
