@@ -239,6 +239,47 @@ def _legacy_v4_payload(config: RawCaptureServiceConfig) -> bytes:
     return _canonical(mapping)
 
 
+def _previous_awn_payload(config: RawCaptureServiceConfig) -> bytes:
+    """Reconstruct the exact pre-removal AWN bootstrap for one migration."""
+    mapping = config.to_mapping()
+    acquisition = mapping.get("acquisition")
+    if not isinstance(acquisition, dict):
+        raise WorkerOnlyBootstrapError("previous AWN bootstrap mapping invalid")
+    workload_ids = acquisition.get("allowed_workload_ids")
+    capacity = acquisition.get("capacity_profile")
+    if not isinstance(workload_ids, list) or not isinstance(capacity, dict):
+        raise WorkerOnlyBootstrapError("previous AWN bootstrap mapping invalid")
+    providers = capacity.get("providers")
+    global_max_bytes = capacity.get("global_max_bytes")
+    global_max_entries = capacity.get("global_max_entries")
+    if (
+        not isinstance(providers, list)
+        or not isinstance(global_max_bytes, int)
+        or not isinstance(global_max_entries, int)
+        or "ground.awn.api" in workload_ids
+        or any(
+            isinstance(item, dict) and item.get("provider") == "awn"
+            for item in providers
+        )
+    ):
+        raise WorkerOnlyBootstrapError("previous AWN bootstrap mapping invalid")
+    acquisition["allowed_workload_ids"] = sorted(
+        [*workload_ids, "ground.awn.api"]
+    )
+    capacity["providers"] = sorted(
+        [
+            *providers,
+            {
+                "max_bytes": global_max_bytes,
+                "max_entries": global_max_entries,
+                "provider": "awn",
+            },
+        ],
+        key=lambda item: str(item["provider"]),
+    )
+    return _canonical(mapping)
+
+
 def _publish_identical(
     path: Path,
     payload: bytes,
@@ -313,6 +354,7 @@ def materialize_worker_only_runtime(root: str | Path = DEFAULT_ROOT) -> dict[str
         raw_capacity_bytes=_FAILED_INTERMEDIATE_RAW_CAPACITY_BYTES,
         retained_payload_claim_bytes=None,
     ))
+    previous_awn_payload = _previous_awn_payload(config)
     config_path = Path(root) / CONFIG_FILENAME
     _publish_identical(
         config_path,
@@ -320,6 +362,7 @@ def materialize_worker_only_runtime(root: str | Path = DEFAULT_ROOT) -> dict[str
         accepted_previous=(
             original_legacy_payload,
             failed_intermediate_payload,
+            previous_awn_payload,
         ),
     )
     return {
