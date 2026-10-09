@@ -11,11 +11,9 @@ from typing import Any
 
 from .protocol import decode, encode, envelope, job_payload, topic
 from .thin_operational_runtime import ThinOperationalRuntime
-from .thin_blitzortung import ThinBlitzortungFeed
 from .thin_postgis import ThinPostGISSettings, ThinPostGISWriter
 from .thin_provider_adapters import (
     AioHttpFetcher,
-    BlitzortungAdapter,
     DwdRadolanAdapter,
     KmiRadarAdapter,
     KnmiRadarAdapter,
@@ -41,14 +39,12 @@ class ThinMqttService:
         topic_root: str = "storm_tracker/v1",
         heartbeat_seconds: float = 10.0,
         cycle_seconds: float = 60.0,
-        lightning_feed: Any | None = None,
     ) -> None:
         self.client = client
         self.runtime = runtime
         self.topic_root = topic_root.rstrip("/")
         self.heartbeat_seconds = max(2.0, float(heartbeat_seconds))
         self.cycle_seconds = max(2.0, float(cycle_seconds))
-        self.lightning_feed = lightning_feed
         self._wake = asyncio.Event()
         self._stop = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
@@ -56,7 +52,6 @@ class ThinMqttService:
         self._job_results: dict[str, dict[str, Any]] = {}
         self._last_snapshot_revision = 0
         self._last_error: str | None = None
-        self._last_cycle_summary: tuple[Any, ...] | None = None
 
     def _heartbeat(self, state: str = "online") -> bytes:
         return encode(envelope(
@@ -95,9 +90,6 @@ class ThinMqttService:
                 keepalive=60,
             )
         self.client.loop_start()
-        if self.lightning_feed is not None:
-            self.lightning_feed.update_targets(self.runtime.targets)
-            self.lightning_feed.start()
         self.client.publish(
             topic(self.topic_root, "worker/status"),
             self._heartbeat("online"),
@@ -134,8 +126,6 @@ class ThinMqttService:
             task.cancel()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
-        if self.lightning_feed is not None:
-            self.lightning_feed.stop()
         self.client.publish(
             topic(self.topic_root, "worker/status"),
             self._heartbeat("offline"),
@@ -169,33 +159,6 @@ class ThinMqttService:
                 payload = encode_control_envelope(result.snapshot)
                 self._last_snapshot_revision = int(result.snapshot["revision"])
                 self._last_error = None
-                provider_items = result.snapshot.get("providers", {}).get("items", [])
-                provider_summary = tuple(
-                    sorted(
-                        (
-                            str(item.get("provider_id")),
-                            str(item.get("state")),
-                            ",".join(str(code) for code in item.get("reason_codes", [])),
-                        )
-                        for item in provider_items
-                        if isinstance(item, dict)
-                    )
-                )
-                cycle_summary = (
-                    len(result.fusion.observations),
-                    provider_summary,
-                    result.postgis.status,
-                    result.postgis.last_error_code,
-                )
-                if cycle_summary != self._last_cycle_summary:
-                    _LOGGER.info(
-                        "Dunne cyclus: observaties=%d providers=%s postgis=%s fout=%s",
-                        cycle_summary[0],
-                        provider_summary,
-                        result.postgis.status,
-                        result.postgis.last_error_code,
-                    )
-                    self._last_cycle_summary = cycle_summary
                 self.client.publish(
                     topic(self.topic_root, "operational/snapshot"),
                     payload,
@@ -246,8 +209,6 @@ class ThinMqttService:
                 result = self.runtime.desired_state_snapshot()
             elif job_type == "desired_state_apply":
                 result = self.runtime.apply_desired_state(values["desired_state"])
-                if self.lightning_feed is not None:
-                    self.lightning_feed.update_targets(self.runtime.targets)
                 self._wake.set()
             elif job_type == "ping":
                 result = {"pong": True}
@@ -286,8 +247,7 @@ class ThinMqttService:
         )
 
 
-def _build_runtime() -> tuple[ThinOperationalRuntime, BlitzortungAdapter]:
-    blitzortung = BlitzortungAdapter()
+def _build_runtime() -> ThinOperationalRuntime:
     adapters = {
         "kmi_radar": KmiRadarAdapter(
             forecast_url=os.getenv("STV3_KMI_FORECAST_URL") or None,
@@ -299,7 +259,6 @@ def _build_runtime() -> tuple[ThinOperationalRuntime, BlitzortungAdapter]:
         "open_meteo": OpenMeteoAdapter(),
         "metar": MetarAdapter(),
         "netatmo": NetatmoAdapter(),
-        "blitzortung": blitzortung,
     }
     provider_runtime = ThinProviderRuntime(
         adapters=adapters,
@@ -310,12 +269,9 @@ def _build_runtime() -> tuple[ThinOperationalRuntime, BlitzortungAdapter]:
     )
     settings = ThinPostGISSettings.from_environment()
     writer = ThinPostGISWriter(settings) if settings is not None else None
-    return (
-        ThinOperationalRuntime(
-            provider_runtime=provider_runtime,
-            postgis_writer=writer,
-        ),
-        blitzortung,
+    return ThinOperationalRuntime(
+        provider_runtime=provider_runtime,
+        postgis_writer=writer,
     )
 
 
@@ -328,18 +284,9 @@ async def _async_main() -> None:
         client.username_pw_set(username, os.getenv("STV3_MQTT_PASSWORD", ""))
     if os.getenv("STV3_MQTT_TLS", "false").lower() in {"1", "true", "yes", "on"}:
         client.tls_set()
-    runtime, blitzortung = _build_runtime()
-    lightning_client = mqtt.Client(
-        mqtt.CallbackAPIVersion.VERSION1,
-        protocol=mqtt.MQTTv311,
-    )
     service = ThinMqttService(
         client=client,
-        runtime=runtime,
-        lightning_feed=ThinBlitzortungFeed(
-            client=lightning_client,
-            adapter=blitzortung,
-        ),
+        runtime=_build_runtime(),
         heartbeat_seconds=float(os.getenv("STV3_HEARTBEAT_SECONDS", "10")),
         cycle_seconds=float(os.getenv("STV3_PROVIDER_CYCLE_SECONDS", "60")),
     )
