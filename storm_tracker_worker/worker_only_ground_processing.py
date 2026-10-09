@@ -2,7 +2,7 @@
 
 The provider-specific decoders already own exact raw-byte verification and
 append-only canonical-ground persistence.  This module is the deliberately
-small live routing boundary: it selects only the three workloads whose
+small live routing boundary: it selects only the four workloads whose
 canonical decoders exist and returns their immutable receipts.  It performs no
 wet/dry inference, consensus, forecast, admission or publication.
 """
@@ -16,6 +16,7 @@ from .canonical_ground_evidence_store import (
     CanonicalGroundEvidenceStore,
     GroundObservationReceipt,
 )
+from .kmi_aws_ground_decoder import decode_kmi_aws_ground_capture
 from .metar_ground_evidence import (
     MetarGroundTargetScope,
     decode_metar_ground_capture,
@@ -27,6 +28,7 @@ from .synoptic_ground_decoder import decode_synoptic_ground_capture
 
 
 GROUND_WORKLOAD_IDS = frozenset({
+    "ground.kmi.aws_10min",
     "ground.metar.global",
     "ground.netatmo.region",
     "ground.synoptic.region",
@@ -70,7 +72,14 @@ def decode_worker_only_ground_receipts(
         raw_artifact_reader=raw_store,
         clock=clock,
     )
-    if workload_id == "ground.metar.global":
+    if workload_id == "ground.kmi.aws_10min":
+        result = decode_kmi_aws_ground_capture(
+            capture_id,
+            raw_store=raw_store,
+            ground_store=ground_store,
+        )
+        receipts = result.fact_receipts
+    elif workload_id == "ground.metar.global":
         metar_scopes = tuple(
             MetarGroundTargetScope(
                 target_id=scope.target.target_id,

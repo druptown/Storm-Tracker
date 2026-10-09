@@ -5,8 +5,8 @@ never opens their store, reads raw provider bytes, performs network access, or
 turns a candidate into an operational rain/dry claim.  Every configured
 ground workload and every requested target receives an explicit result.
 
-METAR, Netatmo and Synoptic currently have canonical receipt producers.  KMI
-AWS and AWN have exact raw capture paths but no certified canonical ground
+KMI AWS, METAR, Netatmo and Synoptic currently have canonical receipt
+producers. AWN has an exact raw capture path but no certified canonical ground
 decoder, so applicable targets remain explicitly blocked here.
 """
 from __future__ import annotations
@@ -24,6 +24,8 @@ from typing import Any
 
 from . import metar_ground_evidence
 from . import metar_native
+from . import kmi_aws_ground_decoder
+from . import kmi_opendata_raw
 from . import netatmo_ground_decoder
 from . import netatmo_native
 from . import synoptic_ground_decoder
@@ -135,13 +137,19 @@ GROUND_DECODER_BINDINGS = MappingProxyType({
     ),
     "ground.kmi.aws_10min": GroundDecoderBinding(
         source_id="ground.kmi.aws_10min",
-        fact_provider=None,
-        fact_product=None,
-        decoder_identity=None,
-        decoder_version=None,
-        semantics_profile="exact_raw_wfs_response_not_ground_decoded",
-        maximum_age_ms=None,
-        blocked_reason="canonical_ground_decoder_unavailable",
+        fact_provider="kmi",
+        fact_product=kmi_opendata_raw.AWS_10MIN_CAPTURE_PRODUCT,
+        decoder_identity=(
+            kmi_aws_ground_decoder.KMI_AWS_GROUND_DECODER_IDENTITY
+        ),
+        decoder_version=(
+            kmi_aws_ground_decoder.KMI_AWS_GROUND_DECODER_VERSION
+        ),
+        semantics_profile=(
+            kmi_aws_ground_decoder.KMI_AWS_PRECIPITATION_SEMANTICS
+        ),
+        maximum_age_ms=20 * 60 * 1000,
+        blocked_reason=None,
     ),
     "ground.metar.global": GroundDecoderBinding(
         source_id="ground.metar.global",

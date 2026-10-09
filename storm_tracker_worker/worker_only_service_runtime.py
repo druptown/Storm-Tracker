@@ -1306,6 +1306,28 @@ class WorkerOnlyServiceRuntime:
                     maintenance_snapshot_published
                     and quantitative_authority_changed
                 )
+                ground_refresh_completed = False
+                if (
+                    quantitative_authority_changed
+                    and self._ground_processor is not None
+                    and self._ground_evidence_path is not None
+                ):
+                    # Startup deliberately opens MQTT admission before doing
+                    # science replay.  The first normal tick must therefore
+                    # restore every retained canonical-ground capture; without
+                    # this call restart-persistent raw KMI/Netatmo/METAR data
+                    # remains visible but never reaches the ground slice.
+                    stage = "ground_refresh"
+                    _result, ground_snapshot_published = (
+                        await self._await_with_snapshot_maintenance(
+                            self._refresh_ground_captures()
+                        )
+                    )
+                    maintenance_snapshot_published = (
+                        ground_snapshot_published
+                        or maintenance_snapshot_published
+                    )
+                    ground_refresh_completed = True
                 if (
                     quantitative_authority_changed
                     and self._snapshot_requires_restaging()
@@ -1354,7 +1376,8 @@ class WorkerOnlyServiceRuntime:
                 assert self._output is not None
                 stage = "snapshot_stage"
                 restage = (
-                    (changed and not authority_snapshot_published)
+                    ground_refresh_completed
+                    or (changed and not authority_snapshot_published)
                     or self._snapshot_requires_restaging()
                     or (
                         authority_snapshot_published
