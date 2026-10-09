@@ -32,7 +32,10 @@ from .thin_region_planner import ThinRegionPlan, ThinRegionPlanner
 from .tracking_core.operational_snapshot import MAX_UI_STORM_SUMMARIES, validate_snapshot
 
 
-SNAPSHOT_TTL_SECONDS = 120.0
+# A full applicable-provider batch can legitimately take several minutes.
+# Use the complete five-minute authority window allowed by the shared worker/HA
+# contract; source observations retain their own, stricter freshness checks.
+SNAPSHOT_TTL_SECONDS = 300.0
 MAX_GEOJSON_PAYLOAD_BYTES = 900_000
 MAX_TOTAL_RADAR_OVERLAY_RUNS = 2_000
 SNAPSHOT_REVISION_EPOCH_SECONDS = 1_577_836_800  # 2020-01-01T00:00:00Z
