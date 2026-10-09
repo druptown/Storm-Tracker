@@ -361,10 +361,15 @@ def project_radar_field(
 ) -> RegionalRadarLayer:
     """Vector-project one native rain-rate field onto one region.
 
-    Sampling the complete target grid in one pyproj/NumPy pass avoids the
-    former source-pixel polygon loop.  The nearest native pixel remains the
-    validity authority (so nodata cannot bleed into the fused field), while
-    valid neighbours are bilinearly weighted for a stable rain rate.
+    A bounded stratified area sample replaces both the former source-pixel
+    polygon loop and target-centre interpolation.  The sample density follows
+    the source/target resolution ratio, so downsampling preserves small wet
+    source cells instead of silently dropping them.  Projection remains
+    vectorized per stratum and bounded to 64 passes over the target grid.
+
+    The nearest native pixel remains the validity authority, as required by
+    the raster contract.  Valid sampled area supplies the rain-rate average
+    and target-cell coverage used by fusion weighting.
     """
     source_crs = _metric_projected_crs(field.crs)
     target_crs = _metric_projected_crs(grid.crs)
@@ -379,17 +384,6 @@ def project_radar_field(
     nearest_x, nearest_y = to_source.transform(target_center_x, target_center_y)
     if not np.all(np.isfinite(nearest_x)) or not np.all(np.isfinite(nearest_y)):
         raise RegionalRadarProjectionError("coordinate_transform_failed")
-
-    source_columns = (
-        (nearest_x - field.origin_x_m) / field.x_resolution_m - 0.5
-    )
-    source_rows = (
-        (field.origin_y_m - nearest_y) / field.y_resolution_m - 0.5
-    )
-    lower_columns = np.floor(source_columns).astype(np.int64)
-    lower_rows = np.floor(source_rows).astype(np.int64)
-    column_fraction = np.clip(source_columns - lower_columns, 0.0, 1.0)
-    row_fraction = np.clip(source_rows - lower_rows, 0.0, 1.0)
 
     nearest_columns = np.floor(
         (nearest_x - field.origin_x_m) / field.x_resolution_m
@@ -410,38 +404,67 @@ def project_radar_field(
         nearest_columns[nearest_in_bounds],
     ]
 
-    valid_weight = np.zeros(shape, dtype=np.float64)
-    rain_weighted = np.zeros(shape, dtype=np.float64)
-    for row_offset, column_offset, weights in (
-        (0, 0, (1.0 - row_fraction) * (1.0 - column_fraction)),
-        (0, 1, (1.0 - row_fraction) * column_fraction),
-        (1, 0, row_fraction * (1.0 - column_fraction)),
-        (1, 1, row_fraction * column_fraction),
-    ):
-        rows = lower_rows + row_offset
-        columns = lower_columns + column_offset
-        in_bounds = (
-            (rows >= 0)
-            & (rows < source_height)
-            & (columns >= 0)
-            & (columns < source_width)
+    sample_columns = min(
+        8,
+        max(2, math.ceil(grid.x_resolution_m / field.x_resolution_m)),
+    )
+    sample_rows = min(
+        8,
+        max(2, math.ceil(grid.y_resolution_m / field.y_resolution_m)),
+    )
+    sample_total = sample_rows * sample_columns
+    support_count = np.zeros(shape, dtype=np.uint8)
+    valid_count = np.zeros(shape, dtype=np.uint8)
+    rain_sum = np.zeros(shape, dtype=np.float64)
+    for sample_row in range(sample_rows):
+        row_fraction = (sample_row + 0.5) / sample_rows
+        target_y = (
+            grid.origin_y_m
+            - (np.arange(grid.height, dtype=float) + row_fraction)
+            * grid.y_resolution_m
         )
-        safe_rows = np.clip(rows, 0, source_height - 1)
-        safe_columns = np.clip(columns, 0, source_width - 1)
-        source_valid = in_bounds & field.valid_mask[safe_rows, safe_columns]
-        effective_weight = np.where(source_valid, weights, 0.0)
-        valid_weight += effective_weight
-        rain_weighted += effective_weight * np.where(
-            source_valid,
-            field.rain_rate_mm_h[safe_rows, safe_columns],
-            0.0,
-        )
+        for sample_column in range(sample_columns):
+            column_fraction = (sample_column + 0.5) / sample_columns
+            target_x = (
+                grid.origin_x_m
+                + (np.arange(grid.width, dtype=float) + column_fraction)
+                * grid.x_resolution_m
+            )
+            sampled_x, sampled_y = np.meshgrid(target_x, target_y)
+            source_x, source_y = to_source.transform(sampled_x, sampled_y)
+            if (
+                not np.all(np.isfinite(source_x))
+                or not np.all(np.isfinite(source_y))
+            ):
+                raise RegionalRadarProjectionError("coordinate_transform_failed")
+            columns = np.floor(
+                (source_x - field.origin_x_m) / field.x_resolution_m
+            ).astype(np.int64)
+            rows = np.floor(
+                (field.origin_y_m - source_y) / field.y_resolution_m
+            ).astype(np.int64)
+            in_bounds = (
+                (rows >= 0)
+                & (rows < source_height)
+                & (columns >= 0)
+                & (columns < source_width)
+            )
+            safe_rows = np.clip(rows, 0, source_height - 1)
+            safe_columns = np.clip(columns, 0, source_width - 1)
+            source_valid = in_bounds & field.valid_mask[safe_rows, safe_columns]
+            support_count += in_bounds
+            valid_count += source_valid
+            rain_sum += np.where(
+                source_valid,
+                field.rain_rate_mm_h[safe_rows, safe_columns],
+                0.0,
+            )
 
-    support_mask = nearest_in_bounds
-    valid_mask = nearest_valid & (valid_weight > _AREA_EPSILON_M2)
+    support_mask = support_count > 0
+    valid_mask = nearest_valid & (valid_count > 0)
     rain_rate = np.full(shape, np.nan, dtype=np.float64)
-    rain_rate[valid_mask] = rain_weighted[valid_mask] / valid_weight[valid_mask]
-    coverage_fraction = np.clip(valid_weight, 0.0, 1.0)
+    rain_rate[valid_mask] = rain_sum[valid_mask] / valid_count[valid_mask]
+    coverage_fraction = valid_count.astype(np.float64) / sample_total
     return RegionalRadarLayer(
         provider_id=field.provider_id,
         product_id=field.product_id,
