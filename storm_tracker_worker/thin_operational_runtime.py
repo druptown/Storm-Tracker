@@ -15,7 +15,6 @@ from .tracking_core.operational_snapshot import validate_snapshot
 
 
 SNAPSHOT_TTL_SECONDS = 120.0
-SNAPSHOT_REVISION_EPOCH_SECONDS = 1_577_836_800  # 2020-01-01T00:00:00Z
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,14 +52,9 @@ class ThinOperationalRuntime:
         self._latest_provider_results: dict[str, Any] = {}
         self._nowcast = ThinNowcastRuntime(targets={})
         # A worker App restart must not reset revisions below the snapshot still
-        # cached by Home Assistant. Seconds since a recent fixed epoch fit the
-        # snapshot contract's 1e9 counter ceiling. The service runs no faster
-        # than once every two seconds, so a restarted seed advances faster than
-        # the in-process counter it replaces.
-        self._revision = max(
-            0,
-            int(float(self._clock())) - SNAPSHOT_REVISION_EPOCH_SECONDS,
-        )
+        # cached by Home Assistant. Epoch milliseconds leave ample room for
+        # per-cycle increments while remaining inside the signed 64-bit limit.
+        self._revision = max(0, int(float(self._clock()) * 1000.0))
         self._failed_cycles = 0
 
     @property

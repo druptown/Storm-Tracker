@@ -2,7 +2,7 @@
   "kind": "recovered_archive_source",
   "component": "worker",
   "version": "1.18.0",
-  "source_id": "3f18d4d299968b31def9e9ba3d3f26d7a13d43db3999b3d3914253a18c646ec3",
+  "source_id": "597225372ed6b7d025a8a33323fff52b2f9e1174b247b7901151fb57a664e200",
   "recovered_on": "2026-10-09",
   "files": [
     {
@@ -1034,8 +1034,8 @@
     {
       "path": "thin_operational_runtime.py",
       "mode": 420,
-      "sha256": "7343f999a9acf7ce03af5ab1f766233ad1e80df8eb6cf95ec603e6d048de4068",
-      "size": 16843
+      "sha256": "0b4b79701484034f2bc4c1d819172ecde0e45803e52e3dd621136db85ff43514",
+      "size": 16583
     },
     {
       "path": "thin_postgis.py",
@@ -1473,8 +1473,8 @@
   "artifacts": [
     {
       "filename": "storm_tracker_worker_v1.18.0_deploy.tar.gz",
-      "archive_sha256": "887e43c909ca0b71af5ebfbc79c88dc813a2e866b343a5abf763496becc25887",
-      "bytes": 2301547,
+      "archive_sha256": "b1acd06298a8cd57af338387b33650d6a56ffc91c027a5b264ae41faa35d108e",
+      "bytes": 2301420,
       "evidence_checks": [
         {
           "manifest": "storm_tracker_release_v1.14.110_worker_v1.18.0_evidence.json",
