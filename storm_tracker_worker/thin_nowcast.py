@@ -38,6 +38,12 @@ class StormCell:
     speed_kmh: float
     heading_deg: float | None
     motion_ready: bool
+    motion_status: str = "indeterminate"
+    motion_confidence: str = "indeterminate"
+    motion_method: str | None = None
+    motion_reason_codes: tuple[str, ...] = ()
+    motion_supporting_methods: tuple[str, ...] = ()
+    motion_agreement_angle_deg: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -55,6 +61,12 @@ class StormCell:
             "speed_kmh": self.speed_kmh,
             "heading_deg": self.heading_deg,
             "motion_ready": self.motion_ready,
+            "motion_status": self.motion_status,
+            "motion_confidence": self.motion_confidence,
+            "motion_method": self.motion_method,
+            "motion_reason_codes": list(self.motion_reason_codes),
+            "motion_supporting_methods": list(self.motion_supporting_methods),
+            "motion_agreement_angle_deg": self.motion_agreement_angle_deg,
         }
 
 
@@ -300,11 +312,10 @@ class ThinNowcastRuntime:
                 north_kmh = track.vy_m_s * 3.6
                 heading = track.heading_deg
                 claimed.add(previous.cell_id)
-            motion_ready = bool(
-                previous is not None
-                and explicit_id is not None
-                and previous.cell_id == f"{observation.provider_id}:{explicit_id}"
-            )
+            # Polygon-only observations expose no local raster flow.  Their
+            # two-centroid displacement remains useful diagnostics, but is not
+            # sufficient evidence for a direction line or target passage.
+            motion_ready = False
             cells.append(StormCell(
                 cell_id=cell_id,
                 provider_id=observation.provider_id,
@@ -332,6 +343,10 @@ class ThinNowcastRuntime:
                 speed_kmh=math.hypot(east_kmh, north_kmh),
                 heading_deg=heading,
                 motion_ready=motion_ready,
+                motion_status="indeterminate",
+                motion_confidence="indeterminate",
+                motion_method=None,
+                motion_reason_codes=("optical_flow_unavailable",),
             ))
             frames.append(current)
 

@@ -31,6 +31,10 @@ from .tracking_core.engine.lucas_kanade_flow import (
 from .tracking_core.engine.recursive_track_estimator import (
     RecursiveTrackEstimatorPolicy,
 )
+from .tracking_core.engine.motion_consensus import (
+    MotionConsensusResult,
+    build_transition_motion_consensus,
+)
 from .tracking_core.engine.weather_system_grouping import (
     WeatherSystemGroupingPolicy,
 )
@@ -152,6 +156,12 @@ class RadarTrack:
     velocity_north_kmh: float
     motion_ready: bool
     geometry: dict[str, Any]
+    motion_status: str
+    motion_confidence: str
+    motion_method: str | None
+    motion_reason_codes: tuple[str, ...]
+    motion_supporting_methods: tuple[str, ...]
+    motion_agreement_angle_deg: float | None
 
 
 def _footprint_geometry(
@@ -223,6 +233,10 @@ class ThinRadarTracker:
     def __init__(self) -> None:
         self._policy = _thin_tracking_policy()
         self._states: dict[tuple[str, str], CellTrackEngineState] = {}
+        self._motion_consensus: dict[
+            tuple[str, str],
+            dict[str, MotionConsensusResult],
+        ] = {}
 
     def advance(
         self,
@@ -244,6 +258,9 @@ class ThinRadarTracker:
             )
         result = advance_cell_track_engine(state, prepared.frame, self._policy)
         self._states[key] = result.next_state
+        self._motion_consensus[key] = dict(
+            build_transition_motion_consensus(result)
+        )
         return result
 
     def tracks(self, field: ThinRadarField, target_id: str) -> tuple[RadarTrack, ...]:
@@ -251,6 +268,9 @@ class ThinRadarTracker:
         if state is None or state.last_frame is None:
             return ()
         inverse = Transformer.from_crs(field.crs, "EPSG:4326", always_xy=True)
+        consensus_by_track = self._motion_consensus.get(
+            (field.provider_id, target_id), {}
+        )
         tracks: list[RadarTrack] = []
         for track in state.ledger.tracks:
             if track.lifecycle_state == "ended":
@@ -259,12 +279,21 @@ class ThinRadarTracker:
             x_m, y_m = estimate.x_m, estimate.y_m
             longitude, latitude = inverse.transform(x_m, y_m)
             hierarchy = state.hierarchy(track.track_id)
+            consensus = consensus_by_track.get(track.track_id)
             motion_ready = bool(
-                track.lifecycle_state == "confirmed"
-                and track.sample_count >= 2
-                and track.latest_detection.valid_at == state.last_frame.valid_at
-                and estimate.latest_interval_vx_m_s is not None
-                and estimate.latest_interval_vy_m_s is not None
+                consensus is not None
+                and consensus.status in {
+                    "ready_high", "ready_medium", "fallback", "stationary",
+                }
+                and consensus.confidence in {"high", "medium"}
+                and consensus.vx_m_s is not None
+                and consensus.vy_m_s is not None
+            )
+            velocity_east_kmh = (
+                float(consensus.vx_m_s) * 3.6 if motion_ready else 0.0
+            )
+            velocity_north_kmh = (
+                float(consensus.vy_m_s) * 3.6 if motion_ready else 0.0
             )
             tracks.append(RadarTrack(
                 track_id=track.track_id,
@@ -272,13 +301,35 @@ class ThinRadarTracker:
                 observed_at=estimate.valid_at,
                 latitude=float(latitude), longitude=float(longitude),
                 rain_rate_mm_h=float(hierarchy.maximum_value),
-                velocity_east_kmh=estimate.vx_m_s * 3.6,
-                velocity_north_kmh=estimate.vy_m_s * 3.6,
+                velocity_east_kmh=velocity_east_kmh,
+                velocity_north_kmh=velocity_north_kmh,
                 motion_ready=motion_ready,
                 geometry=_footprint_geometry(
                     hierarchy.footprint_pixels,
                     state.last_frame.grid,
                     inverse,
+                ),
+                motion_status=(
+                    "indeterminate" if consensus is None else consensus.status
+                ),
+                motion_confidence=(
+                    "indeterminate"
+                    if consensus is None
+                    else consensus.confidence
+                ),
+                motion_method=(
+                    None if consensus is None else consensus.selected_method
+                ),
+                motion_reason_codes=(
+                    ("motion_consensus_unavailable",)
+                    if consensus is None
+                    else consensus.reason_codes
+                ),
+                motion_supporting_methods=(
+                    () if consensus is None else consensus.supporting_methods
+                ),
+                motion_agreement_angle_deg=(
+                    None if consensus is None else consensus.agreement_angle_deg
                 ),
             ))
         return tuple(tracks)

@@ -868,6 +868,14 @@ class ThinOperationalRuntime:
                     speed_kmh=speed,
                     heading_deg=heading,
                     motion_ready=item.motion_ready,
+                    motion_status=item.motion_status,
+                    motion_confidence=item.motion_confidence,
+                    motion_method=item.motion_method,
+                    motion_reason_codes=item.motion_reason_codes,
+                    motion_supporting_methods=item.motion_supporting_methods,
+                    motion_agreement_angle_deg=(
+                        item.motion_agreement_angle_deg
+                    ),
                 ))
 
         for region in region_plan.regions:
@@ -1082,6 +1090,16 @@ class ThinOperationalRuntime:
                     "speed_kmh": cell.speed_kmh,
                     "heading_deg": cell.heading_deg,
                     "motion_ready": cell.motion_ready,
+                    "motion_status": cell.motion_status,
+                    "motion_confidence": cell.motion_confidence,
+                    "motion_method": cell.motion_method,
+                    "motion_reason_codes": list(cell.motion_reason_codes),
+                    "motion_supporting_methods": list(
+                        cell.motion_supporting_methods
+                    ),
+                    "motion_agreement_angle_deg": (
+                        cell.motion_agreement_angle_deg
+                    ),
                     "provider_id": cell.provider_id,
                     "observed_at": cell.observed_at,
                 },
@@ -1120,6 +1138,12 @@ class ThinOperationalRuntime:
                     "speed_kmh": cell.speed_kmh,
                     "heading_deg": cell.heading_deg,
                     "motion_model": "linear",
+                    "motion_status": cell.motion_status,
+                    "motion_confidence": cell.motion_confidence,
+                    "motion_method": cell.motion_method,
+                    "motion_agreement_angle_deg": (
+                        cell.motion_agreement_angle_deg
+                    ),
                 },
             })
             cell_feature_groups.append((
@@ -1501,7 +1525,11 @@ class ThinOperationalRuntime:
             "max_dbz": cell.reflectivity_dbz,
             "area_km2": None,
             "product_valid_at": cell.observed_at,
-            "reason_codes": [] if cell.motion_ready else ["motion_not_ready"],
+            "reason_codes": (
+                list(cell.motion_reason_codes)
+                if cell.motion_reason_codes
+                else [] if cell.motion_ready else ["motion_not_ready"]
+            ),
         } for cell in nowcast.storm_cells]
         storm_items.sort(key=lambda item: item["storm_id"])
 
