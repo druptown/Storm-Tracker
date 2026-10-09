@@ -2249,7 +2249,7 @@ async def _async_setup_runtime(
     )
     durable_processing_store = DurableProcessingStore(
         calibration_store.path,
-        build_id="integration-1.14.137-worker-1.18.45",
+        build_id="integration-1.14.138-worker-1.18.46",
     )
     durable_processing_stats = await hass.async_add_executor_job(
         durable_processing_store.initialize
