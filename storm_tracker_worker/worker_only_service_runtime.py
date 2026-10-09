@@ -1390,6 +1390,10 @@ class WorkerOnlyServiceRuntime:
     ) -> None:
         """Decode one exact Open-Meteo capture for the same desired state."""
 
+        if not desired.settings.model_guidance_enabled:
+            self._model_guidance.clear()
+            self._model_guidance_errors.pop(OPENMETEO_SOURCE_ID, None)
+            return
         if (
             self._capture_desired_state_sha256.get(OPENMETEO_SOURCE_ID)
             != desired.state_sha256
