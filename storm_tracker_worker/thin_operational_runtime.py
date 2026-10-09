@@ -749,21 +749,30 @@ class ThinOperationalRuntime:
     def _scope_provider_results(
         results: Mapping[str, Any],
         region_plan: ThinRegionPlan,
+        *,
+        ground_radius_km: float | None = None,
     ) -> dict[str, Any]:
-        target_ids = {target.target_id for target in region_plan.targets}
+        targets = {target.target_id: target for target in region_plan.targets}
+
+        def applicable(observation):
+            if observation.target_id is None:
+                return region_plan.accepts_position(observation.latitude, observation.longitude)
+            target = targets.get(observation.target_id)
+            if target is None:
+                return False
+            radius = target.observation_radius_km
+            if observation.metadata.get("station_id") and ground_radius_km is not None:
+                radius = ground_radius_km
+            return _distance_km(
+                target.latitude, target.longitude, observation.latitude, observation.longitude,
+            ) <= radius
+
         scoped: dict[str, Any] = {}
         for provider_id, result in results.items():
             observations = tuple(
                 observation
                 for observation in result.observations
-                if (
-                    observation.target_id in target_ids
-                    if observation.target_id is not None
-                    else region_plan.accepts_position(
-                        observation.latitude,
-                        observation.longitude,
-                    )
-                )
+                if applicable(observation)
             )
             scoped[provider_id] = (
                 result
@@ -809,6 +818,7 @@ class ThinOperationalRuntime:
         fresh_results = self._scope_provider_results(
             dict(await self._providers.fetch(requests)),
             region_plan,
+            ground_radius_km=state.settings.ground_radius_km,
         )
         if requests:
             _LOGGER.info(
@@ -817,6 +827,12 @@ class ThinOperationalRuntime:
                 time.monotonic() - cycle_started,
             )
         self._latest_provider_results.update(fresh_results)
+        # Target IDs survive relocation. Re-check retained measurements even
+        # when the provider is not due, before fusion/map/PostGIS use them.
+        self._latest_provider_results = self._scope_provider_results(
+            self._latest_provider_results, region_plan,
+            ground_radius_km=state.settings.ground_radius_km,
+        )
         fusion = fuse_observations(
             self._latest_provider_results,
             evaluated_at=float(self._clock()),

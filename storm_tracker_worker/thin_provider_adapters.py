@@ -2911,9 +2911,12 @@ class MetarAdapter:
         self._endpoint = endpoint
 
     async def fetch(self, request, fetcher, *, now):
-        if request.station_selection_reason:
+        if request.station_selection_reason and request.station_selection_reason != "station_catalog_no_match":
             raise ProviderBlocked(request.station_selection_reason)
-        if request.station_selection_applied and not request.selected_station_ids:
+        discovery_ids = set(request.station_discovery_target_ids)
+        if request.station_selection_reason == "station_catalog_no_match":
+            discovery_ids.update(target.target_id for target in request.targets)
+        if request.station_selection_applied and not request.selected_station_ids and not discovery_ids:
             return ()
         south = min(item.latitude for item in request.targets) - 2.0
         north = max(item.latitude for item in request.targets) + 2.0
@@ -2923,23 +2926,42 @@ class MetarAdapter:
             "format": "json",
             "hours": "1",
         }
-        if request.station_selection_applied:
+        queries = []
+        if request.station_selection_applied and request.selected_station_ids:
             params["ids"] = ",".join(sorted(set(request.selected_station_ids)))
-        else:
+            queries.append(params)
+        elif not request.station_selection_applied:
             params["bbox"] = f"{south:.3f},{west:.3f},{north:.3f},{east:.3f}"
-        try:
-            payload = await fetcher.get_json(
-                self._endpoint,
-                params=params,
-                maximum_bytes=8 * 1024 * 1024,
+            queries.append(params)
+        # Discover only uncovered locations; never one world-spanning bbox
+        # between Home and a distant fictive target. Normal cadence is unchanged.
+        for target in request.targets:
+            if target.target_id not in discovery_ids:
+                continue
+            bounds = (
+                f"{max(-90.0, target.latitude - 2):.3f},"
+                f"{max(-180.0, target.longitude - 3):.3f},"
+                f"{min(90.0, target.latitude + 2):.3f},"
+                f"{min(180.0, target.longitude + 3):.3f}"
             )
-        except HttpStatusError as error:
-            if error.status_code == 204:
-                return ()
-            raise
-        if not isinstance(payload, list):
-            raise ValueError("metar_payload_invalid")
+            query = {"format": "json", "hours": "1", "bbox": bounds}
+            if query not in queries:
+                queries.append(query)
+        payload = []
+        for query in queries:
+            try:
+                response = await fetcher.get_json(
+                    self._endpoint, params=query, maximum_bytes=8 * 1024 * 1024,
+                )
+            except HttpStatusError as error:
+                if error.status_code == 204:
+                    continue
+                raise
+            if not isinstance(response, list):
+                raise ValueError("metar_payload_invalid")
+            payload.extend(response)
         observations: list[NormalizedObservation] = []
+        seen = set()
         for station in payload:
             if not isinstance(station, Mapping):
                 continue
@@ -2949,6 +2971,10 @@ class MetarAdapter:
                 continue
             observed_at = _parse_timestamp(station.get("obsTime"), fallback=now)
             station_id = str(station.get("icaoId") or "unknown")
+            key = (station_id, observed_at)
+            if key in seen:
+                continue
+            seen.add(key)
             for target in request.targets:
                 if _haversine_km(latitude, longitude, target.latitude, target.longitude) > max(
                     150.0, target.observation_radius_km
