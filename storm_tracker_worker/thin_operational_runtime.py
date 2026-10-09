@@ -699,7 +699,10 @@ class ThinOperationalRuntime:
             # per region instead of re-segmenting every national raster for
             # every target. All fields remain available below for direct
             # rain-at-target fallback.
-            if current_native_fields:
+            if (
+                current_native_fields
+                and region.region_id not in pending_region_ids
+            ):
                 track_field(
                     max(current_native_fields, key=lambda item: item.observed_at),
                     region.targets,
