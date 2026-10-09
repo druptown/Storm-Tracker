@@ -17,7 +17,9 @@ from .thin_regional_radar_fusion import (
     FusedRegionalRadarField,
     RegionalFusionSummary,
     fuse_regional_radar_fields,
+    projected_native_field,
 )
+from .thin_source_radar_forecast import SourceRadarForecastEngine, MAX_SOURCE_COUNT
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,9 +51,14 @@ def _input_fingerprint(
                 field.product_id,
                 float(field.observed_at),
                 tuple(int(value) for value in field.rain_rate_mm_h.shape),
+                field.identity.grid_id,
+                field.identity.content_fingerprint,
+                field.identity.processing_version,
+                field.identity.source_composition,
             ))
     payload = {
         "region_id": region.region_id,
+        "region_revision_id": region.region_revision_id,
         "center": [region.center_latitude, region.center_longitude],
         "radius_km": region.observation_radius_km,
         "radar_analysis_radius_km": region.radar_analysis_radius_km,
@@ -100,6 +107,7 @@ class ThinRegionalRadarFusionCoordinator:
         *,
         max_workers: int = 2,
         fuse: Callable[..., Any] = fuse_regional_radar_fields,
+        source_engine_factory: Callable[..., Any] = SourceRadarForecastEngine,
     ) -> None:
         if isinstance(max_workers, bool) or not 1 <= int(max_workers) <= 2:
             raise ValueError("regional_fusion_max_workers_must_be_between_1_and_2")
@@ -111,6 +119,9 @@ class ThinRegionalRadarFusionCoordinator:
         )
         self._jobs: dict[str, _FusionJob] = {}
         self._completed: dict[str, _CompletedFusion] = {}
+        self._source_engine_factory = source_engine_factory
+        self._source_engines: dict[tuple[str, str], Any] = {}
+        self._active_revisions: dict[str, str] = {}
         self._closed = False
 
     def submit(
@@ -123,6 +134,12 @@ class ThinRegionalRadarFusionCoordinator:
         if self._closed:
             return
         providers = dict(provider_results)
+        self._active_revisions = {r.region_id: r.region_revision_id
+                                  for r in region_plan.regions}
+        active_keys = set(self._active_revisions.items())
+        # Running jobs retain their local reference. New revisions cannot use it.
+        for key in set(self._source_engines) - active_keys:
+            self._source_engines.pop(key, None)
         for region in region_plan.regions:
             fingerprint = _input_fingerprint(region, providers)
             job = self._jobs.get(region.region_id)
@@ -134,13 +151,22 @@ class ThinRegionalRadarFusionCoordinator:
             if job is not None:
                 continue
             completed = self._completed.get(region.region_id)
+            if completed is not None and getattr(completed.result, "region_revision_id", "") != region.region_revision_id:
+                self._completed.pop(region.region_id, None)
+                completed = None
             if completed is not None and completed.fingerprint == fingerprint:
                 continue
+            key = (region.region_id, region.region_revision_id)
+            engine = self._source_engines.get(key)
+            if engine is None:
+                engine = self._source_engine_factory()
+                self._source_engines[key] = engine
             future = self._executor.submit(
                 self._fuse_with_archive_provenance,
                 region,
                 providers,
                 evaluated_at=float(evaluated_at),
+                source_engine=engine,
             )
             self._jobs[region.region_id] = _FusionJob(
                 region=region,
@@ -155,7 +181,7 @@ class ThinRegionalRadarFusionCoordinator:
         for region_id in set(self._completed) - active_ids:
             self._completed.pop(region_id, None)
 
-    def _fuse_with_archive_provenance(self, region, providers, *, evaluated_at):
+    def _fuse_with_archive_provenance(self, region, providers, *, evaluated_at, source_engine):
         result = self._fuse(region, providers, evaluated_at=evaluated_at)
         if not isinstance(result, FusedRegionalRadarField):
             return result
@@ -164,7 +190,16 @@ class ThinRegionalRadarFusionCoordinator:
                        if isinstance(provider, ProviderResult)
                        for field in provider.radar_fields)
         # These are the actual submitted inputs, never a newer provider cache.
-        return replace(result, archive_inputs=inputs)
+        native = sorted(result.native_layers, key=lambda item: (
+            item[1].native_resolution_m, -item[0].observed_at, item[0].provider_id,
+        ))[:MAX_SOURCE_COUNT]
+        motions = tuple(source_engine.advance(field, layer, received_at=evaluated_at)
+                        for field,layer in native)
+        tracking_fields = tuple(projected_native_field(field, layer)
+                                for field,layer in native if field.observed_at <= evaluated_at)
+        return replace(result, archive_inputs=inputs, source_motions=motions,
+                       native_tracking_fields=tracking_fields,
+                       region_revision_id=region.region_revision_id)
 
     def poll(self) -> Mapping[str, FusedRegionalRadarField]:
         for region_id, job in tuple(self._jobs.items()):
@@ -177,10 +212,11 @@ class ThinRegionalRadarFusionCoordinator:
                     job.region,
                     evaluated_at=job.evaluated_at,
                 )
-            self._completed[region_id] = _CompletedFusion(
-                fingerprint=job.fingerprint,
-                result=result,
-            )
+            if self._active_revisions.get(region_id) == job.region.region_revision_id:
+                self._completed[region_id] = _CompletedFusion(
+                    fingerprint=job.fingerprint,
+                    result=result,
+                )
             self._jobs.pop(region_id, None)
         return {
             region_id: completed.result
@@ -198,6 +234,7 @@ class ThinRegionalRadarFusionCoordinator:
             job.future.cancel()
         self._jobs.clear()
         self._completed.clear()
+        self._source_engines.clear()
         self._executor.shutdown(wait=True, cancel_futures=True)
 
 

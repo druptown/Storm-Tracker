@@ -13,7 +13,7 @@ from typing import Any, Callable, Mapping
 
 from .thin_fusion import FusionCycle
 from .thin_ground_validation import ForecastValidation
-from .thin_nowcast import ThinNowcast
+from .thin_nowcast import ThinNowcast, forecast_input_fingerprints
 from .thin_regional_radar_fusion import RegionalFusionSummary
 from .thin_region_planner import ThinRegionPlan
 from .thin_postgis_raw_archive import RawArchiveBatch, write_archive_batch
@@ -27,6 +27,13 @@ MAX_RETRY_CYCLES = 8
 MAX_FORECAST_METADATA_BYTES = 64 * 1024
 PASSAGE_ALGORITHM_VERSION = "scientific-passage-v1"
 PASSAGE_POLICY_VERSION = "candidate_policy_v1"
+
+
+def forecast_versions(forecast):
+    summary = getattr(forecast, "radar_field_forecast", None)
+    if summary is not None:
+        return "source-clock-full-field-v1", summary["policy_version"]
+    return PASSAGE_ALGORITHM_VERSION, PASSAGE_POLICY_VERSION
 AUTO_DISCOVERY_GROUND_PROVIDERS = frozenset({
     "kmi_aws",
     "meteolux",
@@ -1186,16 +1193,13 @@ class ThinPostGISWriter:
                         ))
                         counts["target_forecasts"] += 1
                         target_passages = passages_by_target.get(target_id, [])
-                        input_fingerprints = tuple(sorted({
-                            passage.field_fingerprint
-                            for passage in target_passages
-                            if passage.field_fingerprint
-                        }))
+                        input_fingerprints = forecast_input_fingerprints(forecast, target_passages)
+                        algorithm_version, policy_version = forecast_versions(forecast)
                         calculated_issue_id = _forecast_issue_id(
                             target_id=target_id,
                             issued_at=nowcast.evaluated_at,
-                            algorithm_version=PASSAGE_ALGORITHM_VERSION,
-                            policy_version=PASSAGE_POLICY_VERSION,
+                            algorithm_version=algorithm_version,
+                            policy_version=policy_version,
                             region_revision_id=target_region_revision_id,
                             input_fingerprints=input_fingerprints,
                         )
@@ -1220,8 +1224,8 @@ class ThinPostGISWriter:
                                 issue_id,
                                 target_id,
                                 nowcast.evaluated_at,
-                                PASSAGE_ALGORITHM_VERSION,
-                                PASSAGE_POLICY_VERSION,
+                                algorithm_version,
+                                policy_version,
                                 target_region_revision_id,
                                 _bounded_json(list(input_fingerprints)),
                                 _bounded_json({

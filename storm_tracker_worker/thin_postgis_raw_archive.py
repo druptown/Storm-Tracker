@@ -93,6 +93,30 @@ def write_archive_batch(cursor, batch):
             gaps.add('field_source_capture_missing')
         fields.append((job,record.field_id))
         counts['raw_fields'] += 1
+    # Source-clock forecasts also consume the preceding native field, which
+    # may be absent from this cycle's current provider cache. Resolve exact
+    # immutable fingerprints in the same region, with causal receipt support.
+    forecast_fields = []
+    explicit_inputs = batch.policy.get('forecast_inputs', {})
+    for issue_id, revision_id in batch.issue_bindings:
+        if issue_id not in explicit_inputs:
+            continue
+        expected = set(explicit_inputs[issue_id])
+        cursor.execute('''SELECT DISTINCT field.field_id,
+          field.metadata->'identity'->>'content_fingerprint'
+          FROM public.stv3_raw_field_v1 AS field
+          JOIN public.stv3_raw_field_source_v1 AS source ON source.field_id=field.field_id
+          JOIN public.stv3_raw_capture_v1 AS capture ON capture.capture_id=source.capture_id
+          WHERE field.metadata->>'region_revision_id'=%s
+            AND field.metadata->'identity'->>'content_fingerprint'=ANY(%s)
+            AND field.observed_at<=to_timestamp(%s)
+            AND capture.received_at<=to_timestamp(%s)
+            AND capture.disposition='received' ''',
+          (revision_id,sorted(expected),batch.evaluated_at,batch.evaluated_at))
+        rows = cursor.fetchall()
+        if expected - {fingerprint for _,fingerprint in rows}:
+            gaps.add('forecast_input_missing_or_unavailable')
+        forecast_fields.extend((issue_id,revision_id,field_id) for field_id,_ in rows)
     complete = not gaps
     cursor.execute('''INSERT INTO public.stv3_raw_cycle_v1(cycle_id,evaluated_at,code_revision,policy,complete,gaps)
       VALUES(%s,to_timestamp(%s),%s,%s::jsonb,%s,%s::jsonb) ON CONFLICT DO NOTHING''',
@@ -106,9 +130,23 @@ def write_archive_batch(cursor, batch):
               (batch.cycle_id,field_id,capture_id))
         if job.role == 'used':
             for issue_id, revision_id in batch.issue_bindings:
-                if revision_id == job.region_revision_id:
+                if revision_id == job.region_revision_id and issue_id not in explicit_inputs:
                     cursor.execute('''INSERT INTO public.stv3_raw_issue_field_v1(forecast_issue_id,cycle_id,region_revision_id,field_id)
                       VALUES(%s,%s,%s,%s) ON CONFLICT DO NOTHING''',(issue_id,batch.cycle_id,revision_id,field_id))
+    for issue_id,revision_id,field_id in forecast_fields:
+        cursor.execute('''INSERT INTO public.stv3_raw_cycle_field_v1(cycle_id,region_revision_id,field_id,role)
+          VALUES(%s,%s,%s,'forecast_input') ON CONFLICT DO NOTHING''',
+          (batch.cycle_id,revision_id,field_id))
+        cursor.execute('''INSERT INTO public.stv3_raw_cycle_field_source_v1(cycle_id,field_id,capture_id)
+          SELECT %s,source.field_id,source.capture_id
+          FROM public.stv3_raw_field_source_v1 AS source
+          JOIN public.stv3_raw_capture_v1 AS capture ON capture.capture_id=source.capture_id
+          WHERE source.field_id=%s AND capture.received_at<=to_timestamp(%s)
+            AND capture.disposition='received' ON CONFLICT DO NOTHING''',
+          (batch.cycle_id,field_id,batch.evaluated_at))
+        cursor.execute('''INSERT INTO public.stv3_raw_issue_field_v1(forecast_issue_id,cycle_id,region_revision_id,field_id)
+          VALUES(%s,%s,%s,%s) ON CONFLICT DO NOTHING''',
+          (issue_id,batch.cycle_id,revision_id,field_id))
     counts['raw_complete_cycles'] = int(complete)
     return counts
 

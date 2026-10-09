@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 import hashlib
 import json
 import math
@@ -75,6 +75,8 @@ class RegionalFusionSummary:
     coverage_fraction: float
     mean_confidence: float
     disagreement_fraction: float
+    source_index: tuple[str, ...] = ()
+    source_product_times: Mapping[str, float] = dataclass_field(default_factory=dict)
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -93,6 +95,11 @@ class RegionalFusionSummary:
             "disagreement_fraction": self.disagreement_fraction,
         }
 
+    def source_provenance(self) -> dict[str, object]:
+        # Kept separate from the exact-key operational snapshot contract.
+        return {"source_index": list(self.source_index),
+                "source_product_times": dict(self.source_product_times)}
+
 
 @dataclass(frozen=True, slots=True)
 class FusedRegionalRadarField:
@@ -102,6 +109,36 @@ class FusedRegionalRadarField:
     contributor_mask: np.ndarray
     summary: RegionalFusionSummary
     archive_inputs: tuple[tuple[Any, tuple[str, ...]], ...] = ()
+    native_layers: tuple[tuple[ThinRadarField, RegionalRadarLayer], ...] = ()
+    source_motions: tuple[Any, ...] = ()
+    native_tracking_fields: tuple[ThinRadarField, ...] = ()
+    region_revision_id: str = ""
+
+
+def projected_native_field(source: ThinRadarField, layer: RegionalRadarLayer) -> ThinRadarField:
+    """Source-clock quantitative projection, never a multi-source composite."""
+    original = source.identity
+    assert original is not None
+    grid = layer.grid
+    identity = RadarFieldIdentity.create(
+        provider_id=source.provider_id, quantity=original.quantity,
+        unit=original.unit, quality_kind="projected_source_validity",
+        processing_version=original.processing_version + ":regional-projection-v1",
+        source_composition=original.source_composition,
+        canonical_valid_at=source.observed_at, received_at=original.received_at,
+        available_at=original.available_at, crs=grid.crs,
+        origin_x_m=grid.origin_x_m, origin_y_m=grid.origin_y_m,
+        x_resolution_m=grid.x_resolution_m, y_resolution_m=grid.y_resolution_m,
+        values=layer.rain_rate_mm_h, valid_mask=layer.valid_mask, grid_id=grid.grid_id,
+    )
+    return ThinRadarField(
+        provider_id=source.provider_id, product_id=source.product_id,
+        observed_at=source.observed_at, crs=grid.crs,
+        origin_x_m=grid.origin_x_m, origin_y_m=grid.origin_y_m,
+        x_resolution_m=grid.x_resolution_m, y_resolution_m=grid.y_resolution_m,
+        rain_rate_mm_h=layer.rain_rate_mm_h, valid_mask=layer.valid_mask,
+        identity=identity,
+    )
 
 
 def _empty_fusion(
@@ -744,6 +781,9 @@ def fuse_regional_radar_fields(
         coverage_fraction=coverage_fraction,
         mean_confidence=float(np.mean(confidence[fused_valid])),
         disagreement_fraction=disagreement_fraction,
+        source_index=tuple(layer.provider_id for layer in layers),
+        source_product_times=MappingProxyType({layer.provider_id: layer.observed_at
+                                             for layer in layers}),
     )
     return FusedRegionalRadarField(
         region_id=region.region_id,
@@ -751,6 +791,9 @@ def fuse_regional_radar_fields(
         confidence=confidence,
         contributor_mask=contributor_mask,
         summary=summary,
+        native_layers=tuple((next(f for f in candidates if f.provider_id == layer.provider_id),
+                             layer) for layer in layers),
+        region_revision_id=region.region_revision_id,
     )
 
 
