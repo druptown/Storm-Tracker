@@ -19,6 +19,7 @@ from .thin_ground_validation import ForecastValidation, GroundValidationRuntime
 from .thin_nowcast import StormCell, ThinNowcast, ThinNowcastRuntime
 from .thin_observation import ObservationKind
 from .thin_radar_tracking import ThinRadarTracker
+from .thin_radar_overlay import build_radar_overlay
 from .thin_regional_radar_fusion import RegionalFusionSummary
 from .thin_regional_radar_runtime import ThinRegionalRadarFusionCoordinator
 from .thin_postgis import PostGISWriteResult
@@ -29,6 +30,7 @@ from .tracking_core.operational_snapshot import MAX_UI_STORM_SUMMARIES, validate
 
 SNAPSHOT_TTL_SECONDS = 120.0
 MAX_GEOJSON_PAYLOAD_BYTES = 900_000
+MAX_TOTAL_RADAR_OVERLAY_RUNS = 2_000
 SNAPSHOT_REVISION_EPOCH_SECONDS = 1_577_836_800  # 2020-01-01T00:00:00Z
 SNAPSHOT_PROVIDER_IDS = {
     "kmi_aws": "ground.kmi.aws_10min",
@@ -510,6 +512,7 @@ class ThinOperationalRuntime:
             state=state,
             region_plan=region_plan,
             regional_radar=tuple(regional_summaries),
+            regional_radar_fields=completed_regional,
         )
         if self._postgis is None:
             postgis = PostGISWriteResult(
@@ -552,6 +555,7 @@ class ThinOperationalRuntime:
         state: DesiredState | None = None,
         region_plan: ThinRegionPlan | None = None,
         regional_radar: tuple[RegionalFusionSummary, ...] = (),
+        regional_radar_fields: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         state = self._state if state is None else state
         assert state is not None
@@ -560,6 +564,24 @@ class ThinOperationalRuntime:
             if region_plan is None
             else region_plan
         )
+        overlay_fields = [
+            (region_id, result.field)
+            for region_id, result in sorted(
+                (regional_radar_fields or {}).items()
+            )
+            if result.field is not None
+        ]
+        per_overlay_run_budget = max(
+            1,
+            MAX_TOTAL_RADAR_OVERLAY_RUNS // max(1, len(overlay_fields)),
+        )
+        radar_overlays = {
+            region_id: build_radar_overlay(
+                field,
+                maximum_runs=per_overlay_run_budget,
+            )
+            for region_id, field in overlay_fields
+        }
         target_features: list[dict[str, Any]] = []
         cell_feature_groups: list[tuple[float, str, list[dict[str, Any]]]] = []
         lightning_features: list[dict[str, Any]] = []
@@ -690,6 +712,7 @@ class ThinOperationalRuntime:
             return {
                 "type": "FeatureCollection",
                 "features": features,
+                "radar_overlays": radar_overlays,
                 "metadata": {
                     "schema_version": 1,
                     "feature_count": len(features),
