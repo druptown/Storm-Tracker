@@ -11,7 +11,7 @@ from .thin_fusion import FusionCycle, fuse_observations
 from .thin_nowcast import ThinNowcast, ThinNowcastRuntime
 from .thin_postgis import PostGISWriteResult
 from .thin_provider_catalog import PROVIDERS, build_due_requests
-from .tracking_core.operational_snapshot import MAX_UI_STORM_SUMMARIES, validate_snapshot
+from .tracking_core.operational_snapshot import validate_snapshot
 
 
 SNAPSHOT_TTL_SECONDS = 120.0
@@ -43,25 +43,6 @@ class ThinCycleResult:
 
 def _collection(items: list[dict[str, Any]]) -> dict[str, Any]:
     return {"complete": True, "overflow_count": 0, "items": items}
-
-
-def _storm_collection(items: list[dict[str, Any]]) -> dict[str, Any]:
-    """Keep the strongest cells within the existing HA snapshot contract."""
-    overflow = max(0, len(items) - MAX_UI_STORM_SUMMARIES)
-    retained = sorted(
-        items,
-        key=lambda item: (
-            item.get("max_dbz") is not None,
-            float(item.get("max_dbz") or -100.0),
-        ),
-        reverse=True,
-    )[:MAX_UI_STORM_SUMMARIES]
-    retained.sort(key=lambda item: item["storm_id"])
-    return {
-        "complete": overflow == 0,
-        "overflow_count": overflow,
-        "items": retained,
-    }
 
 
 class ThinOperationalRuntime:
@@ -100,10 +81,6 @@ class ThinOperationalRuntime:
     @property
     def has_state(self) -> bool:
         return self._state is not None
-
-    @property
-    def targets(self) -> tuple[Any, ...]:
-        return () if self._state is None else self._state.targets
 
     def claim_authority(self, producer_id: str, claim_id: str) -> dict[str, Any]:
         producer = str(producer_id).strip()
@@ -422,7 +399,7 @@ class ThinOperationalRuntime:
             "regions": _collection(region_items),
             "targets": _collection(target_items),
             "providers": _collection(provider_items),
-            "ui_storms": _storm_collection(storm_items),
+            "ui_storms": _collection(storm_items),
             "map_artifact": {"artifact_handle": None, "etag": None},
         }
         return validate_snapshot(snapshot)
