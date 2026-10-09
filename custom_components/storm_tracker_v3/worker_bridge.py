@@ -49,6 +49,17 @@ MAX_MQTT_MESSAGE_BYTES = 900_000
 MAX_DIAGNOSTIC_TEXT_CHARS = 160
 MAX_DIAGNOSTIC_COUNT = 1_000_000_000
 _LIVE_WORKER_STATES = frozenset({"online", "busy", "degraded"})
+_POSTGIS_PROJECTION_STATES = frozenset({
+    "disabled",
+    "waiting",
+    "current",
+    "degraded",
+})
+_POSTGIS_PROJECTION_ERROR_CODES = frozenset({
+    "postgis_projection_failed",
+    "postgis_projection_runtime_failed",
+    "postgis_provenance_conflict",
+})
 _SAFE_WORKER_ERROR_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,95}")
 _SAFE_WORKER_REASON_CODE = re.compile(r"[a-z][a-z0-9_]{0,95}")
 _SNAPSHOT_EXPIRY_HANDLE = "_operational_snapshot_expiry_handle"
@@ -213,6 +224,58 @@ def _bounded_raw_calibration_source_statistics(value) -> list[dict] | None:
     return result
 
 
+def _bounded_postgis_projection(value) -> dict | None:
+    """Keep only bounded, secret-free PostGIS projection diagnostics."""
+
+    if not isinstance(value, dict):
+        return None
+    allowed = {
+        "contract",
+        "enabled",
+        "status",
+        "batch",
+        "ready",
+        "leased",
+        "projected",
+        "last_success_at",
+        "last_error_code",
+        "counts",
+    }
+    if not set(value) <= allowed:
+        return None
+    enabled = value.get("enabled")
+    status = value.get("status")
+    if (
+        not isinstance(enabled, bool)
+        or status not in _POSTGIS_PROJECTION_STATES
+        or (not enabled and status != "disabled")
+        or (enabled and status == "disabled")
+    ):
+        return None
+    result = {"enabled": enabled, "status": status}
+    for key in ("batch", "ready", "leased", "projected"):
+        counter = _bounded_worker_counter(value.get(key))
+        if counter is None:
+            return None
+        result[key] = counter
+    last_success_at = value.get("last_success_at")
+    if last_success_at is not None:
+        if (
+            isinstance(last_success_at, bool)
+            or not isinstance(last_success_at, (int, float))
+            or not math.isfinite(float(last_success_at))
+            or last_success_at < 0
+        ):
+            return None
+        result["last_success_at"] = float(last_success_at)
+    error_code = value.get("last_error_code")
+    if error_code is not None:
+        if error_code not in _POSTGIS_PROJECTION_ERROR_CODES:
+            return None
+        result["last_error_code"] = error_code
+    return result
+
+
 def _compact_worker_status(status: dict, current: dict, *, now: float) -> dict:
     """Keep only fixed-size control fields from an untrusted worker status."""
     state = status.get("state")
@@ -336,6 +399,26 @@ def _compact_worker_status(status: dict, current: dict, *, now: float) -> dict:
             ):
                 compact["raw_calibration_source_statistics"] = (
                     source_statistics
+                )
+        postgis_projection = _bounded_postgis_projection(
+            runtime.get("postgis_projection")
+        )
+        if postgis_projection is not None:
+            compact["postgis_projection_enabled"] = postgis_projection[
+                "enabled"
+            ]
+            compact["postgis_projection_status"] = postgis_projection[
+                "status"
+            ]
+            for key in ("ready", "leased", "projected"):
+                compact[f"postgis_projection_{key}"] = postgis_projection[key]
+            if "last_success_at" in postgis_projection:
+                compact["postgis_projection_last_success_at"] = (
+                    postgis_projection["last_success_at"]
+                )
+            if "last_error_code" in postgis_projection:
+                compact["postgis_projection_last_error_code"] = (
+                    postgis_projection["last_error_code"]
                 )
     return compact
 

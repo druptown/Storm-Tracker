@@ -286,6 +286,9 @@ def _worker_runtime_attribute_projection(hass: Any) -> dict[str, Any]:
         "raw_calibration_sources",
         "raw_calibration_providers",
         "raw_calibration_database_bytes",
+        "postgis_projection_ready",
+        "postgis_projection_leased",
+        "postgis_projection_projected",
     ):
         value = status.get(key)
         if (
@@ -294,6 +297,29 @@ def _worker_runtime_attribute_projection(hass: Any) -> dict[str, Any]:
             and 0 <= value <= 1_000_000_000
         ):
             projection[key] = value
+    postgis_enabled = status.get("postgis_projection_enabled")
+    if isinstance(postgis_enabled, bool):
+        projection["postgis_projection_enabled"] = postgis_enabled
+    postgis_status = status.get("postgis_projection_status")
+    if postgis_status in {"disabled", "waiting", "current", "degraded"}:
+        projection["postgis_projection_status"] = postgis_status
+    postgis_success = status.get("postgis_projection_last_success_at")
+    if (
+        isinstance(postgis_success, (int, float))
+        and not isinstance(postgis_success, bool)
+        and math.isfinite(float(postgis_success))
+        and postgis_success >= 0
+    ):
+        projection["postgis_projection_last_success_at"] = float(
+            postgis_success
+        )
+    postgis_error = status.get("postgis_projection_last_error_code")
+    if postgis_error in {
+        "postgis_projection_failed",
+        "postgis_projection_runtime_failed",
+        "postgis_provenance_conflict",
+    }:
+        projection["postgis_projection_last_error_code"] = postgis_error
     for key in (
         "snapshot_transport_state",
         "raw_calibration_status",
