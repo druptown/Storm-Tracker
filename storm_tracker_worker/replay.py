@@ -15,127 +15,12 @@ from .tracking_core.engine.cell_track import (
     CellDetection,
     estimate_preliminary_cell_track,
 )
-from .tracking_core.engine.motion_consensus import (
-    MotionConsensusResult,
-    MotionVectorCandidate,
-    select_motion_consensus,
-)
 from .virtual_probe import virtual_probe_operational
 
 
 @dataclass(frozen=True)
 class _Job:
     payload: dict
-
-
-_REPLAY_MOTION_COVARIANCE = ((4.0, 0.0), (0.0, 4.0))
-
-
-def _motion_candidate(
-    method: str,
-    role: str,
-    vx_m_s: float,
-    vy_m_s: float,
-    *,
-    skill: float = 0.8,
-) -> MotionVectorCandidate:
-    return MotionVectorCandidate(
-        method=method,
-        role=role,
-        vx_m_s=vx_m_s,
-        vy_m_s=vy_m_s,
-        covariance_m2_s2=_REPLAY_MOTION_COVARIANCE,
-        support_count=16,
-        support_fraction=0.8,
-        history_samples=4,
-        hindcast_skill=skill,
-    )
-
-
-def _motion_result_payload(result: MotionConsensusResult) -> dict:
-    return {
-        "status": result.status,
-        "confidence": result.confidence,
-        "vx_m_s": result.vx_m_s,
-        "vy_m_s": result.vy_m_s,
-        "speed_m_s": result.speed_m_s,
-        "heading_deg": result.heading_deg,
-        "method": result.selected_method,
-        "supporting_methods": list(result.supporting_methods),
-        "reason_codes": list(result.reason_codes),
-    }
-
-
-def run_hybrid_motion_replay() -> dict:
-    """Run bounded deterministic scientific edge cases without publication.
-
-    These fixtures exercise the admission policy itself.  The separate real
-    tracking-engine test covers frame-to-track binding and optical-flow
-    extraction; this replay concentrates on the meteorological failure modes
-    that previously produced implausible red direction lines.
-    """
-
-    translation = select_motion_consensus((
-        _motion_candidate("flow-translation", "optical_flow", 6.0, 2.0),
-        _motion_candidate("track-translation", "object_track", 5.7, 2.1),
-    ))
-    intensity_only = select_motion_consensus((
-        _motion_candidate("flow-intensity-only", "optical_flow", 0.0, 0.0),
-        _motion_candidate("track-intensity-only", "object_track", 0.0, 0.0),
-    ))
-    rotation_only = select_motion_consensus((
-        _motion_candidate("flow-rotation-only", "optical_flow", 0.0, 0.0),
-        _motion_candidate("track-centroid-drift", "object_track", 5.0, 0.0),
-    ))
-    system_east = select_motion_consensus((
-        _motion_candidate("flow-system-east", "optical_flow", 5.0, 0.0),
-        _motion_candidate("track-system-east", "object_track", 5.1, 0.1),
-    ))
-    system_north = select_motion_consensus((
-        _motion_candidate("flow-system-north", "optical_flow", 0.0, 4.0),
-        _motion_candidate("track-system-north", "object_track", 0.1, 4.1),
-    ))
-    checks = {
-        "translation_admitted": translation.status == "ready_high",
-        "intensity_change_has_no_heading": (
-            intensity_only.status == "stationary"
-            and intensity_only.heading_deg is None
-        ),
-        "rotation_centroid_conflict_withheld": (
-            rotation_only.status == "indeterminate"
-            and rotation_only.vx_m_s is None
-            and rotation_only.vy_m_s is None
-        ),
-        "independent_systems_admitted": (
-            system_east.status == "ready_high"
-            and system_north.status == "ready_high"
-        ),
-        "independent_systems_keep_direction": (
-            system_east.heading_deg is not None
-            and system_north.heading_deg is not None
-            and abs(system_east.heading_deg - system_north.heading_deg) > 45.0
-        ),
-    }
-    return {
-        "mode": "hybrid_motion_scientific_replay_v1",
-        "fixture_kind": "synthetic_known_motion",
-        "operational_state_mutated": False,
-        "passed": all(checks.values()),
-        "checks": checks,
-        "scenarios": {
-            "translation": _motion_result_payload(translation),
-            "intensity_change_without_translation": (
-                _motion_result_payload(intensity_only)
-            ),
-            "rotation_without_bulk_translation": (
-                _motion_result_payload(rotation_only)
-            ),
-            "two_independent_systems": {
-                "east": _motion_result_payload(system_east),
-                "north": _motion_result_payload(system_north),
-            },
-        },
-    }
 
 
 def _frame(timestamp: int, shift: int, *, source: str = "replay_radar") -> dict:

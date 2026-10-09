@@ -60,10 +60,6 @@ from .tracking_core.engine.lucas_kanade_flow import (
 from .tracking_core.engine.recursive_track_estimator import (
     RecursiveTrackEstimatorPolicy,
 )
-from .tracking_core.engine.motion_consensus import (
-    MotionConsensusResult,
-    build_transition_motion_consensus,
-)
 from .tracking_core.engine.weather_system_grouping import (
     WeatherSystemGroupingPolicy,
 )
@@ -350,12 +346,6 @@ class WorkerOnlyShadowArrivalCandidate:
     target_location_accuracy_m: float | None
     low_confidence_fragment: bool
     passage_state: str
-    motion_status: str
-    motion_confidence: str
-    motion_method: str
-    motion_supporting_methods: tuple[str, ...]
-    motion_reason_codes: tuple[str, ...]
-    motion_agreement_angle_deg: float | None
     method: str = SHADOW_ARRIVAL_METHOD
     admission_status: str = ADMISSION_STATUS
 
@@ -369,41 +359,9 @@ class WorkerOnlyShadowArrivalCandidate:
             "detection_id",
             "source_candidate_id",
             "analysis_grid_id",
-            "motion_method",
             "method",
         ):
             _safe_id(getattr(self, name), name)
-        if self.motion_status not in {
-            "ready_high",
-            "ready_medium",
-            "fallback",
-            "stationary",
-        }:
-            raise ValueError("arrival motion_status is niet toegelaten")
-        if self.motion_confidence not in {"high", "medium"}:
-            raise ValueError("arrival motion_confidence is niet toegelaten")
-        if (
-            not isinstance(self.motion_supporting_methods, tuple)
-            or not self.motion_supporting_methods
-            or self.motion_supporting_methods
-            != tuple(sorted(set(self.motion_supporting_methods)))
-        ):
-            raise ValueError("arrival motion_supporting_methods zijn niet canoniek")
-        for value in self.motion_supporting_methods:
-            _safe_id(value, "motion_supporting_method")
-        if (
-            not isinstance(self.motion_reason_codes, tuple)
-            or self.motion_reason_codes
-            != tuple(sorted(set(self.motion_reason_codes)))
-        ):
-            raise ValueError("arrival motion_reason_codes zijn niet canoniek")
-        for value in self.motion_reason_codes:
-            _safe_id(value, "motion_reason_code")
-        if self.motion_agreement_angle_deg is not None and (
-            not math.isfinite(self.motion_agreement_angle_deg)
-            or not 0.0 <= self.motion_agreement_angle_deg <= 180.0
-        ):
-            raise ValueError("arrival motion_agreement_angle_deg is ongeldig")
         if (
             not isinstance(self.source_candidate_content_sha256, str)
             or len(self.source_candidate_content_sha256) != 64
@@ -759,7 +717,6 @@ def build_worker_only_shadow_arrivals(
     workload_id: str,
     candidate: WorkerOnlyTrackingFrameCandidate,
     state: CellTrackEngineState,
-    motion_consensus_by_track: Mapping[str, MotionConsensusResult],
     maximum_pairs: int = MAX_SHADOW_ARRIVAL_PIXEL_TARGET_PAIRS,
 ) -> WorkerOnlyShadowArrivalResult:
     """Intersect same-track translated rain footprints with exact target points.
@@ -782,11 +739,7 @@ def build_worker_only_shadow_arrivals(
     if state.last_frame.frame_id != candidate.frame.frame_id:
         raise WorkerOnlyCellTrackingError("arrival_state_frame_binding_mismatch")
 
-    if not isinstance(motion_consensus_by_track, Mapping):
-        raise TypeError("motion_consensus_by_track moet een mapping zijn")
-
     eligible = []
-    motion_withheld = False
     for track in state.ledger.tracks:
         if (
             track.lifecycle_state != "confirmed"
@@ -795,29 +748,18 @@ def build_worker_only_shadow_arrivals(
         ):
             continue
         detected = state.hierarchy(track.track_id)
-        if detected.object_kind != "rain_shield":
-            continue
-        consensus = motion_consensus_by_track.get(track.track_id)
+        estimate = state.estimate(track.track_id)
         if (
-            not isinstance(consensus, MotionConsensusResult)
-            or consensus.status not in {
-                "ready_high",
-                "ready_medium",
-                "fallback",
-                "stationary",
-            }
-            or consensus.confidence not in {"high", "medium"}
-            or consensus.vx_m_s is None
-            or consensus.vy_m_s is None
-            or consensus.selected_method is None
+            detected.object_kind != "rain_shield"
+            or estimate.latest_interval_vx_m_s is None
+            or estimate.latest_interval_vy_m_s is None
         ):
-            motion_withheld = True
             continue
-        eligible.append((track, detected, consensus))
+        eligible.append((track, detected, estimate))
 
     operation_count = sum(
         len(detected.footprint_pixels) * len(candidate.projected_targets)
-        for _track, detected, _consensus in eligible
+        for _track, detected, _estimate in eligible
     )
     if operation_count > maximum_pairs:
         return WorkerOnlyShadowArrivalResult(
@@ -829,9 +771,9 @@ def build_worker_only_shadow_arrivals(
 
     arrivals: list[WorkerOnlyShadowArrivalCandidate] = []
     grid = candidate.frame.grid
-    for track, detected, consensus in eligible:
-        vx_m_s = float(consensus.vx_m_s)
-        vy_m_s = float(consensus.vy_m_s)
+    for track, detected, estimate in eligible:
+        vx_m_s = float(estimate.latest_interval_vx_m_s)
+        vy_m_s = float(estimate.latest_interval_vy_m_s)
         for target in candidate.projected_targets:
             intervals = []
             for pixel in detected.footprint_pixels:
@@ -860,11 +802,6 @@ def build_worker_only_shadow_arrivals(
                 "entry_seconds": entry_seconds,
                 "exit_seconds": exit_seconds,
                 "method": SHADOW_ARRIVAL_METHOD,
-                "motion_confidence": consensus.confidence,
-                "motion_method": consensus.selected_method,
-                "motion_reason_codes": consensus.reason_codes,
-                "motion_status": consensus.status,
-                "motion_supporting_methods": consensus.supporting_methods,
                 "region_lineage_id": candidate.region_lineage_id,
                 "source_candidate_content_sha256": (
                     candidate.source_candidate_content_sha256
@@ -900,12 +837,6 @@ def build_worker_only_shadow_arrivals(
                 target_location_accuracy_m=target.location_accuracy_m,
                 low_confidence_fragment=detected.low_confidence_fragment,
                 passage_state=passage_state,
-                motion_status=consensus.status,
-                motion_confidence=consensus.confidence,
-                motion_method=consensus.selected_method,
-                motion_supporting_methods=consensus.supporting_methods,
-                motion_reason_codes=consensus.reason_codes,
-                motion_agreement_angle_deg=consensus.agreement_angle_deg,
             ))
 
     ordered = tuple(sorted(
@@ -914,8 +845,6 @@ def build_worker_only_shadow_arrivals(
     ))
     if ordered:
         reasons: tuple[str, ...] = ()
-    elif motion_withheld:
-        reasons = ("motion_consensus_withheld",)
     elif not eligible:
         reasons = ("no_confirmed_same_track_motion",)
     else:
@@ -1734,10 +1663,6 @@ class WorkerOnlyCellTrackingRuntime:
             tuple[WorkerOnlyShadowArrivalCandidate, ...],
         ] = {}
         self._shadow_arrival_reasons: dict[str, tuple[str, ...]] = {}
-        self._motion_consensus: dict[
-            str,
-            tuple[tuple[str, MotionConsensusResult], ...],
-        ] = {}
         self._ground_receipts: dict[
             str,
             tuple[GroundObservationReceipt, ...],
@@ -1793,11 +1718,6 @@ class WorkerOnlyCellTrackingRuntime:
             for track in state.ledger.tracks
             if track.lifecycle_state != "ended"
         )
-        motion_results = tuple(
-            result
-            for values in self._motion_consensus.values()
-            for _track_id, result in values
-        )
         return {
             "active": len(tracks),
             "tracked": sum(item.lifecycle_state == "confirmed" for item in tracks),
@@ -1806,22 +1726,8 @@ class WorkerOnlyCellTrackingRuntime:
             ),
             "coasting": sum(item.lifecycle_state == "coasting" for item in tracks),
             "motion_ready": sum(
-                item.status in {
-                    "ready_high",
-                    "ready_medium",
-                    "fallback",
-                    "stationary",
-                }
-                for item in motion_results
-            ),
-            "motion_fallback": sum(
-                item.status == "fallback" for item in motion_results
-            ),
-            "motion_stationary": sum(
-                item.status == "stationary" for item in motion_results
-            ),
-            "motion_withheld": sum(
-                item.status == "indeterminate" for item in motion_results
+                item.lifecycle_state == "confirmed" and item.sample_count >= 2
+                for item in tracks
             ),
         }
 
@@ -1953,16 +1859,10 @@ class WorkerOnlyCellTrackingRuntime:
                             ) from error
                     self._states[state_key] = transition.next_state
                     self._state_grid_ids[state_key] = grid_id
-                    motion_consensus_items = build_transition_motion_consensus(
-                        transition
-                    )
-                    self._motion_consensus[state_key] = motion_consensus_items
-                    motion_consensus = dict(motion_consensus_items)
                     arrival = build_worker_only_shadow_arrivals(
                         workload_id=batch.workload_id,
                         candidate=candidate,
                         state=transition.next_state,
-                        motion_consensus_by_track=motion_consensus,
                         maximum_pairs=max(
                             0,
                             MAX_SHADOW_ARRIVAL_PIXEL_TARGET_PAIRS
@@ -2079,27 +1979,6 @@ class WorkerOnlyCellTrackingRuntime:
                     for key, value in sorted(self._ground_track_reasons.items())
                 },
                 "motion_ready_tracks": counts["motion_ready"],
-                "motion_fallback_tracks": counts["motion_fallback"],
-                "motion_stationary_tracks": counts["motion_stationary"],
-                "motion_withheld_tracks": counts["motion_withheld"],
-                "motion_consensus": {
-                    key: {
-                        track_id: {
-                            "agreement_angle_deg": result.agreement_angle_deg,
-                            "confidence": result.confidence,
-                            "heading_deg": result.heading_deg,
-                            "method": result.selected_method,
-                            "reason_codes": list(result.reason_codes),
-                            "speed_m_s": result.speed_m_s,
-                            "status": result.status,
-                            "supporting_methods": list(
-                                result.supporting_methods
-                            ),
-                        }
-                        for track_id, result in values
-                    }
-                    for key, values in sorted(self._motion_consensus.items())
-                },
                 "preliminary_tracks": counts["preliminary"],
                 "region_states": len(self._states),
                 "restart_persistent": (

@@ -113,6 +113,11 @@ RAW_CAPTURE_ALLOWED_WORKLOAD_IDS: Final = tuple(
 )
 MAX_DIAGNOSTIC_BYTES: Final = 32 * 1024
 MAX_COUNTER: Final = 1_000_000_000
+# Startup verifies every retained RAW object before opening admission. That
+# proof scales with the retained archive and is intentionally distinct from a
+# bounded provider tick. The 615-second provider deadline is therefore not a
+# valid upper bound once the archive contains thousands of captures.
+RAW_CAPTURE_STARTUP_TIMEOUT_SECONDS: Final = 3_600.0
 BLITZORTUNG_AUTHORITY_ENV: Final = (
     "STV3_BLITZORTUNG_RAW_RETENTION_AUTHORITY"
 )
@@ -1220,7 +1225,13 @@ class RawCaptureServiceRuntime:
         self._increment("control_calls")
         return result
 
-    async def _blocking(self, function: Callable[[], Any]) -> Any:
+    async def _blocking(
+        self,
+        function: Callable[[], Any],
+        *,
+        timeout_seconds: float | None = None,
+        timeout_code: str = "raw_capture_tick_timeout",
+    ) -> Any:
         if self._executor_closed:
             raise RawCaptureServiceError("raw_capture_lane_closed")
         loop = asyncio.get_running_loop()
@@ -1230,12 +1241,16 @@ class RawCaptureServiceRuntime:
         try:
             return await asyncio.wait_for(
                 asyncio.shield(asyncio.wrap_future(future, loop=loop)),
-                timeout=self._acquisition_timeout,
+                timeout=(
+                    self._acquisition_timeout
+                    if timeout_seconds is None
+                    else timeout_seconds
+                ),
             )
         except TimeoutError:
             self._increment("timeouts")
             self._acquisition.request_stop()
-            raise RawCaptureServiceError("raw_capture_tick_timeout") from None
+            raise RawCaptureServiceError(timeout_code) from None
         finally:
             with self._mutable_lock:
                 if self._active_future is future and future.done():
@@ -1425,7 +1440,11 @@ class RawCaptureServiceRuntime:
                 raise RawCaptureServiceError("raw_capture_runtime_stopping")
             self._state = "starting"
             try:
-                await self._blocking(self._start_all_raw_ingress)
+                await self._blocking(
+                    self._start_all_raw_ingress,
+                    timeout_seconds=RAW_CAPTURE_STARTUP_TIMEOUT_SECONDS,
+                    timeout_code="raw_capture_start_timeout",
+                )
                 self._started = True
                 self._state = "running"
                 self._last_error_code = None

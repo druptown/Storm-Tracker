@@ -147,6 +147,7 @@ _SAFE_FAILURE_REASON_CODES = frozenset({
     "raw_capture_runtime_not_running",
     "raw_capture_runtime_restart_required",
     "raw_capture_runtime_stopping",
+    "raw_capture_start_timeout",
     "raw_capture_tick_failed",
     "raw_capture_tick_timeout",
     "worker_only_clock_invalid",
@@ -1793,6 +1794,15 @@ class WorkerOnlyServiceRuntime:
 
     def diagnostics(self) -> dict[str, Any]:
         raw = self._raw.diagnostics()
+        acquisition_terminal_results = [
+            {
+                "workload_id": workload_id,
+                "status": status,
+                "reason_code": reason_code,
+            }
+            for workload_id, status, reason_code
+            in self._raw.latest_terminal_results()
+        ]
         raw_last_tick = raw.get("last_tick", {})
         if not isinstance(raw_last_tick, Mapping):
             raw_last_tick = {}
@@ -1827,6 +1837,12 @@ class WorkerOnlyServiceRuntime:
             "captured_provider_count": len(self._captures),
             "raw_calibration": dict(self._raw_calibration_stats),
             "postgis_projection": dict(self._postgis_projection_stats),
+            # Keep one bounded, payload-free terminal outcome per workload in
+            # the worker heartbeat.  A stale provider sensor alone cannot
+            # distinguish an upstream failure from scheduler starvation; this
+            # projection makes that distinction observable without exposing
+            # coordinates, request URLs, credentials, or raw payloads.
+            "acquisition_terminal_results": acquisition_terminal_results,
             "parallel_acquisition": dict(parallel_acquisition),
             "quantitative_capture_count": len(
                 set(self._capture_ids).intersection(

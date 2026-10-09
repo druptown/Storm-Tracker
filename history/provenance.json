@@ -1,8 +1,8 @@
 {
   "kind": "recovered_archive_source",
   "component": "worker",
-  "version": "1.17.111",
-  "source_id": "ea81a4b2779299cf122996f92f898667d4d4c2e4bd650d04236adf3647ab8c88",
+  "version": "1.17.112",
+  "source_id": "2513c7774ac09661d60bd41d848c8ac0d6f7cef971b35cc4a2eb8c16f8acc2e9",
   "recovered_on": "2026-10-09",
   "files": [
     {
@@ -32,7 +32,7 @@
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "6088fe1a62e8a66f8d1eb2b8a4e766a71fb7e410bfb695041cca8f0f98857e92",
+      "sha256": "77a8791557c67cbef72190e96c57b8b69048dd360429707cc584db9170ef87f0",
       "size": 65
     },
     {
@@ -272,7 +272,7 @@
     {
       "path": "config.yaml",
       "mode": 420,
-      "sha256": "e0bdd19d07f62f927fe31c4a93dd7e484cf3e7709ff159e354be02810d5e6496",
+      "sha256": "6bd9eabd43771f0be3dfefcbef165ad1eff2c911023c9edf4e14efffa8fa6d50",
       "size": 2682
     },
     {
@@ -860,8 +860,8 @@
     {
       "path": "raw_capture_service_composition.py",
       "mode": 420,
-      "sha256": "f84db01f8b65a4c30132ec0c9161a843d675222047a45508d5f9b9dbab28a011",
-      "size": 75793
+      "sha256": "9def687c5adb891f231428f1a9b4ea17baadede1b6fe974b391602d623986a8d",
+      "size": 76570
     },
     {
       "path": "raw_manifest_audit_completion_consumer.py",
@@ -878,8 +878,8 @@
     {
       "path": "replay.py",
       "mode": 420,
-      "sha256": "12f031164e3caee93de1b94256935d732f74157835a8f501a09c61c5efebf032",
-      "size": 16190
+      "sha256": "5859b85cb9d08c0b41450c4a49fadb192e1b0514ccd748c5b5b0cc725ed7b439",
+      "size": 12066
     },
     {
       "path": "requirements.txt",
@@ -968,8 +968,8 @@
     {
       "path": "service.py",
       "mode": 420,
-      "sha256": "14400447493289d5cefc97ddfc21bb77103e9df378eec058781cdfe25077b2fc",
-      "size": 264138
+      "sha256": "5d8da0f3136a520e56318ce0ecf7157910c9df1bbcce221e6c680de625ec4cf3",
+      "size": 265469
     },
     {
       "path": "survey_cli.py",
@@ -1156,12 +1156,6 @@
       "mode": 420,
       "sha256": "cbe080444023c98b6e9b748948d36dfdce7d47058481dc893b2d611ebcd3cde7",
       "size": 251224
-    },
-    {
-      "path": "tracking_core/engine/motion_consensus.py",
-      "mode": 420,
-      "sha256": "810e0d5c4809f14a4db0a6844084558c53d30f9f39fa4296deee562c94af3029",
-      "size": 16983
     },
     {
       "path": "tracking_core/engine/motion_identity_evidence.py",
@@ -1394,8 +1388,8 @@
     {
       "path": "worker_only_cell_tracking.py",
       "mode": 420,
-      "sha256": "2e1963faf4b52379256e004ebeba0df0d8595be933dcfbbc341a2ef03efb5f30",
-      "size": 85260
+      "sha256": "8654300cb37eacc21358842a063d57087a63effcecbf5ffad1e41c3df035105d",
+      "size": 79875
     },
     {
       "path": "worker_only_ground_processing.py",
@@ -1406,8 +1400,8 @@
     {
       "path": "worker_only_motion_snapshot.py",
       "mode": 420,
-      "sha256": "3809d99d866f588811efe1e616cc5bb4e9ef0b949734ad74444cf86d3d789c37",
-      "size": 9384
+      "sha256": "471dbded0292b50d0b15d77aa5e132eeea5f47866cf6ddb512868d88da1e6bc0",
+      "size": 8172
     },
     {
       "path": "worker_only_radar_processing.py",
@@ -1418,18 +1412,18 @@
     {
       "path": "worker_only_service_runtime.py",
       "mode": 420,
-      "sha256": "c7cf11aa9021e388c4e419d356dac62390150fb607d3086f6e416635d7d46dbc",
-      "size": 82312
+      "sha256": "17bfd20fb7bc7e1de466f1e6816e071a3db6c40acafe0aa6afbf47c711a11852",
+      "size": 83097
     }
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_worker_v1.17.111_deploy.tar.gz",
-      "archive_sha256": "0d760297b239246278b4a61b193e09f9bb5dfa7877b3fe842209ef41860ce6cb",
-      "bytes": 2275634,
+      "filename": "storm_tracker_worker_v1.17.112_deploy.tar.gz",
+      "archive_sha256": "ed944df6ea9028ac025b8980d17622d0f883acdd8e31096db11254ea3b5b2ae7",
+      "bytes": 2270699,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.98_worker_v1.17.111_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.98_worker_v1.17.112_evidence.json",
           "archive_and_source_match": true
         }
       ]
