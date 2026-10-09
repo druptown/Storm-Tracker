@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import math
 import time
@@ -11,9 +11,11 @@ from typing import Any, Callable, Mapping
 from .desired_state import METHOD, DesiredState, DesiredStateConflict, parse_desired_state
 from .thin_fusion import FusionCycle, fuse_observations
 from .thin_nowcast import StormCell, ThinNowcast, ThinNowcastRuntime
+from .thin_observation import ObservationKind
 from .thin_radar_tracking import ThinRadarTracker
 from .thin_postgis import PostGISWriteResult
 from .thin_provider_catalog import PROVIDERS, build_due_requests
+from .thin_region_planner import ThinRegionPlan, ThinRegionPlanner
 from .tracking_core.operational_snapshot import MAX_UI_STORM_SUMMARIES, validate_snapshot
 
 
@@ -35,6 +37,70 @@ SNAPSHOT_PROVIDER_IDS = {
 
 def _snapshot_provider_id(provider_id: str) -> str:
     return SNAPSHOT_PROVIDER_IDS.get(provider_id, provider_id)
+
+
+def _ground_evidence(
+    fusion: FusionCycle,
+    *,
+    target_id: str,
+    current_is_rain: bool,
+) -> dict[str, Any]:
+    latest_by_site = {}
+    for observation in fusion.observations:
+        station_id = observation.metadata.get("station_id")
+        if (
+            observation.target_id != target_id
+            or observation.kind is not ObservationKind.RAIN_RATE
+            or not station_id
+        ):
+            continue
+        site_key = (observation.provider_id, str(station_id))
+        previous = latest_by_site.get(site_key)
+        if previous is None or observation.observed_at > previous.observed_at:
+            latest_by_site[site_key] = observation
+
+    sites = tuple(latest_by_site.values())
+    if not sites:
+        return {
+            "status": "unknown",
+            "freshness": "unknown",
+            "confirmation": None,
+            "same_track": None,
+            "evidence_valid_at": None,
+            "observed_at_min": None,
+            "observed_at_max": None,
+            "received_at": None,
+            "physical_site_count": 0,
+            "wet_site_count": 0,
+            "source_ids": [],
+            "reason_codes": [],
+        }
+
+    wet_site_count = sum(observation.value > 0.0 for observation in sites)
+    if wet_site_count == 0:
+        status = "dry"
+    elif wet_site_count == len(sites):
+        status = "wet"
+    else:
+        status = "mixed"
+    observed_times = [observation.observed_at for observation in sites]
+    return {
+        "status": status,
+        "freshness": "current",
+        "confirmation": bool(current_is_rain and wet_site_count > 0),
+        "same_track": None,
+        "evidence_valid_at": max(observed_times),
+        "observed_at_min": min(observed_times),
+        "observed_at_max": max(observed_times),
+        "received_at": max(observation.received_at for observation in sites),
+        "physical_site_count": len(sites),
+        "wet_site_count": wet_site_count,
+        "source_ids": sorted({
+            _snapshot_provider_id(observation.provider_id)
+            for observation in sites
+        }),
+        "reason_codes": [],
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +155,7 @@ class ThinOperationalRuntime:
         self._activated_at: float | None = None
         self._last_attempts: dict[str, float] = {}
         self._latest_provider_results: dict[str, Any] = {}
+        self._region_planner = ThinRegionPlanner()
         self._nowcast = ThinNowcastRuntime(targets={})
         self._radar_tracker = ThinRadarTracker()
         # A worker App restart must not reset revisions below the snapshot still
@@ -220,6 +287,33 @@ class ThinOperationalRuntime:
             "target_count": len(candidate.targets),
         }
 
+    @staticmethod
+    def _scope_provider_results(
+        results: Mapping[str, Any],
+        region_plan: ThinRegionPlan,
+    ) -> dict[str, Any]:
+        target_ids = {target.target_id for target in region_plan.targets}
+        scoped: dict[str, Any] = {}
+        for provider_id, result in results.items():
+            observations = tuple(
+                observation
+                for observation in result.observations
+                if (
+                    observation.target_id in target_ids
+                    if observation.target_id is not None
+                    else region_plan.accepts_position(
+                        observation.latitude,
+                        observation.longitude,
+                    )
+                )
+            )
+            scoped[provider_id] = (
+                result
+                if observations == result.observations
+                else replace(result, observations=observations)
+            )
+        return scoped
+
     async def run_cycle(self) -> ThinCycleResult:
         state = self._state
         if state is None:
@@ -227,27 +321,35 @@ class ThinOperationalRuntime:
         # A desired-state message may arrive while provider I/O is pending.
         # Keep this cycle internally consistent: its fusion, nowcast, map and
         # snapshot must all describe the same captured target set.
+        now = float(self._clock())
+        region_plan = self._region_planner.plan(state, now=now)
+        active_targets = region_plan.targets
         self._nowcast.update_targets({
             item.target_id: (item.latitude, item.longitude)
-            for item in state.targets if item.available
+            for item in active_targets
         })
-        now = float(self._clock())
-        requests = build_due_requests(state, now=now, last_attempts=self._last_attempts)
+        requests = build_due_requests(
+            state,
+            now=now,
+            last_attempts=self._last_attempts,
+            region_plan=region_plan,
+        )
         for request in requests:
             self._last_attempts[request.provider_id] = now
-        fresh_results = dict(await self._providers.fetch(requests))
+        fresh_results = self._scope_provider_results(
+            dict(await self._providers.fetch(requests)),
+            region_plan,
+        )
         self._latest_provider_results.update(fresh_results)
         fusion = fuse_observations(
             self._latest_provider_results,
             evaluated_at=float(self._clock()),
-            target_ids=tuple(item.target_id for item in state.targets if item.available),
+            target_ids=tuple(item.target_id for item in active_targets),
         )
         tracked_cells: list[StormCell] = []
         for result in fresh_results.values():
             for field in result.radar_fields:
-                for target in state.targets:
-                    if not target.available:
-                        continue
+                for target in active_targets:
                     try:
                         self._radar_tracker.advance(field, target)
                     except (ValueError, RuntimeError):
@@ -271,7 +373,12 @@ class ThinOperationalRuntime:
             fusion,
             tracked_cells=tuple({item.cell_id: item for item in tracked_cells}.values()) or None,
         )
-        self._latest_geojson = self._build_geojson(fusion, nowcast, state=state)
+        self._latest_geojson = self._build_geojson(
+            fusion,
+            nowcast,
+            state=state,
+            region_plan=region_plan,
+        )
         if self._postgis is None:
             postgis = PostGISWriteResult(
                 status="disabled",
@@ -283,7 +390,13 @@ class ThinOperationalRuntime:
         else:
             postgis = await self._postgis.write_cycle(fusion, nowcast)
         self._revision += 1
-        snapshot = self._build_snapshot(fusion, nowcast, postgis, state=state)
+        snapshot = self._build_snapshot(
+            fusion,
+            nowcast,
+            postgis,
+            state=state,
+            region_plan=region_plan,
+        )
         return ThinCycleResult(snapshot=snapshot, fusion=fusion, nowcast=nowcast, postgis=postgis)
 
     def _build_geojson(
@@ -292,16 +405,25 @@ class ThinOperationalRuntime:
         nowcast: ThinNowcast,
         *,
         state: DesiredState | None = None,
+        region_plan: ThinRegionPlan | None = None,
     ) -> dict[str, Any]:
         state = self._state if state is None else state
         assert state is not None
+        region_plan = (
+            self._region_planner.plan(state, now=float(fusion.evaluated_at))
+            if region_plan is None
+            else region_plan
+        )
         target_features: list[dict[str, Any]] = []
         cell_feature_groups: list[tuple[float, str, list[dict[str, Any]]]] = []
         lightning_features: list[dict[str, Any]] = []
-        region_id = "thin-operational"
-        for target in self._state.targets:
-            if not target.available:
-                continue
+        default_region_id = (
+            region_plan.regions[0].region_id
+            if region_plan.regions
+            else "region:unassigned"
+        )
+        for target in region_plan.targets:
+            region_id = region_plan.region_id_for(target.target_id) or default_region_id
             target_features.append({
                 "type": "Feature",
                 "id": f"target:{target.target_id}",
@@ -321,6 +443,7 @@ class ThinOperationalRuntime:
             })
 
         for cell in nowcast.storm_cells:
+            region_id = default_region_id
             geometry = json.loads(json.dumps(dict(cell.geometry), allow_nan=False))
             group = [{
                 "type": "Feature",
@@ -390,7 +513,11 @@ class ThinOperationalRuntime:
                 },
                 "properties": {
                     "layer": "lightning",
-                    "engine_id": region_id,
+                    "engine_id": (
+                        region_plan.region_id_for(observation.target_id)
+                        if observation.target_id is not None
+                        else default_region_id
+                    ) or default_region_id,
                     "source": observation.provider_id,
                     "timestamp": observation.observed_at,
                     "age_seconds": max(
@@ -468,6 +595,7 @@ class ThinOperationalRuntime:
         postgis: PostGISWriteResult,
         *,
         state: DesiredState,
+        region_plan: ThinRegionPlan,
     ) -> dict[str, Any]:
         evaluated_at = float(fusion.evaluated_at)
         observations = fusion.observations
@@ -479,7 +607,9 @@ class ThinOperationalRuntime:
 
         provider_items: list[dict[str, Any]] = []
         for spec in PROVIDERS:
-            applicable = any(spec.applies_to(target) for target in state.targets if target.available)
+            applicable = any(
+                spec.applies_to(target) for target in region_plan.targets
+            )
             if not applicable:
                 continue
             result = self._latest_provider_results.get(spec.provider_id)
@@ -517,14 +647,20 @@ class ThinOperationalRuntime:
         provider_items.sort(key=lambda item: item["provider_id"])
 
         target_items: list[dict[str, Any]] = []
-        region_items: list[dict[str, Any]] = []
-        for target in sorted((item for item in state.targets if item.available), key=lambda item: item.target_id):
+        region_contributors: dict[str, set[str]] = {
+            region.region_id: set() for region in region_plan.regions
+        }
+        for target in sorted(region_plan.targets, key=lambda item: item.target_id):
             result = nowcast.target_results[target.target_id]
-            region_id = f"region-{target.target_id}"
+            region_id = (
+                region_plan.region_id_for(target.target_id)
+                or "region:unassigned"
+            )
             provider_ids = {_snapshot_provider_id(item) for item in result.contributors}
             if result.arrival_provider_id is not None:
                 provider_ids.add(_snapshot_provider_id(result.arrival_provider_id))
             providers = sorted(provider_ids)
+            region_contributors.setdefault(region_id, set()).update(providers)
             current_is_rain = result.current_state == "regen"
             current_is_dry = result.current_state == "droog"
             current_freshness = "current" if providers else "unknown"
@@ -550,6 +686,10 @@ class ThinOperationalRuntime:
                 threat_freshness = "current" if providers else "unknown"
                 track_id = probability = calibration = None
                 passage = "unknown"
+            target_reason_codes = [result.reason_code]
+            if region_plan.location_status_for(target.target_id) == "stale":
+                target_reason_codes.append("target_location_stale")
+            target_reason_codes = sorted(set(target_reason_codes))
             target_items.append({
                 "target_id": target.target_id,
                 "display_name": target.display_name,
@@ -569,21 +709,12 @@ class ThinOperationalRuntime:
                     ),
                     "product_valid_at": product_valid_at if current_freshness == "current" else None,
                     "provider_ids": providers,
-                    "reason_codes": [result.reason_code],
-                    "ground_evidence": {
-                        "status": "unknown",
-                        "freshness": "unknown",
-                        "confirmation": None,
-                        "same_track": None,
-                        "evidence_valid_at": None,
-                        "observed_at_min": None,
-                        "observed_at_max": None,
-                        "received_at": None,
-                        "physical_site_count": 0,
-                        "wet_site_count": 0,
-                        "source_ids": [],
-                        "reason_codes": [],
-                    },
+                    "reason_codes": target_reason_codes,
+                    "ground_evidence": _ground_evidence(
+                        fusion,
+                        target_id=target.target_id,
+                        current_is_rain=current_is_rain,
+                    ),
                 },
                 "next_threat": {
                     "state": threat_state,
@@ -596,20 +727,37 @@ class ThinOperationalRuntime:
                     "passage_status": passage,
                     "product_valid_at": product_valid_at if threat_freshness == "current" else None,
                     "provider_ids": providers,
-                    "reason_codes": [result.reason_code],
+                    "reason_codes": target_reason_codes,
                 },
             })
-            applicable_ids = sorted(
+
+        region_items: list[dict[str, Any]] = []
+        for region in region_plan.regions:
+            applicable_ids = sorted({
                 _snapshot_provider_id(spec.provider_id)
                 for spec in PROVIDERS
-                if spec.applies_to(target)
+                if any(spec.applies_to(target) for target in region.targets)
+            })
+            home_target = next(
+                (target for target in region.targets if target.kind == "home"),
+                None,
             )
             region_items.append({
-                "region_id": region_id,
-                "display_name": target.display_name,
-                "state": "current" if providers else "unknown",
+                "region_id": region.region_id,
+                "display_name": (
+                    home_target.display_name
+                    if home_target is not None
+                    else " / ".join(target.display_name for target in region.targets)
+                ),
+                "state": (
+                    "current"
+                    if region_contributors.get(region.region_id)
+                    else "stale"
+                    if len(region.stale_target_ids) == len(region.targets)
+                    else "unknown"
+                ),
                 "provider_ids": applicable_ids,
-                "target_ids": [target.target_id],
+                "target_ids": list(region.target_ids),
             })
 
         default_region = region_items[0]["region_id"] if region_items else "region-unassigned"

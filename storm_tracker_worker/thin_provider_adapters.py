@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import io
 import json
+import logging
 import math
 import os
 import tarfile
+import time
 import xml.etree.ElementTree as ET
 from typing import Any, Mapping, Protocol
 from urllib.parse import quote, urlsplit
@@ -21,8 +23,12 @@ from .thin_observation import (
     NormalizedObservation,
     ObservationKind,
     ObservationQuality,
+    ThinObservationError,
 )
 from .thin_provider_catalog import ThinProviderRequest
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 OPEN_METEO_ENDPOINT = "https://api.open-meteo.com/v1/forecast"
@@ -30,6 +36,7 @@ OPERA_LISTING_ENDPOINT = "https://s3.waw3-1.cloudferro.com/openradar-24h/"
 OPERA_OBJECT_BASE = "https://s3.waw3-1.cloudferro.com/openradar-24h"
 METAR_ENDPOINT = "https://aviationweather.gov/api/data/metar"
 NETATMO_ENDPOINT = "https://api.netatmo.com/api/getpublicdata"
+NETATMO_TOKEN_ENDPOINT = "https://api.netatmo.com/oauth2/token"
 MAX_OPERA_SPATIAL_CELLS = 64
 DWD_RADOLAN_ENDPOINT = (
     "https://opendata.dwd.de/weather/radar/composite/rv/"
@@ -140,6 +147,15 @@ class AsyncHttpFetcher(Protocol):
         maximum_bytes: int | None = None,
     ) -> bytes: ...
 
+    async def post_json(
+        self,
+        url: str,
+        *,
+        data: Mapping[str, str] | None = None,
+        headers: Mapping[str, str] | None = None,
+        maximum_bytes: int | None = None,
+    ) -> Any: ...
+
 
 class AioHttpFetcher:
     """Bounded HTTP client with no HA or persistence dependency."""
@@ -202,6 +218,48 @@ class AioHttpFetcher:
             headers=headers,
             maximum_bytes=maximum_bytes,
         )
+        return json.loads(payload.decode("utf-8"))
+
+    async def post_json(
+        self,
+        url: str,
+        *,
+        data: Mapping[str, str] | None = None,
+        headers: Mapping[str, str] | None = None,
+        maximum_bytes: int | None = None,
+    ) -> Any:
+        import aiohttp
+
+        limit = int(maximum_bytes or 1024 * 1024)
+        request_headers = {"Accept-Encoding": "identity", **dict(headers or {})}
+
+        async def _read(session: Any) -> bytes:
+            timeout = aiohttp.ClientTimeout(total=self._timeout_seconds)
+            async with session.post(
+                url,
+                data=None if data is None else dict(data),
+                headers=request_headers,
+                timeout=timeout,
+            ) as response:
+                if response.status != 200:
+                    raise RuntimeError(f"http_status_{response.status}")
+                declared = response.headers.get("Content-Length")
+                if declared is not None and int(declared) > limit:
+                    raise ValueError("response_too_large")
+                chunks: list[bytes] = []
+                size = 0
+                async for chunk in response.content.iter_chunked(64 * 1024):
+                    size += len(chunk)
+                    if size > limit:
+                        raise ValueError("response_too_large")
+                    chunks.append(bytes(chunk))
+                return b"".join(chunks)
+
+        if self._session is not None:
+            payload = await _read(self._session)
+        else:
+            async with aiohttp.ClientSession() as session:
+                payload = await _read(session)
         return json.loads(payload.decode("utf-8"))
 
 
@@ -889,61 +947,256 @@ class MetarAdapter:
         return tuple(observations)
 
 
-class NetatmoAdapter:
-    def __init__(self, *, access_token: str | None = None, endpoint: str = NETATMO_ENDPOINT) -> None:
-        self._access_token = access_token or os.getenv("STV3_NETATMO_ACCESS_TOKEN")
+class NetatmoOAuthTokenProvider:
+    """Refresh the worker's existing Netatmo OAuth grant in memory only."""
+
+    def __init__(
+        self,
+        *,
+        fetcher: AsyncHttpFetcher,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        refresh_token: str | None = None,
+        endpoint: str = NETATMO_TOKEN_ENDPOINT,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._fetcher = fetcher
+        self._client_id = client_id or os.getenv("STV3_NETATMO_CLIENT_ID")
+        self._client_secret = client_secret or os.getenv("STV3_NETATMO_CLIENT_SECRET")
+        self._refresh_token = refresh_token or os.getenv("STV3_NETATMO_REFRESH_TOKEN")
         self._endpoint = endpoint
+        self._monotonic = monotonic
+        self._access_token: str | None = None
+        self._expires_at = 0.0
+
+    async def get_access_token(self) -> str | None:
+        if self._access_token and self._monotonic() < self._expires_at:
+            return self._access_token
+        if not all((self._client_id, self._client_secret, self._refresh_token)):
+            return None
+        payload = await self._fetcher.post_json(
+            self._endpoint,
+            data={
+                "grant_type": "refresh_token",
+                "client_id": self._client_id,
+                "client_secret": self._client_secret,
+                "refresh_token": self._refresh_token,
+            },
+            maximum_bytes=1024 * 1024,
+        )
+        token = payload.get("access_token") if isinstance(payload, Mapping) else None
+        if not isinstance(token, str) or not token.strip():
+            raise ValueError("netatmo_token_response_invalid")
+        expires_in = _optional_float(payload.get("expires_in")) if isinstance(payload, Mapping) else None
+        self._access_token = token.strip()
+        self._expires_at = self._monotonic() + max(60.0, (expires_in or 3600.0) - 30.0)
+        return self._access_token
+
+
+_NETATMO_RES_TYPES: dict[str, tuple[ObservationKind, str]] = {
+    "temperature": (ObservationKind.TEMPERATURE, "°C"),
+    "humidity": (ObservationKind.RELATIVE_HUMIDITY, "%"),
+    "pressure": (ObservationKind.PRESSURE, "hPa"),
+}
+
+
+def _netatmo_measurements(measures: Any) -> tuple[tuple[ObservationKind, float, str, str], ...]:
+    """Convert Netatmo's module-oriented response to canonical readings."""
+
+    values: list[tuple[ObservationKind, float, str, str]] = []
+    for measure in measures.values() if isinstance(measures, Mapping) else ():
+        if not isinstance(measure, Mapping):
+            continue
+        direct = (
+            ("rain_live", ObservationKind.RAIN_RATE, "mm/h", "rain_rate"),
+            ("rain_60min", ObservationKind.RAIN_ACCUMULATION, "mm", "rain_60min"),
+            ("wind_strength", ObservationKind.WIND_SPEED, "km/h", "wind_speed"),
+            ("gust_strength", ObservationKind.WIND_SPEED, "km/h", "wind_gust"),
+            ("wind_angle", ObservationKind.WIND_DIRECTION, "°", "wind_direction"),
+        )
+        for key, kind, unit, label in direct:
+            value = _optional_float(measure.get(key))
+            if value is not None:
+                values.append((kind, value, unit, label))
+        measurement_types = measure.get("type")
+        results = measure.get("res")
+        if not isinstance(measurement_types, list) or not isinstance(results, Mapping) or not results:
+            continue
+        latest = next(reversed(results.values()))
+        if not isinstance(latest, list):
+            continue
+        for index, type_name in enumerate(measurement_types):
+            mapping = _NETATMO_RES_TYPES.get(type_name) if isinstance(type_name, str) else None
+            if mapping is None or index >= len(latest):
+                continue
+            value = _optional_float(latest[index])
+            if value is not None:
+                values.append((mapping[0], value, mapping[1], type_name))
+    return tuple(values)
+
+
+class NetatmoAdapter:
+    def __init__(
+        self,
+        *,
+        access_token: str | None = None,
+        access_token_provider: Callable[[], Awaitable[str | None]] | None = None,
+        station_id_for_summary: str | None = None,
+        endpoint: str = NETATMO_ENDPOINT,
+    ) -> None:
+        self._access_token = access_token or os.getenv("STV3_NETATMO_ACCESS_TOKEN")
+        self._access_token_provider = access_token_provider
+        self._station_id_for_summary = (station_id_for_summary or "").strip().lower()
+        self._endpoint = endpoint
+        self._last_summary_at = 0.0
+        self._last_summary_signature: tuple[tuple[str, float], ...] = ()
 
     async def fetch(self, request, fetcher, *, now):
-        if not self._access_token:
+        access_token = self._access_token
+        if not access_token and self._access_token_provider is not None:
+            access_token = await self._access_token_provider()
+        if not access_token:
             raise ProviderBlocked("external_access_required")
-        payload = await fetcher.get_json(
-            self._endpoint,
-            params={
-                "lat_ne": f"{max(item.latitude for item in request.targets) + 1.0:.5f}",
-                "lon_ne": f"{max(item.longitude for item in request.targets) + 1.0:.5f}",
-                "lat_sw": f"{min(item.latitude for item in request.targets) - 1.0:.5f}",
-                "lon_sw": f"{min(item.longitude for item in request.targets) - 1.0:.5f}",
-            },
-            headers={"Authorization": f"Bearer {self._access_token}"},
-            maximum_bytes=16 * 1024 * 1024,
+        observations: dict[
+            tuple[str, str, ObservationKind, str],
+            NormalizedObservation,
+        ] = {}
+        closest_summary: tuple[float, str, list[NormalizedObservation]] | None = None
+        requested_targets = {
+            target.target_id: target for target in request.targets
+        }
+        grouped_targets: list[tuple[Target, ...]] = []
+        assigned_ids: set[str] = set()
+        for region in request.regions:
+            group = tuple(
+                requested_targets[target.target_id]
+                for target in region.targets
+                if target.target_id in requested_targets
+            )
+            if group:
+                grouped_targets.append(group)
+                assigned_ids.update(target.target_id for target in group)
+        grouped_targets.extend(
+            (target,)
+            for target in request.targets
+            if target.target_id not in assigned_ids
         )
-        observations: list[NormalizedObservation] = []
-        for station in payload.get("body", ()) if isinstance(payload, Mapping) else ():
-            place = station.get("place", {}) if isinstance(station, Mapping) else {}
-            location = place.get("location") if isinstance(place, Mapping) else None
-            if not isinstance(location, list) or len(location) != 2:
-                continue
-            longitude = _optional_float(location[0])
-            latitude = _optional_float(location[1])
-            if latitude is None or longitude is None:
-                continue
-            measures = station.get("measures", {})
-            for target in request.targets:
-                if _haversine_km(latitude, longitude, target.latitude, target.longitude) > target.observation_radius_km:
+        local_radius_km = min(max(float(request.ground_radius_km), 1.0), 20.0)
+        delta = local_radius_km / 111.0
+        for group in grouped_targets:
+            # Targets in one stable acquisition region share one bounded box.
+            # The local ground radius remains independent from the wider
+            # warning/radar horizon.
+            payload = await fetcher.get_json(
+                self._endpoint,
+                params={
+                    "lat_ne": f"{max(target.latitude for target in group) + delta:.5f}",
+                    "lon_ne": f"{max(target.longitude for target in group) + delta:.5f}",
+                    "lat_sw": f"{min(target.latitude for target in group) - delta:.5f}",
+                    "lon_sw": f"{min(target.longitude for target in group) - delta:.5f}",
+                    "filter": "true",
+                },
+                headers={"Authorization": f"Bearer {access_token}"},
+                maximum_bytes=16 * 1024 * 1024,
+            )
+            for station in payload.get("body", ()) if isinstance(payload, Mapping) else ():
+                place = station.get("place", {}) if isinstance(station, Mapping) else {}
+                location = place.get("location") if isinstance(place, Mapping) else None
+                if not isinstance(location, list) or len(location) != 2:
                     continue
-                for measure in measures.values() if isinstance(measures, Mapping) else ():
-                    if not isinstance(measure, Mapping):
+                longitude = _optional_float(location[0])
+                latitude = _optional_float(location[1])
+                if latitude is None or longitude is None:
+                    continue
+                measures = station.get("measures", {})
+                measurements = _netatmo_measurements(measures)
+                station_id = str(station.get("_id", "unknown"))
+                for target in group:
+                    distance_km = _haversine_km(
+                        latitude,
+                        longitude,
+                        target.latitude,
+                        target.longitude,
+                    )
+                    if distance_km > local_radius_km:
                         continue
-                    rain_live = _optional_float(measure.get("rain_live"))
-                    observed_at = _parse_timestamp(measure.get("rain_timeutc"), fallback=now)
-                    if rain_live is not None:
-                        observations.append(NormalizedObservation.create(
-                            provider_id=request.provider_id,
-                            product_id=request.product_id,
-                            target_id=target.target_id,
-                            kind=ObservationKind.RAIN_RATE,
-                            value=rain_live,
-                            unit="mm/h",
-                            observed_at=observed_at,
-                            received_at=now,
-                            latitude=latitude,
-                            longitude=longitude,
-                            quality=ObservationQuality.GOOD,
-                            geometry=_point(longitude, latitude),
-                            metadata={"station_id": str(station.get("_id", "unknown"))},
-                        ))
-        return tuple(observations)
+                    station_observations: list[NormalizedObservation] = []
+                    for kind, value, unit, label in measurements:
+                        # Netatmo's rainfall timestamp is the last rainfall
+                        # value, not the last station update. The bounded
+                        # response itself is the freshness event for all fields.
+                        try:
+                            observation = NormalizedObservation.create(
+                                provider_id=request.provider_id,
+                                product_id=request.product_id,
+                                target_id=target.target_id,
+                                kind=kind,
+                                value=value,
+                                unit=unit,
+                                observed_at=float(now),
+                                received_at=now,
+                                latitude=latitude,
+                                longitude=longitude,
+                                quality=ObservationQuality.GOOD,
+                                geometry=_point(longitude, latitude),
+                                metadata={
+                                    "station_id": station_id,
+                                    "measurement": label,
+                                },
+                            )
+                        except ThinObservationError:
+                            # One corrupt public sensor field must not discard
+                            # the other readings from this physical station.
+                            continue
+                        station_observations.append(observation)
+                    selected_station = (
+                        bool(self._station_id_for_summary)
+                        and station_id.lower() == self._station_id_for_summary
+                    )
+                    if (
+                        self._station_id_for_summary
+                        and target.target_id == "home"
+                        and not selected_station
+                    ):
+                        continue
+                    for observation in station_observations:
+                        key = (
+                            target.target_id,
+                            station_id,
+                            observation.kind,
+                            str(observation.metadata.get("measurement", "")),
+                        )
+                        observations[key] = observation
+                    if selected_station and station_observations:
+                        closest_summary = (
+                            0.0,
+                            "geselecteerd station",
+                            station_observations,
+                        )
+                    elif (
+                        not self._station_id_for_summary
+                        and target.target_id == "home"
+                        and station_observations
+                        and (
+                            closest_summary is None
+                            or distance_km < closest_summary[0]
+                        )
+                    ):
+                        closest_summary = (
+                            distance_km,
+                            target.display_name,
+                            station_observations,
+                        )
+        if closest_summary is not None:
+            _, target_name, station_observations = closest_summary
+            latest = {item.metadata.get("measurement", item.kind.value): item.value for item in station_observations}
+            signature = tuple(sorted((str(key), float(value)) for key, value in latest.items()))
+            if signature != self._last_summary_signature or now - self._last_summary_at >= 300.0:
+                labels = ", ".join(f"{key}={value:g}" for key, value in signature)
+                _LOGGER.info("Netatmo actuele meting nabij %s: %s", target_name, labels)
+                self._last_summary_at = float(now)
+                self._last_summary_signature = signature
+        return tuple(observations.values())
 
 
 class BlitzortungAdapter:
@@ -1507,6 +1760,7 @@ __all__ = [
     "KnmiRadarAdapter",
     "MetarAdapter",
     "NetatmoAdapter",
+    "NetatmoOAuthTokenProvider",
     "OpenMeteoAdapter",
     "OperaRadarAdapter",
     "ProviderBlocked",

@@ -26,6 +26,7 @@ from .thin_provider_adapters import (
     KnmiRadarAdapter,
     MetarAdapter,
     NetatmoAdapter,
+    NetatmoOAuthTokenProvider,
     OpenMeteoAdapter,
     OperaRadarAdapter,
 )
@@ -34,7 +35,7 @@ from .tracking_core.operational_snapshot import encode_control_envelope
 
 
 _LOGGER = logging.getLogger(__name__)
-WORKER_VERSION = "1.18.11"
+WORKER_VERSION = "1.18.21"
 
 
 class ThinMqttService:
@@ -384,6 +385,7 @@ class ThinMqttService:
 
 def _build_runtime() -> tuple[ThinOperationalRuntime, BlitzortungAdapter]:
     blitzortung = BlitzortungAdapter()
+    fetcher = AioHttpFetcher()
     adapters = {
         "kmi_radar": KmiRadarAdapter(
             forecast_url=os.getenv("STV3_KMI_FORECAST_URL") or None,
@@ -394,12 +396,22 @@ def _build_runtime() -> tuple[ThinOperationalRuntime, BlitzortungAdapter]:
         "dwd_radolan": DwdRadolanAdapter(),
         "open_meteo": OpenMeteoAdapter(),
         "metar": MetarAdapter(),
-        "netatmo": NetatmoAdapter(),
+        "netatmo": NetatmoAdapter(
+            # Fixed household reference station. An explicit app option still
+            # overrides this default when the Supervisor exposes that field.
+            station_id_for_summary=(
+                os.getenv("STV3_NETATMO_STATION_ID")
+                or "70:ee:50:29:59:56"
+            ),
+            access_token_provider=NetatmoOAuthTokenProvider(
+                fetcher=fetcher,
+            ).get_access_token,
+        ),
         "blitzortung": blitzortung,
     }
     provider_runtime = ThinProviderRuntime(
         adapters=adapters,
-        fetcher=AioHttpFetcher(),
+        fetcher=fetcher,
         max_parallel=8,
         timeout_seconds=45.0,
         retries=1,

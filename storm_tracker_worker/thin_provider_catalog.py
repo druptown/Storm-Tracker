@@ -7,6 +7,7 @@ import math
 from typing import Mapping
 
 from .desired_state import DesiredState, Target
+from .thin_region_planner import ThinAcquisitionRegion, ThinRegionPlan
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,8 @@ class ThinProviderRequest:
     product_id: str
     targets: tuple[Target, ...]
     requested_at: float
+    regions: tuple[ThinAcquisitionRegion, ...] = ()
+    ground_radius_km: float = 20.0
 
 
 EUROPE = CoverageBox(south=34.0, north=72.0, west=-25.0, east=45.0)
@@ -96,6 +99,7 @@ def build_due_requests(
     *,
     now: float,
     last_attempts: Mapping[str, float],
+    region_plan: ThinRegionPlan | None = None,
 ) -> tuple[ThinProviderRequest, ...]:
     """Return at most one request per due provider for applicable targets."""
 
@@ -105,7 +109,13 @@ def build_due_requests(
     if not math.isfinite(now_value) or now_value < 0.0:
         raise ValueError("now must be a finite non-negative timestamp")
 
-    usable_targets = tuple(target for target in state.targets if _target_is_usable(target))
+    if region_plan is not None and not isinstance(region_plan, ThinRegionPlan):
+        raise TypeError("region_plan must be ThinRegionPlan or None")
+    usable_targets = (
+        region_plan.targets
+        if region_plan is not None
+        else tuple(target for target in state.targets if _target_is_usable(target))
+    )
     if not usable_targets:
         return ()
 
@@ -124,12 +134,24 @@ def build_due_requests(
         )
         if not targets:
             continue
+        target_ids = {target.target_id for target in targets}
+        regions = (
+            tuple(
+                region
+                for region in region_plan.regions
+                if target_ids.intersection(region.target_ids)
+            )
+            if region_plan is not None
+            else ()
+        )
         requests.append(
             ThinProviderRequest(
                 provider_id=spec.provider_id,
                 product_id=spec.product_id,
                 targets=targets,
                 requested_at=now_value,
+                regions=regions,
+                ground_radius_km=state.settings.ground_radius_km,
             )
         )
     return tuple(requests)

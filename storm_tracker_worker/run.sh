@@ -17,6 +17,7 @@ export STV3_LOG_LEVEL
 export STV3_NETATMO_CLIENT_ID
 export STV3_NETATMO_CLIENT_SECRET
 export STV3_NETATMO_REFRESH_TOKEN
+export STV3_NETATMO_STATION_ID
 export STV3_NETATMO_TOKEN_STATE
 export STV3_SYNOPTIC_TOKEN
 export STV3_SYNOPTIC_RAW_RETENTION_AUTHORITY
@@ -66,6 +67,7 @@ if [[ -n "${STV3_MQTT_HOST:-}" ]]; then
   STV3_NETATMO_CLIENT_ID="${STV3_NETATMO_CLIENT_ID:-}"
   STV3_NETATMO_CLIENT_SECRET="${STV3_NETATMO_CLIENT_SECRET:-}"
   STV3_NETATMO_REFRESH_TOKEN="${STV3_NETATMO_REFRESH_TOKEN:-}"
+  STV3_NETATMO_STATION_ID="${STV3_NETATMO_STATION_ID:-}"
   STV3_NETATMO_TOKEN_STATE="${STV3_NETATMO_TOKEN_STATE:-/share/storm_tracker_worker/private/netatmo_token_state.json}"
   STV3_SYNOPTIC_TOKEN="${STV3_SYNOPTIC_TOKEN:-}"
   STV3_SYNOPTIC_RAW_RETENTION_AUTHORITY="${STV3_SYNOPTIC_RAW_RETENTION_AUTHORITY:-}"
@@ -143,6 +145,7 @@ else
   STV3_NETATMO_CLIENT_ID="$(bashio::config netatmo_client_id)"
   STV3_NETATMO_CLIENT_SECRET="$(bashio::config netatmo_client_secret)"
   STV3_NETATMO_REFRESH_TOKEN="$(bashio::config netatmo_refresh_token)"
+  STV3_NETATMO_STATION_ID="$(bashio::config netatmo_station_id)"
   STV3_NETATMO_TOKEN_STATE="${STV3_NETATMO_TOKEN_STATE:-/data/netatmo_token_state.json}"
   STV3_SYNOPTIC_TOKEN="$(bashio::config synoptic_token)"
   if [[ "$(bashio::config synoptic_raw_retention_terms_accepted)" == "true" ]]; then
@@ -328,6 +331,7 @@ case "${STV3_RUNTIME_MODE}" in
     unset STV3_NETATMO_CLIENT_ID
     unset STV3_NETATMO_CLIENT_SECRET
     unset STV3_NETATMO_REFRESH_TOKEN
+    unset STV3_NETATMO_STATION_ID
     unset STV3_NETATMO_TOKEN_STATE
     unset STV3_SYNOPTIC_TOKEN
     unset STV3_SYNOPTIC_RAW_RETENTION_AUTHORITY
