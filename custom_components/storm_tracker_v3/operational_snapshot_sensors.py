@@ -251,6 +251,9 @@ def _worker_runtime_attribute_projection(hass: Any) -> dict[str, Any]:
     if not isinstance(status, Mapping):
         return {}
     projection: dict[str, Any] = {}
+    state = status.get("state")
+    if state in {"waiting", "online", "busy", "degraded", "offline"}:
+        projection["worker_heartbeat_state"] = state
     version = status.get("version")
     if isinstance(version, str) and 0 < len(version) <= 96:
         projection["worker_version"] = version
@@ -487,9 +490,21 @@ class SnapshotOnlySensorEntity(SensorEntity):
             "ha_attribute_budget_exceeded": False,
         })
         if self._description.kind == _KIND_WORKER:
-            attributes.update(
-                _worker_runtime_attribute_projection(getattr(self, "hass", None))
+            runtime_attributes = _worker_runtime_attribute_projection(
+                getattr(self, "hass", None)
             )
+            heartbeat_state = runtime_attributes.get("worker_heartbeat_state")
+            attributes["snapshot_worker_state"] = attributes.get("worker_state")
+            attributes.update(runtime_attributes)
+            return _enforce_ha_attribute_budget(SnapshotSensorView(
+                native_value=(
+                    heartbeat_state
+                    if heartbeat_state is not None
+                    else projected.native_value
+                ),
+                available=projected.available,
+                attributes=attributes,
+            ), self._description)
         if self._description.target_id is not None:
             attributes["configured_target_id"] = self._description.target_id
         if self._description.provider_id is not None:
