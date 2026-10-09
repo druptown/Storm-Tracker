@@ -3315,6 +3315,7 @@ class WorkerService:
                 "last_error_code",
                 "last_tick_reason_code",
                 "last_tick_status",
+                "last_tick_workload_id",
                 "live_wiring",
                 "meteorological_output",
                 "mode",
@@ -3553,6 +3554,12 @@ class WorkerService:
                 )
                 and isinstance(diagnostics.get("last_tick_status"), str)
                 and isinstance(diagnostics.get("last_tick_reason_code"), str)
+                and (
+                    diagnostics.get("last_tick_workload_id") is None
+                    or not self._worker_first_allowed_workload_ids
+                    or diagnostics.get("last_tick_workload_id")
+                    in self._worker_first_allowed_workload_ids
+                )
             )
         if self._worker_first_runtime_mode == RAW_CAPTURE_SHADOW_MODE:
             expected_fields = {

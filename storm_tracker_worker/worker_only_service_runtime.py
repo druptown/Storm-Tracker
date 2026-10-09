@@ -1305,6 +1305,9 @@ class WorkerOnlyServiceRuntime:
 
     def diagnostics(self) -> dict[str, Any]:
         raw = self._raw.diagnostics()
+        raw_last_tick = raw.get("last_tick", {})
+        if not isinstance(raw_last_tick, Mapping):
+            raw_last_tick = {}
         output = None if self._output is None else self._output.diagnostics()
         publication = {} if output is None else output.get("publication", {})
         publication_counts = publication.get("counts", {})
@@ -1397,8 +1400,9 @@ class WorkerOnlyServiceRuntime:
                 self._state == "stopped"
                 and raw.get("shutdown_complete") is True
             ),
-            "last_tick_status": raw.get("last_tick", {}).get("status"),
-            "last_tick_reason_code": raw.get("last_tick", {}).get("reason_code"),
+            "last_tick_status": raw_last_tick.get("status"),
+            "last_tick_reason_code": raw_last_tick.get("reason_code"),
+            "last_tick_workload_id": raw_last_tick.get("workload_id"),
             "last_error_code": self._last_error_code,
             "counts": dict(self._counts),
         }
