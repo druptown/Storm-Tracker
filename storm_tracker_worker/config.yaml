@@ -1,5 +1,5 @@
 name: "Storm Tracker Worker"
-version: "1.17.42"
+version: "1.17.43"
 slug: "storm_tracker_worker"
 description: "Geisoleerde radar- en nowcastworker voor Storm Tracker V3"
 startup: services

@@ -193,8 +193,13 @@ class RawCaptureRetentionGuardConfig:
             self.event_control_receipt_capacity
             * self.event_control_receipt_max_bytes
         )
+        # The raw store's physical maximum is an immutable on-disk schema
+        # bound and may intentionally exceed the lower retained-payload
+        # admission claim.  The configured envelope must cover both catalogs
+        # and at least one complete cadence cycle; existing stores therefore
+        # remain readable without reserving their entire historical maximum.
         minimum_persistent_envelope = (
-            self.cadence_raw_max_bytes
+            self.cadence_cycle_reserve_bytes
             + self.cadence_raw_catalog_max_bytes
             + self.cadence_ledger_catalog_max_bytes
         )
