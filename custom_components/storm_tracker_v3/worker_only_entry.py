@@ -564,20 +564,14 @@ class WorkerOnlyEntryRuntime:
         now: float,
         *,
         initial: bool,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
         state = self.hass.states.get(spec.entity_id)
         attributes = _state_attributes(state)
         coordinates = _coordinates(attributes) if _state_is_available(state) else None
         retained = self._retained.get(spec.target_id)
         if coordinates is None:
             if retained is None:
-                if initial:
-                    raise ConfigEntryNotReady(
-                        f"Tracker {spec.entity_id} heeft nog geen echte coordinaten"
-                    )
-                raise WorkerOnlyEntryError(
-                    f"Tracker {spec.entity_id} mist bewaarde coordinaten"
-                )
+                return None
             unavailable = dict(retained)
             unavailable["available"] = False
             unavailable["observation_radius_km"] = radius
@@ -645,9 +639,11 @@ class WorkerOnlyEntryRuntime:
             raise WorkerOnlyEntryError("runtimeklok is ongeldig")
         targets: list[dict[str, Any]] = [self._home_target(radius, now)]
         for spec in self._target_specs[1:]:
-            targets.append(
-                self._tracked_target(spec, radius, now, initial=initial)
+            target = self._tracked_target(
+                spec, radius, now, initial=initial
             )
+            if target is not None:
+                targets.append(target)
         sensor_ids = sorted(target["target_id"] for target in targets[1:])
         token = _entry_token(self.entry.entry_id)
         config_snapshot = {
