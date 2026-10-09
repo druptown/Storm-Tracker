@@ -111,6 +111,12 @@ class ThinRegionPlan:
             return None
         return self.region(region_id).region_revision_id
 
+    def region_revision_id_for_region(self, region_id: str) -> str | None:
+        try:
+            return self.region(region_id).region_revision_id
+        except KeyError:
+            return None
+
     def location_status_for(self, target_id: str) -> str | None:
         return self.location_statuses.get(target_id)
 

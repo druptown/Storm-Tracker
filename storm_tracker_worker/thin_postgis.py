@@ -1001,14 +1001,21 @@ class ThinPostGISWriter:
                     for cell in nowcast.storm_cells:
                         cell_payload = cell.as_dict()
                         geometry_json = _json(cell_payload["geometry"])
-                        cell_region_revision_id = (
-                            None
-                            if region_plan is None
-                            else region_plan.region_revision_id_for_position(
-                                cell.latitude,
-                                cell.longitude,
-                            )
-                        )
+                        cell_region_revision_id = None
+                        if region_plan is not None:
+                            if cell.region_id is not None:
+                                cell_region_revision_id = (
+                                    region_plan.region_revision_id_for_region(
+                                        cell.region_id,
+                                    )
+                                )
+                            else:
+                                cell_region_revision_id = (
+                                    region_plan.region_revision_id_for_position(
+                                        cell.latitude,
+                                        cell.longitude,
+                                    )
+                                )
                         cursor.execute(_INSERT_CELL, (
                             cell.cell_id,
                             cell.observed_at,

@@ -783,7 +783,7 @@ class ThinOperationalRuntime:
                 max(0.0, float(item.location_accuracy_m or 0.0) / 1000.0),
             )
             for item in active_targets
-        })
+        }, target_region_ids=region_plan.target_region_ids)
         requests = build_due_requests(
             state,
             now=now,
@@ -898,6 +898,7 @@ class ThinOperationalRuntime:
                     motion_agreement_angle_deg=(
                         item.motion_agreement_angle_deg
                     ),
+                    region_id=region.region_id,
                 ))
 
         for region in region_plan.regions:
@@ -1096,7 +1097,7 @@ class ThinOperationalRuntime:
             })
 
         for cell in nowcast.storm_cells:
-            region_id = default_region_id
+            region_id = cell.region_id or default_region_id
             geometry = json.loads(json.dumps(dict(cell.geometry), allow_nan=False))
             group = [{
                 "type": "Feature",

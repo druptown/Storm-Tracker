@@ -44,6 +44,7 @@ class StormCell:
     motion_reason_codes: tuple[str, ...] = ()
     motion_supporting_methods: tuple[str, ...] = ()
     motion_agreement_angle_deg: float | None = None
+    region_id: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -67,6 +68,7 @@ class StormCell:
             "motion_reason_codes": list(self.motion_reason_codes),
             "motion_supporting_methods": list(self.motion_supporting_methods),
             "motion_agreement_angle_deg": self.motion_agreement_angle_deg,
+            "region_id": self.region_id,
         }
 
 
@@ -188,12 +190,19 @@ def _is_spatial_weather(observation: NormalizedObservation) -> bool:
 class ThinNowcastRuntime:
     def __init__(self, *, targets: Mapping[str, tuple[float, ...]]) -> None:
         self._targets = dict(targets)
+        self._target_region_ids: dict[str, str] = {}
         self._previous_cells: tuple[_CellFrame, ...] = ()
         self._latest: ThinNowcast | None = None
         self._sequence = 0
 
-    def update_targets(self, targets: Mapping[str, tuple[float, ...]]) -> None:
+    def update_targets(
+        self,
+        targets: Mapping[str, tuple[float, ...]],
+        *,
+        target_region_ids: Mapping[str, str] | None = None,
+    ) -> None:
         self._targets = dict(targets)
+        self._target_region_ids = dict(target_region_ids or {})
 
     def _associate(
         self,
@@ -369,9 +378,15 @@ class ThinNowcastRuntime:
                 )
             )
             raining = bool((rain_rate is not None and rain_rate > 0.0) or has_echo)
+            target_region_id = self._target_region_ids.get(target_id)
             passages = tuple(
                 passage
                 for cell in cells
+                if (
+                    target_region_id is None
+                    or cell.region_id is None
+                    or cell.region_id == target_region_id
+                )
                 if cell.motion_ready
                 if (passage := forecast_target_passage(
                     cell=cell,
