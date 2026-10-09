@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from datetime import datetime, timezone
 import io
 import json
 import math
 import os
+import tarfile
 import xml.etree.ElementTree as ET
 from typing import Any, Mapping, Protocol
+from urllib.parse import quote, urlsplit
 
 from .thin_observation import (
     MAX_GROUND_SOURCE_AGE_SECONDS,
@@ -26,6 +29,25 @@ OPERA_OBJECT_BASE = "https://s3.waw3-1.cloudferro.com/openradar-24h"
 METAR_ENDPOINT = "https://aviationweather.gov/api/data/metar"
 NETATMO_ENDPOINT = "https://api.netatmo.com/api/getpublicdata"
 MAX_OPERA_SPATIAL_CELLS = 64
+DWD_RADOLAN_ENDPOINT = (
+    "https://opendata.dwd.de/weather/radar/composite/rv/"
+    "composite_rv_LATEST.tar"
+)
+KNMI_OPEN_DATA_BASE = (
+    "https://api.dataplatform.knmi.nl/open-data/v1/datasets/"
+    "nl_rdr_data_rtcor_5m/versions/1.0"
+)
+MAX_NATIONAL_RADAR_SPATIAL_CELLS = 64
+MAX_RADAR_FRAME_AGE_SECONDS = 15 * 60
+_RADAR_DECODE_SEMAPHORE = asyncio.Semaphore(2)
+_KNMI_DOWNLOAD_HOST_SUFFIXES = (
+    ".knmi.nl",
+    ".amazonaws.com",
+    ".googleapis.com",
+    ".googleusercontent.com",
+    ".cloudfront.net",
+    ".blob.core.windows.net",
+)
 
 
 class ProviderBlocked(RuntimeError):
@@ -805,19 +827,435 @@ class BlitzortungAdapter:
         return tuple(observations)
 
 
+def _attribute_text(value: Any) -> str:
+    if hasattr(value, "item"):
+        value = value.item()
+    if isinstance(value, bytes):
+        value = value.decode("ascii", errors="strict")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("radar_attribute_invalid")
+    return value.strip()
+
+
+def _validate_radar_time(observed_at: float, received_at: float, *, prefix: str) -> None:
+    if not math.isfinite(observed_at):
+        raise ValueError(f"{prefix}_frame_time_invalid")
+    if received_at - observed_at > MAX_RADAR_FRAME_AGE_SECONDS:
+        raise ValueError(f"{prefix}_frame_stale")
+    if observed_at - received_at > 5 * 60:
+        raise ValueError(f"{prefix}_frame_time_invalid")
+
+
+def _national_radar_observations(
+    rain_rate: Any,
+    valid: Any,
+    request: ThinProviderRequest,
+    *,
+    observed_at: float,
+    received_at: float,
+    lonlat_to_pixel: Any,
+    pixel_to_lonlat: Any,
+    pixel_width_m: float,
+    pixel_height_m: float,
+) -> tuple[NormalizedObservation, ...]:
+    """Emit target samples and bounded five-kilometre rain components."""
+    import numpy as np
+
+    if rain_rate.ndim != 2 or valid.shape != rain_rate.shape:
+        raise ValueError("radar_grid_invalid")
+    height, width = rain_rate.shape
+    observations: list[NormalizedObservation] = []
+    for target in request.targets:
+        row_value, column_value = lonlat_to_pixel(target.longitude, target.latitude)
+        row = math.floor(row_value)
+        column = math.floor(column_value)
+        if not (0 <= row < height and 0 <= column < width and valid[row, column]):
+            continue
+        value = float(rain_rate[row, column])
+        if not math.isfinite(value) or value < 0.1:
+            continue
+        observations.append(NormalizedObservation.create(
+            provider_id=request.provider_id,
+            product_id=request.product_id,
+            target_id=target.target_id,
+            kind=ObservationKind.RAIN_RATE,
+            value=value,
+            unit="mm/h",
+            observed_at=observed_at,
+            received_at=received_at,
+            latitude=target.latitude,
+            longitude=target.longitude,
+            quality=ObservationQuality.GOOD,
+            geometry=_point(target.longitude, target.latitude),
+            metadata={"pixel_column": column, "pixel_row": row},
+        ))
+
+    block_rows = max(1, int(round(5_000.0 / pixel_height_m)))
+    block_columns = max(1, int(round(5_000.0 / pixel_width_m)))
+    spatial: dict[tuple[int, int], NormalizedObservation] = {}
+    for target in request.targets:
+        center_row, center_column = lonlat_to_pixel(target.longitude, target.latitude)
+        radius_rows = max(1, math.ceil(target.observation_radius_km * 1_000 / pixel_height_m))
+        radius_columns = max(1, math.ceil(target.observation_radius_km * 1_000 / pixel_width_m))
+        row0 = max(0, math.floor(center_row) - radius_rows)
+        row1 = min(height, math.floor(center_row) + radius_rows + 1)
+        column0 = max(0, math.floor(center_column) - radius_columns)
+        column1 = min(width, math.floor(center_column) + radius_columns + 1)
+        if row0 >= row1 or column0 >= column1:
+            continue
+
+        source = np.where(
+            valid[row0:row1, column0:column1],
+            rain_rate[row0:row1, column0:column1],
+            -np.inf,
+        )
+        source_height, source_width = source.shape
+        padded_height = math.ceil(source_height / block_rows) * block_rows
+        padded_width = math.ceil(source_width / block_columns) * block_columns
+        padded = np.full((padded_height, padded_width), -np.inf, dtype=float)
+        padded[:source_height, :source_width] = source
+        pooled = padded.reshape(
+            padded_height // block_rows,
+            block_rows,
+            padded_width // block_columns,
+            block_columns,
+        ).max(axis=(1, 3))
+        mask = pooled >= 0.1
+        visited = np.zeros(mask.shape, dtype=bool)
+        for seed_row, seed_column in np.argwhere(mask):
+            seed_row, seed_column = int(seed_row), int(seed_column)
+            if visited[seed_row, seed_column]:
+                continue
+            stack = [(seed_row, seed_column)]
+            visited[seed_row, seed_column] = True
+            component: list[tuple[int, int]] = []
+            while stack:
+                component_row, component_column = stack.pop()
+                component.append((component_row, component_column))
+                for delta_row in (-1, 0, 1):
+                    for delta_column in (-1, 0, 1):
+                        if delta_row == delta_column == 0:
+                            continue
+                        neighbour_row = component_row + delta_row
+                        neighbour_column = component_column + delta_column
+                        if (
+                            0 <= neighbour_row < mask.shape[0]
+                            and 0 <= neighbour_column < mask.shape[1]
+                            and mask[neighbour_row, neighbour_column]
+                            and not visited[neighbour_row, neighbour_column]
+                        ):
+                            visited[neighbour_row, neighbour_column] = True
+                            stack.append((neighbour_row, neighbour_column))
+
+            component_rows = [item[0] for item in component]
+            component_columns = [item[1] for item in component]
+            minimum_row = row0 + min(component_rows) * block_rows
+            maximum_row = min(height, row0 + (max(component_rows) + 1) * block_rows)
+            minimum_column = column0 + min(component_columns) * block_columns
+            maximum_column = min(width, column0 + (max(component_columns) + 1) * block_columns)
+            center_pixel_row = (minimum_row + maximum_row) / 2.0
+            center_pixel_column = (minimum_column + maximum_column) / 2.0
+            longitude, latitude = pixel_to_lonlat(center_pixel_row, center_pixel_column)
+            corners = []
+            for pixel_row, pixel_column in (
+                (minimum_row, minimum_column),
+                (minimum_row, maximum_column),
+                (maximum_row, maximum_column),
+                (maximum_row, minimum_column),
+                (minimum_row, minimum_column),
+            ):
+                corner_lon, corner_lat = pixel_to_lonlat(pixel_row, pixel_column)
+                corners.append([float(corner_lon), float(corner_lat)])
+            maximum_rate = max(float(pooled[row, column]) for row, column in component)
+            key = (round(float(latitude) * 100), round(float(longitude) * 100))
+            candidate = NormalizedObservation.create(
+                provider_id=request.provider_id,
+                product_id=request.product_id,
+                target_id=None,
+                kind=ObservationKind.RAIN_RATE,
+                value=maximum_rate,
+                unit="mm/h",
+                observed_at=observed_at,
+                received_at=received_at,
+                latitude=float(latitude),
+                longitude=float(longitude),
+                quality=ObservationQuality.GOOD,
+                geometry={"type": "Polygon", "coordinates": [corners]},
+                metadata={
+                    "spatial_cell": True,
+                    "block_count": len(component),
+                    "block_size_m": max(
+                        block_rows * pixel_height_m,
+                        block_columns * pixel_width_m,
+                    ),
+                },
+            )
+            previous = spatial.get(key)
+            if previous is None or candidate.value > previous.value:
+                spatial[key] = candidate
+
+    observations.extend(sorted(
+        spatial.values(),
+        key=lambda item: item.value,
+        reverse=True,
+    )[:MAX_NATIONAL_RADAR_SPATIAL_CELLS])
+    return tuple(observations)
+
+
+def _decode_dwd_radolan(
+    payload: bytes,
+    request: ThinProviderRequest,
+    *,
+    received_at: float,
+) -> tuple[NormalizedObservation, ...]:
+    import h5py
+    import numpy as np
+    from pyproj import CRS, Transformer
+
+    try:
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:*") as archive:
+            members = [
+                item for item in archive.getmembers()
+                if item.isfile() and item.name.endswith("_000-hd5")
+            ]
+            if not members:
+                raise ValueError("dwd_current_frame_missing")
+            member = max(members, key=lambda item: item.name)
+            if member.size <= 0 or member.size > 40 * 1024 * 1024:
+                raise ValueError("dwd_frame_size_invalid")
+            stream = archive.extractfile(member)
+            if stream is None:
+                raise ValueError("dwd_frame_missing")
+            frame = stream.read(40 * 1024 * 1024 + 1)
+            if len(frame) != member.size or len(frame) > 40 * 1024 * 1024:
+                raise ValueError("dwd_frame_size_invalid")
+    except tarfile.TarError as error:
+        raise ValueError("dwd_archive_invalid") from error
+
+    with h5py.File(io.BytesIO(frame), "r") as root:
+        data = np.asarray(root["dataset1/data1/data"], dtype=float)
+        data_what = root["dataset1/data1/what"].attrs
+        frame_what = root["dataset1/what"].attrs
+        where = root["where"].attrs
+        observed_at = datetime.strptime(
+            _attribute_text(frame_what["enddate"])
+            + _attribute_text(frame_what["endtime"]),
+            "%Y%m%d%H%M%S",
+        ).replace(tzinfo=timezone.utc).timestamp()
+        _validate_radar_time(observed_at, received_at, prefix="dwd")
+        gain = float(data_what["gain"])
+        offset = float(data_what["offset"])
+        nodata = float(data_what["nodata"])
+        undetect = float(data_what["undetect"])
+        rain_rate = (data * gain + offset) * 12.0
+        valid = (
+            np.isfinite(data)
+            & (data != nodata)
+            & (data != undetect)
+            & np.isfinite(rain_rate)
+            & (rain_rate >= 0.1)
+        )
+        if not np.any(valid):
+            return ()
+        xscale = float(where["xscale"])
+        yscale = float(where["yscale"])
+        projected = CRS.from_user_input(_attribute_text(where["projdef"]))
+        forward = Transformer.from_crs(CRS.from_epsg(4326), projected, always_xy=True)
+        inverse = Transformer.from_crs(projected, CRS.from_epsg(4326), always_xy=True)
+        if "UL_lon" in where and "UL_lat" in where:
+            ul_x, ul_y = forward.transform(float(where["UL_lon"]), float(where["UL_lat"]))
+        else:
+            ul_x, ul_y = 0.0, int(where["ysize"]) * yscale
+
+        def lonlat_to_pixel(longitude: float, latitude: float) -> tuple[float, float]:
+            x_value, y_value = forward.transform(longitude, latitude)
+            return (ul_y - y_value) / yscale, (x_value - ul_x) / xscale
+
+        def pixel_to_lonlat(row: float, column: float) -> tuple[float, float]:
+            return inverse.transform(ul_x + column * xscale, ul_y - row * yscale)
+
+        return _national_radar_observations(
+            rain_rate,
+            valid,
+            request,
+            observed_at=observed_at,
+            received_at=received_at,
+            lonlat_to_pixel=lonlat_to_pixel,
+            pixel_to_lonlat=pixel_to_lonlat,
+            pixel_width_m=xscale,
+            pixel_height_m=yscale,
+        )
+
+
+def _parse_knmi_timestamp(value: Any) -> float:
+    text = _attribute_text(value).rstrip(".")
+    for pattern in ("%d-%b-%Y;%H:%M:%S.%f", "%d-%b-%Y;%H:%M:%S"):
+        try:
+            return datetime.strptime(text.title(), pattern).replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            pass
+    raise ValueError("knmi_frame_time_invalid")
+
+
+def _decode_knmi_rtcor(
+    payload: bytes,
+    request: ThinProviderRequest,
+    *,
+    received_at: float,
+) -> tuple[NormalizedObservation, ...]:
+    import h5py
+    import numpy as np
+    from pyproj import CRS, Transformer
+
+    with h5py.File(io.BytesIO(payload), "r") as root:
+        overview = root["overview"].attrs
+        geographic = root["geographic"].attrs
+        image = root["image1"]
+        if _attribute_text(overview["product_group_name"]) != "RAD_NL25_COR_NA":
+            raise ValueError("knmi_product_invalid")
+        if _attribute_text(image.attrs["image_product_name"]) != "RAD_NL25_COR_NA":
+            raise ValueError("knmi_product_invalid")
+        if _attribute_text(image.attrs["image_geo_parameter"]) != "PRECIP_[MM]":
+            raise ValueError("knmi_quantity_invalid")
+        observed_at = _parse_knmi_timestamp(overview["product_datetime_end"])
+        _validate_radar_time(observed_at, received_at, prefix="knmi")
+        rows = int(geographic["geo_number_rows"])
+        columns = int(geographic["geo_number_columns"])
+        if (rows, columns) != (765, 700):
+            raise ValueError("knmi_grid_invalid")
+        raw = np.asarray(image["image_data"])
+        if raw.shape != (rows, columns):
+            raise ValueError("knmi_grid_invalid")
+        calibration = image["calibration"].attrs
+        if _attribute_text(calibration["calibration_formulas"]).replace(" ", "") != "GEO=0.010000*PV+0":
+            raise ValueError("knmi_calibration_invalid")
+        missing = int(calibration["calibration_missing_data"])
+        outside = int(calibration["calibration_out_of_image"])
+        rain_rate = raw.astype(float) * 0.01 * 12.0
+        valid = (
+            (raw != missing)
+            & (raw != outside)
+            & np.isfinite(rain_rate)
+            & (rain_rate >= 0.1)
+        )
+        if not np.any(valid):
+            return ()
+        pixel_x_km = float(geographic["geo_pixel_size_x"])
+        pixel_y_km = float(geographic["geo_pixel_size_y"])
+        column_offset_km = float(geographic["geo_column_offset"])
+        row_offset_km = float(geographic["geo_row_offset"])
+        proj4 = _attribute_text(root["geographic/map_projection"].attrs["projection_proj4_params"])
+        geographic_crs = CRS.from_proj4("+proj=longlat +a=6378.388 +b=6356.906 +no_defs")
+        projected_crs = CRS.from_user_input(proj4)
+        forward = Transformer.from_crs(geographic_crs, projected_crs, always_xy=True)
+        inverse = Transformer.from_crs(projected_crs, geographic_crs, always_xy=True)
+
+        def lonlat_to_pixel(longitude: float, latitude: float) -> tuple[float, float]:
+            x_value, y_value = forward.transform(longitude, latitude)
+            return (
+                (y_value + row_offset_km) / pixel_y_km,
+                (x_value - column_offset_km) / pixel_x_km,
+            )
+
+        def pixel_to_lonlat(row: float, column: float) -> tuple[float, float]:
+            return inverse.transform(
+                column_offset_km + column * pixel_x_km,
+                row * pixel_y_km - row_offset_km,
+            )
+
+        return _national_radar_observations(
+            rain_rate,
+            valid,
+            request,
+            observed_at=observed_at,
+            received_at=received_at,
+            lonlat_to_pixel=lonlat_to_pixel,
+            pixel_to_lonlat=pixel_to_lonlat,
+            pixel_width_m=abs(pixel_x_km) * 1_000.0,
+            pixel_height_m=abs(pixel_y_km) * 1_000.0,
+        )
+
+
 class KnmiRadarAdapter:
-    def __init__(self, *, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        open_data_base: str = KNMI_OPEN_DATA_BASE,
+    ) -> None:
         self._api_key = api_key or os.getenv("STV3_KNMI_API_KEY")
+        self._open_data_base = open_data_base.rstrip("/")
 
     async def fetch(self, request, fetcher, *, now):
         if not self._api_key:
             raise ProviderBlocked("external_access_required")
-        raise ProviderBlocked("direct_decoder_pending", ready=False)
+        headers = {"Authorization": self._api_key}
+        listing = await fetcher.get_json(
+            f"{self._open_data_base}/files",
+            params={"maxKeys": "1", "orderBy": "created", "sorting": "desc"},
+            headers=headers,
+            maximum_bytes=256 * 1024,
+        )
+        files = listing.get("files") if isinstance(listing, Mapping) else None
+        if not isinstance(files, list) or len(files) != 1 or not isinstance(files[0], Mapping):
+            raise ValueError("knmi_latest_file_missing")
+        filename = files[0].get("filename")
+        if (
+            not isinstance(filename, str)
+            or not filename.startswith("RAD_NL25_RAC_RT_")
+            or not filename.endswith(".h5")
+            or "/" in filename
+            or "\\" in filename
+        ):
+            raise ValueError("knmi_filename_invalid")
+        descriptor = await fetcher.get_json(
+            f"{self._open_data_base}/files/{quote(filename, safe='')}/url",
+            headers=headers,
+            maximum_bytes=256 * 1024,
+        )
+        download_url = (
+            descriptor.get("temporaryDownloadUrl")
+            if isinstance(descriptor, Mapping)
+            else None
+        )
+        parsed = urlsplit(download_url if isinstance(download_url, str) else "")
+        hostname = (parsed.hostname or "").lower()
+        if (
+            parsed.scheme != "https"
+            or not hostname
+            or not any(hostname.endswith(suffix) for suffix in _KNMI_DOWNLOAD_HOST_SUFFIXES)
+        ):
+            raise ValueError("knmi_download_url_invalid")
+        payload = await fetcher.get_bytes(
+            download_url,
+            headers={},
+            maximum_bytes=40 * 1024 * 1024,
+        )
+        async with _RADAR_DECODE_SEMAPHORE:
+            return await asyncio.to_thread(
+                _decode_knmi_rtcor,
+                payload,
+                request,
+                received_at=now,
+            )
 
 
 class DwdRadolanAdapter:
+    def __init__(self, *, endpoint: str = DWD_RADOLAN_ENDPOINT) -> None:
+        self._endpoint = endpoint
+
     async def fetch(self, request, fetcher, *, now):
-        raise ProviderBlocked("direct_decoder_pending", ready=False)
+        payload = await fetcher.get_bytes(
+            self._endpoint,
+            maximum_bytes=8 * 1024 * 1024,
+        )
+        async with _RADAR_DECODE_SEMAPHORE:
+            return await asyncio.to_thread(
+                _decode_dwd_radolan,
+                payload,
+                request,
+                received_at=now,
+            )
 
 
 __all__ = [
