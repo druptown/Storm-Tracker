@@ -310,6 +310,39 @@ def _worker_runtime_attribute_projection(hass: Any) -> dict[str, Any]:
         and latest_raw >= 0
     ):
         projection["raw_calibration_latest_received_at"] = float(latest_raw)
+    source_statistics = status.get("raw_calibration_source_statistics")
+    if isinstance(source_statistics, list) and len(source_statistics) <= 64:
+        bounded_source_statistics = []
+        for row in source_statistics:
+            if not isinstance(row, Mapping):
+                return projection
+            source_id = row.get("source_id")
+            provider = row.get("provider")
+            captures = row.get("captures")
+            latest = row.get("latest_received_at")
+            if (
+                not isinstance(source_id, str)
+                or not 0 < len(source_id) <= 128
+                or not isinstance(provider, str)
+                or not 0 < len(provider) <= 128
+                or not isinstance(captures, int)
+                or isinstance(captures, bool)
+                or not 1 <= captures <= 1_000_000_000
+                or isinstance(latest, bool)
+                or not isinstance(latest, (int, float))
+                or not math.isfinite(float(latest))
+                or latest < 0
+            ):
+                return projection
+            bounded_source_statistics.append({
+                "source_id": source_id,
+                "provider": provider,
+                "captures": captures,
+                "latest_received_at": float(latest),
+            })
+        projection["raw_calibration_source_statistics"] = (
+            bounded_source_statistics
+        )
     return projection
 
 

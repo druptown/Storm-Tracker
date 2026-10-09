@@ -153,6 +153,47 @@ def _bounded_worker_text(value, *, maximum: int = 96) -> str | None:
     return " ".join(value.split())[:maximum]
 
 
+def _bounded_raw_calibration_source_statistics(value) -> list[dict] | None:
+    """Validate one fixed-size, payload-free raw capture inventory."""
+
+    if not isinstance(value, list) or len(value) > 64:
+        return None
+    result: list[dict] = []
+    seen: set[str] = set()
+    for row in value:
+        if not isinstance(row, dict) or set(row) != {
+            "source_id",
+            "provider",
+            "captures",
+            "latest_received_at",
+        }:
+            return None
+        source_id = _bounded_worker_text(row.get("source_id"), maximum=128)
+        provider = _bounded_worker_text(row.get("provider"), maximum=128)
+        captures = _bounded_worker_counter(row.get("captures"))
+        latest = row.get("latest_received_at")
+        if (
+            source_id is None
+            or provider is None
+            or captures is None
+            or captures < 1
+            or source_id in seen
+            or isinstance(latest, bool)
+            or not isinstance(latest, (int, float))
+            or not math.isfinite(float(latest))
+            or latest < 0
+        ):
+            return None
+        seen.add(source_id)
+        result.append({
+            "source_id": source_id,
+            "provider": provider,
+            "captures": captures,
+            "latest_received_at": float(latest),
+        })
+    return result
+
+
 def _compact_worker_status(status: dict, current: dict, *, now: float) -> dict:
     """Keep only fixed-size control fields from an untrusted worker status."""
     state = status.get("state")
@@ -266,6 +307,17 @@ def _compact_worker_status(status: dict, current: dict, *, now: float) -> dict:
                 and latest >= 0
             ):
                 compact["raw_calibration_latest_received_at"] = float(latest)
+            source_statistics = _bounded_raw_calibration_source_statistics(
+                raw_calibration.get("source_statistics")
+            )
+            if (
+                source_statistics is not None
+                and len(source_statistics)
+                == compact.get("raw_calibration_sources")
+            ):
+                compact["raw_calibration_source_statistics"] = (
+                    source_statistics
+                )
     return compact
 
 
