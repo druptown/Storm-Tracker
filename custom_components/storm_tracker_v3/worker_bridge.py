@@ -276,6 +276,54 @@ def _bounded_postgis_projection(value) -> dict | None:
     return result
 
 
+def _bounded_parallel_acquisition(value) -> dict | None:
+    """Project only fixed, payload-free acquisition concurrency telemetry."""
+
+    if not isinstance(value, dict):
+        return None
+    mode = value.get("mode")
+    if mode not in {
+        "full_parallel", "recovery", "expanded", "serial_compatibility",
+    } or value.get("concurrency_scope") != "workload":
+        return None
+    result = {"mode": mode}
+    for key in (
+        "fallback_lanes", "lane_limit", "last_batch_job_count", "maximum_lanes",
+    ):
+        counter = _bounded_worker_counter(value.get(key))
+        if counter is None or counter > 64:
+            return None
+        result[key] = counter
+    for key in (
+        "cooldown_remaining_seconds",
+        "last_batch_duration_seconds",
+        "last_batch_mean_runtime_seconds",
+    ):
+        number = value.get(key)
+        if (
+            isinstance(number, bool)
+            or not isinstance(number, (int, float))
+            or not math.isfinite(float(number))
+            or not 0.0 <= float(number) <= 86_400.0
+        ):
+            return None
+        result[key] = round(float(number), 3)
+    reasons = value.get("last_unhealthy_reasons")
+    if (
+        type(reasons) is not list
+        or len(reasons) > 8
+        or any(
+            not isinstance(reason, str)
+            or not 1 <= len(reason) <= 48
+            or not reason.replace("_", "").isalnum()
+            for reason in reasons
+        )
+    ):
+        return None
+    result["last_unhealthy_reasons"] = list(reasons)
+    return result
+
+
 def _compact_worker_status(status: dict, current: dict, *, now: float) -> dict:
     """Keep only fixed-size control fields from an untrusted worker status."""
     state = status.get("state")
@@ -428,6 +476,24 @@ def _compact_worker_status(status: dict, current: dict, *, now: float) -> dict:
                 compact["postgis_projection_last_error_code"] = (
                     postgis_projection["last_error_code"]
                 )
+        parallel = _bounded_parallel_acquisition(
+            runtime.get("parallel_acquisition")
+        )
+        if parallel is not None:
+            compact["acquisition_parallel_mode"] = parallel["mode"]
+            compact["acquisition_parallel_lane_limit"] = parallel["lane_limit"]
+            compact["acquisition_parallel_maximum_lanes"] = parallel[
+                "maximum_lanes"
+            ]
+            compact["acquisition_parallel_last_batch_jobs"] = parallel[
+                "last_batch_job_count"
+            ]
+            compact["acquisition_parallel_last_batch_seconds"] = parallel[
+                "last_batch_duration_seconds"
+            ]
+            compact["acquisition_parallel_last_unhealthy_reasons"] = parallel[
+                "last_unhealthy_reasons"
+            ]
     return compact
 
 

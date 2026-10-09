@@ -53,7 +53,11 @@ _ZERO_RADAR_OBSERVATION_REASON = (
 _UNDETECT_RADAR_OBSERVATION_REASON = (
     "certified_undetect_radar_sample_dry_claim_withheld"
 )
+_REFLECTIVITY_ECHO_REASON = (
+    "certified_positive_reflectivity_echo_rain_rate_withheld"
+)
 _ZERO_RADAR_OBSERVATION_STATE = "geen_positieve_neerslag_waargenomen"
+_REFLECTIVITY_ECHO_STATE = "radarecho_waargenomen"
 WORKER_STATUS_UPDATE_EVENT = f"{DOMAIN}_worker_status_update"
 
 WORKER_ONLY_PROVIDER_IDS = (
@@ -300,6 +304,9 @@ def _worker_runtime_attribute_projection(hass: Any) -> dict[str, Any]:
         "postgis_projection_ready",
         "postgis_projection_leased",
         "postgis_projection_projected",
+        "acquisition_parallel_lane_limit",
+        "acquisition_parallel_maximum_lanes",
+        "acquisition_parallel_last_batch_jobs",
     ):
         value = status.get(key)
         if (
@@ -308,6 +315,35 @@ def _worker_runtime_attribute_projection(hass: Any) -> dict[str, Any]:
             and 0 <= value <= 1_000_000_000
         ):
             projection[key] = value
+    parallel_mode = status.get("acquisition_parallel_mode")
+    if parallel_mode in {
+        "full_parallel", "recovery", "expanded", "serial_compatibility",
+    }:
+        projection["acquisition_parallel_mode"] = parallel_mode
+    parallel_seconds = status.get("acquisition_parallel_last_batch_seconds")
+    if (
+        isinstance(parallel_seconds, (int, float))
+        and not isinstance(parallel_seconds, bool)
+        and math.isfinite(float(parallel_seconds))
+        and 0.0 <= float(parallel_seconds) <= 86_400.0
+    ):
+        projection["acquisition_parallel_last_batch_seconds"] = float(
+            parallel_seconds
+        )
+    parallel_reasons = status.get(
+        "acquisition_parallel_last_unhealthy_reasons"
+    )
+    if (
+        type(parallel_reasons) is list
+        and len(parallel_reasons) <= 8
+        and all(
+            isinstance(reason, str) and 1 <= len(reason) <= 48
+            for reason in parallel_reasons
+        )
+    ):
+        projection["acquisition_parallel_last_unhealthy_reasons"] = list(
+            parallel_reasons
+        )
     postgis_enabled = status.get("postgis_projection_enabled")
     if isinstance(postgis_enabled, bool):
         projection["postgis_projection_enabled"] = postgis_enabled
@@ -608,12 +644,24 @@ class SnapshotOnlySensorEntity(SensorEntity):
                 zero_radar_observation_current
                 or undetect_radar_observation_current
             )
+            reflectivity_echo_current = (
+                snapshot_current
+                and fact_current
+                and attributes.get("current_precipitation_state") == "unknown"
+                and _REFLECTIVITY_ECHO_REASON
+                in attributes.get("current_reason_codes", [])
+                and bool(attributes.get("current_provider_ids"))
+            )
             reasons = []
             if not snapshot_current:
                 reasons.append("snapshot_not_current")
             if not fact_current:
                 reasons.append("current_precipitation_not_current")
-            if not state_known and not nonpositive_radar_observation_current:
+            if (
+                not state_known
+                and not nonpositive_radar_observation_current
+                and not reflectivity_echo_current
+            ):
                 reasons.append("current_precipitation_unknown")
             if nonpositive_radar_observation_current:
                 reasons.append("dry_claim_withheld_requires_independent_truth")
@@ -627,6 +675,7 @@ class SnapshotOnlySensorEntity(SensorEntity):
             attributes["nonpositive_radar_observation_current"] = (
                 nonpositive_radar_observation_current
             )
+            attributes["reflectivity_echo_current"] = reflectivity_echo_current
             attributes["presentation_reason_codes"] = reasons
             if not valid_current:
                 attributes["current_precipitation_state"] = "unknown"
@@ -662,9 +711,13 @@ class SnapshotOnlySensorEntity(SensorEntity):
                     projected.native_value
                     if valid_current
                     else (
-                        _ZERO_RADAR_OBSERVATION_STATE
-                        if nonpositive_radar_observation_current
-                        else "onvoldoende_data"
+                        _REFLECTIVITY_ECHO_STATE
+                        if reflectivity_echo_current
+                        else (
+                            _ZERO_RADAR_OBSERVATION_STATE
+                            if nonpositive_radar_observation_current
+                            else "onvoldoende_data"
+                        )
                     )
                 ),
                 available=True,

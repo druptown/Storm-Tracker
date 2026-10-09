@@ -361,6 +361,7 @@ class WorkerOnlyEntryRuntime:
         self._status_unsubscribe: Callable[[], Any] | None = None
         self._options_unsubscribe: Callable[[], Any] | None = None
         self._target_task: asyncio.Task | None = None
+        self._freshness_reconcile_wakeup = asyncio.Event()
         self._reconnect_task: asyncio.Task | None = None
         self._freshness_handle: asyncio.TimerHandle | None = None
         self._freshness_deadline: float | None = None
@@ -870,6 +871,11 @@ class WorkerOnlyEntryRuntime:
                 )
             return
         self._target_revision += 1
+        # Expiring a dynamic position is a safety transition, not another
+        # bursty Life360 update.  Wake the existing debounce task (or make the
+        # next one immediate) so one stale person cannot leave the worker's
+        # complete desired state invalid for the normal three-minute window.
+        self._freshness_reconcile_wakeup.set()
         self._schedule_target_reconcile()
 
     async def _async_reconcile_targets(self) -> None:
@@ -883,7 +889,21 @@ class WorkerOnlyEntryRuntime:
                 # stable authority interval in which to commit and publish.
                 # A revision arriving during async_update waits for the next
                 # window instead of immediately superseding the in-flight one.
-                await asyncio.sleep(self._target_reconcile_delay_seconds)
+                if self._freshness_reconcile_wakeup.is_set():
+                    self._freshness_reconcile_wakeup.clear()
+                    await asyncio.sleep(0)
+                elif self._target_reconcile_delay_seconds > 0.0:
+                    try:
+                        await asyncio.wait_for(
+                            self._freshness_reconcile_wakeup.wait(),
+                            timeout=self._target_reconcile_delay_seconds,
+                        )
+                    except TimeoutError:
+                        pass
+                    finally:
+                        self._freshness_reconcile_wakeup.clear()
+                else:
+                    await asyncio.sleep(0)
                 if self._unloaded:
                     return
                 revision = self._target_revision
