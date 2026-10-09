@@ -3351,6 +3351,7 @@ def _validate_capture(
     receipts_by_role: Mapping[str, RawArtifactReceipt],
     metadata_by_role: Mapping[str, str | None],
     payloads_by_role: Mapping[str, bytes] | None = None,
+    verify_payload_provenance: bool = True,
 ) -> str:
     capture_suffix = _capture_suffix_for_recovery(capture, binding)
     job_id = _raw_job_from_fetch_id(
@@ -3405,71 +3406,85 @@ def _validate_capture(
     elif binding.capture_provenance_kind in _LIGHTNING_CAPTURE_PROVENANCE_KINDS:
         from . import lightning_exact_raw
 
-        if (
-            payloads_by_role is None
-            or set(payloads_by_role) != set(receipts_by_role)
-            or any(not isinstance(value, bytes) for value in payloads_by_role.values())
-        ):
-            raise CaptureRecoveryIntegrityError(
-                "lightning exact recovery requires every durable payload byte"
-            )
-        try:
+        if verify_payload_provenance:
             if (
-                binding.capture_provenance_kind
-                == "eumetsat_mtg_li_exact_raw_v1"
+                payloads_by_role is None
+                or set(payloads_by_role) != set(receipts_by_role)
+                or any(
+                    not isinstance(value, bytes)
+                    for value in payloads_by_role.values()
+                )
             ):
-                lightning_exact_raw._validate_eumetsat_bundle(  # noqa: SLF001
-                    job_id,
-                    capture,
-                    receipts_by_role,
-                    payloads_by_role,
+                raise CaptureRecoveryIntegrityError(
+                    "lightning exact recovery requires every durable payload byte"
                 )
-            else:
-                if binding.satellite not in {18, 19}:
-                    raise CaptureRecoveryIntegrityError(
-                        "lightning capture lost its satellite discriminator"
+            try:
+                if (
+                    binding.capture_provenance_kind
+                    == "eumetsat_mtg_li_exact_raw_v1"
+                ):
+                    lightning_exact_raw._validate_eumetsat_bundle(  # noqa: SLF001
+                        job_id,
+                        capture,
+                        receipts_by_role,
+                        payloads_by_role,
                     )
-                lightning_exact_raw._validate_goes_complete_bundle(  # noqa: SLF001
-                    job_id=job_id,
-                    satellite=binding.satellite,
-                    capture=capture,
-                    receipts=receipts_by_role,
-                    payloads=payloads_by_role,
-                )
-        except lightning_exact_raw.LightningRawError as err:
-            raise CaptureRecoveryIntegrityError(
-                "lightning exact capture provenance drifted"
-            ) from err
-        expected_upstream = lightning_exact_raw._capture_upstream_id(  # noqa: SLF001
-            binding.capture_product, receipts_by_role
-        )
-        expected_timestamp = None
+                else:
+                    if binding.satellite not in {18, 19}:
+                        raise CaptureRecoveryIntegrityError(
+                            "lightning capture lost its satellite discriminator"
+                        )
+                    lightning_exact_raw._validate_goes_complete_bundle(  # noqa: SLF001
+                        job_id=job_id,
+                        satellite=binding.satellite,
+                        capture=capture,
+                        receipts=receipts_by_role,
+                        payloads=payloads_by_role,
+                    )
+            except lightning_exact_raw.LightningRawError as err:
+                raise CaptureRecoveryIntegrityError(
+                    "lightning exact capture provenance drifted"
+                ) from err
+            expected_upstream = lightning_exact_raw._capture_upstream_id(  # noqa: SLF001
+                binding.capture_product, receipts_by_role
+            )
+            expected_timestamp = None
+        else:
+            expected_upstream = capture.upstream_capture_id
+            expected_timestamp = capture.product_timestamp
     elif binding.capture_provenance_kind == "kmi_appv4_visual_capture_v2":
         from . import kmi_appv4_raw_capture
 
-        if (
-            payloads_by_role is None
-            or set(payloads_by_role) != set(receipts_by_role)
-            or any(not isinstance(value, bytes) for value in payloads_by_role.values())
-        ):
-            raise CaptureRecoveryIntegrityError(
-                "KMI app-v4 exact recovery requires every durable payload byte"
-            )
-        try:
-            result = (
-                kmi_appv4_raw_capture.validate_kmi_appv4_capture_for_raw_recovery(
-                    capture,
-                    receipts_by_role,
-                    payloads_by_role,
-                    job_id=job_id,
+        if verify_payload_provenance:
+            if (
+                payloads_by_role is None
+                or set(payloads_by_role) != set(receipts_by_role)
+                or any(
+                    not isinstance(value, bytes)
+                    for value in payloads_by_role.values()
                 )
-            )
-        except kmi_appv4_raw_capture.KmiAppv4RawError as err:
-            raise CaptureRecoveryIntegrityError(
-                "KMI app-v4 exact capture provenance drifted"
-            ) from err
-        expected_timestamp = result["product_timestamp"]
-        expected_upstream = capture.upstream_capture_id
+            ):
+                raise CaptureRecoveryIntegrityError(
+                    "KMI app-v4 exact recovery requires every durable payload byte"
+                )
+            try:
+                result = (
+                    kmi_appv4_raw_capture.validate_kmi_appv4_capture_for_raw_recovery(
+                        capture,
+                        receipts_by_role,
+                        payloads_by_role,
+                        job_id=job_id,
+                    )
+                )
+            except kmi_appv4_raw_capture.KmiAppv4RawError as err:
+                raise CaptureRecoveryIntegrityError(
+                    "KMI app-v4 exact capture provenance drifted"
+                ) from err
+            expected_timestamp = result["product_timestamp"]
+            expected_upstream = capture.upstream_capture_id
+        else:
+            expected_timestamp = capture.product_timestamp
+            expected_upstream = capture.upstream_capture_id
     elif binding.capture_provenance_kind == "aemet_opendata_v1":
         envelope = receipts_by_role["opendata_envelope_json"]
         data = receipts_by_role["opendata_data_response"]
@@ -3994,8 +4009,8 @@ class CaptureCapacityReconciler:
     ]:
         for _attempt in range(MAX_STABLE_INVENTORY_ATTEMPTS):
             before = self._raw_store.stats()
-            receipts = self._raw_store.accounting_receipts()
-            captures = self._raw_store.accounting_captures()
+            receipts = self._raw_store.startup_accounting_receipts()
+            captures = self._raw_store.startup_accounting_captures()
             after = self._raw_store.stats()
             if self._inventory_fingerprint(before) == self._inventory_fingerprint(after):
                 return receipts, captures, after
@@ -4335,42 +4350,27 @@ class CaptureCapacityReconciler:
                     binding.members_for_roles(
                         tuple(item.role for item in capture.members)
                     )
-                    if binding.capture_provenance_kind == "opera_stream_raw_v1":
-                        reference_bundle = self._raw_store.load_capture_bundle(
-                            capture.capture_id
-                        )
-                        loaded_bundle = (
-                            None
-                            if reference_bundle is None
-                            else (reference_bundle[0], reference_bundle[1], None)
-                        )
-                    else:
-                        loaded_bundle = self._raw_store.load_capture_bundle_bytes(
-                            capture.capture_id
-                        )
+                    catalog_bundle = self._raw_store.load_capture_catalog_bundle(
+                        capture.capture_id
+                    )
+                    loaded_bundle = (
+                        None
+                        if catalog_bundle is None
+                        else (catalog_bundle[0], catalog_bundle[1], None)
+                    )
                     if loaded_bundle is None:
                         raise CaptureRecoveryIntegrityError(
-                            "active raw capture bytes are unavailable"
+                            "active raw capture catalog is unavailable"
                         )
                     loaded_capture, loaded_receipts, payloads_by_role = loaded_bundle
                     if (
                         loaded_capture != capture
                         or set(loaded_receipts)
                         != {item.role for item in capture.members}
-                        or (
-                            binding.capture_provenance_kind
-                            != "opera_stream_raw_v1"
-                            and set(payloads_by_role or {})
-                            != set(loaded_receipts)
-                        )
-                        or (
-                            binding.capture_provenance_kind
-                            == "opera_stream_raw_v1"
-                            and payloads_by_role is not None
-                        )
+                        or payloads_by_role is not None
                     ):
                         raise CaptureRecoveryIntegrityError(
-                            "active raw capture byte inventory drifted"
+                            "active raw capture catalog inventory drifted"
                         )
                     capture_receipts: dict[str, RawArtifactReceipt] = {}
                     capture_metadata: dict[str, str | None] = {}
@@ -4400,12 +4400,10 @@ class CaptureCapacityReconciler:
                         ]
                         capture_metadata[member_binding.role] = filename
                         receipt_job_ids.add(receipt_job_id)
-                    raw_job_id = _validate_capture(
-                        capture,
+                    raw_job_id = _raw_job_from_fetch_id(
+                        capture.fetch_id,
                         binding=binding,
-                        receipts_by_role=capture_receipts,
-                        metadata_by_role=capture_metadata,
-                        payloads_by_role=payloads_by_role,
+                        suffix=_capture_suffix_for_recovery(capture, binding),
                     )
                     try:
                         job_id = origin_by_raw_identity[
@@ -4417,6 +4415,54 @@ class CaptureCapacityReconciler:
                         ) from err
                     if receipt_job_ids != {job_id}:
                         raise CaptureRecoveryIntegrityError("raw capture changed job identity")
+                    reservation = reservations[job_id]
+                    verify_payload_provenance = reservation.status != "COMMITTED"
+                    if verify_payload_provenance:
+                        if binding.capture_provenance_kind == "opera_stream_raw_v1":
+                            reference_bundle = self._raw_store.load_capture_bundle(
+                                capture.capture_id
+                            )
+                            verified_bundle = (
+                                None
+                                if reference_bundle is None
+                                else (
+                                    reference_bundle[0],
+                                    reference_bundle[1],
+                                    None,
+                                )
+                            )
+                        else:
+                            verified_bundle = (
+                                self._raw_store.load_capture_bundle_bytes(
+                                    capture.capture_id
+                                )
+                            )
+                        if verified_bundle is None:
+                            raise CaptureRecoveryIntegrityError(
+                                "active raw capture bytes are unavailable"
+                            )
+                        verified_capture, verified_receipts, payloads_by_role = (
+                            verified_bundle
+                        )
+                        if (
+                            verified_capture != capture
+                            or verified_receipts != capture_receipts
+                        ):
+                            raise CaptureRecoveryIntegrityError(
+                                "active raw capture changed during recovery"
+                            )
+                    validated_job_id = _validate_capture(
+                        capture,
+                        binding=binding,
+                        receipts_by_role=capture_receipts,
+                        metadata_by_role=capture_metadata,
+                        payloads_by_role=payloads_by_role,
+                        verify_payload_provenance=verify_payload_provenance,
+                    )
+                    if validated_job_id != raw_job_id:
+                        raise CaptureRecoveryIntegrityError(
+                            "raw capture changed job identity"
+                        )
                     if job_id in captured_jobs:
                         raise CaptureRecoveryIntegrityError(
                             "one acquisition job has multiple complete raw captures"
@@ -4427,7 +4473,7 @@ class CaptureCapacityReconciler:
                         capture=capture,
                     )
                     evidence = self._commit(
-                        reservation=reservations[job_id],
+                        reservation=reservation,
                         capture=capture,
                         evidence=evidence_digest,
                     )

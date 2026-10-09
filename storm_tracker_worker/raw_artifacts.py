@@ -2624,12 +2624,15 @@ class RawArtifactStore:
         self, capture_id: str,
         *,
         return_bytes: bool,
+        verify_bytes: bool = True,
     ) -> tuple[
         RawArtifactCaptureReceipt,
         dict[str, RawArtifactReceipt],
         dict[str, bytes],
     ] | None:
         self._require_initialized()
+        if return_bytes and not verify_bytes:
+            raise ValueError("capturebytes kunnen niet ongeverifieerd worden geladen")
         capture_id = self._identifier(capture_id, "capture_id", 96)
         with self._lock, closing(self._connect()) as database:
             row = database.execute(
@@ -2681,12 +2684,14 @@ class RawArtifactStore:
                 member["capture_role"], "capture-role", 128
             )
             receipt = self._validated_receipt(member)
-            payload = self._read_verified(
-                Path(receipt.artifact_path),
-                expected_size=receipt.size_bytes,
-                expected_sha256=receipt.content_sha256,
-                return_bytes=return_bytes,
-            )
+            payload = None
+            if verify_bytes:
+                payload = self._read_verified(
+                    Path(receipt.artifact_path),
+                    expected_size=receipt.size_bytes,
+                    expected_sha256=receipt.content_sha256,
+                    return_bytes=return_bytes,
+                )
             if return_bytes:
                 if payload is None:  # pragma: no cover - return contract
                     raise AssertionError("raw-artifactcapturebytes ontbreken")
@@ -2770,6 +2775,27 @@ class RawArtifactStore:
         """Load a capture plus receipts with one SHA pass per member."""
 
         bundle = self._load_capture_bundle(capture_id, return_bytes=False)
+        return None if bundle is None else (bundle[0], bundle[1])
+
+    def load_capture_catalog_bundle(
+        self, capture_id: str,
+    ) -> tuple[
+        RawArtifactCaptureReceipt,
+        dict[str, RawArtifactReceipt],
+    ] | None:
+        """Load and validate capture/catalog metadata without reading payloads.
+
+        This deliberately narrow primitive is for bounded startup accounting
+        of evidence whose capacity reservation is already durably COMMITTED.
+        Physical object counts and sizes are proved separately by ``stats``;
+        every consumer-facing read continues to verify the object SHA-256.
+        """
+
+        bundle = self._load_capture_bundle(
+            capture_id,
+            return_bytes=False,
+            verify_bytes=False,
+        )
         return None if bundle is None else (bundle[0], bundle[1])
 
     def load_capture_bundle_bytes(
@@ -2884,6 +2910,27 @@ class RawArtifactStore:
             verified_objects.add(receipt.content_sha256)
         return receipts
 
+    def startup_accounting_receipts(self) -> tuple[RawArtifactReceipt, ...]:
+        """Return bounded, checksum-validated receipt catalog rows only.
+
+        Startup recovery uses this inventory to match already committed
+        capacity evidence without rereading an ever-growing object corpus.
+        A reservation that still needs committing is subsequently reopened
+        through the normal fully verified capture-bundle path.
+        """
+
+        self._require_initialized()
+        with self._lock, closing(self._connect()) as database:
+            rows = database.execute(
+                self._RECEIPT_SELECT + " ORDER BY receipt.receipt_id LIMIT ?",
+                (self.limits.max_receipt_entries + 1,),
+            ).fetchall()
+        if len(rows) > self.limits.max_receipt_entries:
+            raise RawArtifactIntegrityError(
+                "raw-artifactreceiptinventory overschrijdt zijn vaste grens"
+            )
+        return tuple(self._validated_receipt(row) for row in rows)
+
     def accounting_captures(self) -> tuple[RawArtifactCaptureReceipt, ...]:
         """Return every bounded capture after manifest and object verification."""
 
@@ -2906,6 +2953,32 @@ class RawArtifactStore:
                     "raw-artifactcapture verdween tijdens inventory"
                 )
             captures.append(capture)
+        return tuple(captures)
+
+    def startup_accounting_captures(
+        self,
+    ) -> tuple[RawArtifactCaptureReceipt, ...]:
+        """Return bounded capture manifests without reading object payloads."""
+
+        self._require_initialized()
+        with self._lock, closing(self._connect()) as database:
+            rows = database.execute(
+                "SELECT capture_id FROM raw_artifact_captures "
+                "ORDER BY capture_id LIMIT ?",
+                (self.limits.max_capture_entries + 1,),
+            ).fetchall()
+        if len(rows) > self.limits.max_capture_entries:
+            raise RawArtifactIntegrityError(
+                "raw-artifactcaptureinventory overschrijdt zijn vaste grens"
+            )
+        captures: list[RawArtifactCaptureReceipt] = []
+        for row in rows:
+            bundle = self.load_capture_catalog_bundle(str(row[0]))
+            if bundle is None:  # pragma: no cover - append-only catalog contract
+                raise RawArtifactIntegrityError(
+                    "raw-artifactcapture verdween tijdens startupinventory"
+                )
+            captures.append(bundle[0])
         return tuple(captures)
 
     def load_receipt_bytes(
