@@ -104,6 +104,14 @@ def _outcome(
     )
 
 
+def _known_exit(passage: TargetPassage) -> float | None:
+    """A model/coverage boundary is not a predicted dry transition."""
+
+    if passage.horizon_clipped or passage.right_censored or passage.coverage_censored:
+        return None
+    return passage.exit_at
+
+
 def validate_passages(
     passages: Iterable[TargetPassage],
     observations: Iterable[NormalizedObservation],
@@ -150,13 +158,14 @@ def validate_passages(
     used_wet: set[tuple[str, str, float]] = set()
     outcomes: list[ForecastValidation] = []
     for passage in ordered_passages:
+        known_exit = _known_exit(passage)
         relevant = tuple(
             item for item in ground
             if item.target_id == passage.target_id
             and passage.entry_at - maximum_age
             <= item.observed_at
-            and (passage.exit_at is None
-                 or item.observed_at <= passage.exit_at + maximum_age)
+            and (known_exit is None
+                 or item.observed_at <= known_exit + maximum_age)
         )
         wet = tuple(item for item in relevant if item.value > 0.0)
         if wet:
@@ -165,9 +174,12 @@ def validate_passages(
                 None if passage.left_censored
                 else first_wet.observed_at - passage.entry_at
             )
-            if not passage.left_censored and first_wet.observed_at < passage.entry_at - tolerance:
+            if (
+                not passage.left_censored
+                and first_wet.observed_at < passage.entry_at - tolerance
+            ):
                 label = "early"
-            elif passage.exit_at is not None and first_wet.observed_at > passage.exit_at + tolerance:
+            elif known_exit is not None and first_wet.observed_at > known_exit + tolerance:
                 label = "late"
             else:
                 label = "hit"
@@ -183,8 +195,8 @@ def validate_passages(
             ]
             exit_error = (
                 None
-                if not dry_after or passage.exit_at is None
-                else min(item.observed_at for item in dry_after) - passage.exit_at
+                if not dry_after or known_exit is None
+                else min(item.observed_at for item in dry_after) - known_exit
             )
             outcomes.append(_outcome(
                 passage=passage,
@@ -197,7 +209,7 @@ def validate_passages(
             ))
             continue
         dry = tuple(item for item in relevant if item.value == 0.0)
-        if passage.exit_at is not None and evaluated > passage.exit_at + tolerance and dry:
+        if known_exit is not None and evaluated > known_exit + tolerance and dry:
             outcomes.append(_outcome(
                 passage=passage,
                 target_id=passage.target_id,
@@ -266,7 +278,7 @@ class GroundValidationRuntime:
             # An unknown end is not a dry transition. Keep a bounded history
             # relative to its known entry/issue, without inventing an exit.
             if evaluated - (
-                passage.exit_at if passage.exit_at is not None
+                known_exit if (known_exit := _known_exit(passage)) is not None
                 else max(passage.entry_at, passage.evaluated_at)
             ) <= 2 * 60 * 60.0
         }

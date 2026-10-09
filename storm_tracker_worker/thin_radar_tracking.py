@@ -126,12 +126,12 @@ def _thin_tracking_policy() -> CellTrackEnginePolicy:
         exact_solution_limit=4,
         maximum_exact_current_detections=12,
         maximum_frame_pixels=100_000,
-        maximum_detected_objects=192,
+        maximum_detected_objects=256,
         # Keep the capacity bounds consistent with the configured two-frame
         # lifecycle gap.  Otherwise one fragmented but valid regional frame
         # can fill the active set and make every later frame fail closed.
-        maximum_active_tracks=576,
-        maximum_candidate_edges=110_592,
+        maximum_active_tracks=768,
+        maximum_candidate_edges=196_608,
         maximum_total_tracks=4_096,
         maximum_lifecycle_events=32_768,
         maximum_track_history_detections=2_048,

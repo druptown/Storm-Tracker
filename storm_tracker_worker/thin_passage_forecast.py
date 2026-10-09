@@ -178,6 +178,9 @@ def advect_labelled_qpe(
     evaluated = float(evaluated_at)
     if not math.isfinite(evaluated):
         raise ValueError("passage_evaluated_at_invalid")
+    elapsed_seconds = evaluated - float(field.observed_at)
+    if elapsed_seconds < 0.0:
+        return ()
     labelled = frozenset(labelled_pixels)
     height, width = field.rain_rate_mm_h.shape
     if not labelled or any(
@@ -197,11 +200,15 @@ def advect_labelled_qpe(
         offsets = (*offsets, policy.horizon_seconds)
     samples: list[tuple[float, bool | None, float]] = []
     for offset in offsets:
+        # The source pixels belong to the radar product's valid time. A later
+        # processing tick must include elapsed advection, not restart the storm
+        # at its old position and push every arrival forward again.
+        source_elapsed_seconds = elapsed_seconds + offset
         sampled = _sample_source_pixel(
             field,
             labelled,
-            source_x_m=target_x - motion.vx_m_s * offset,
-            source_y_m=target_y - motion.vy_m_s * offset,
+            source_x_m=target_x - motion.vx_m_s * source_elapsed_seconds,
+            source_y_m=target_y - motion.vy_m_s * source_elapsed_seconds,
             support_radius_m=target.accuracy_km * 1_000.0,
             wet_threshold_mm_h=policy.wet_threshold_mm_h,
         )
