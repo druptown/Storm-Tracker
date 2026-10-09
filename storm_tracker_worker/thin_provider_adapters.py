@@ -2150,14 +2150,20 @@ def _decode_meteofrance_radar(
             raw * _attribute_number(data_what["gain"])
             + _attribute_number(data_what["offset"])
         )
-        rain_rate = decoded * 12.0
+        # ODIM undetect is a measured below-threshold sample, not nodata.
+        # Use zero as its quantitative no-echo representation; this is not
+        # proof of exactly zero physical rainfall. Keep echo selection separate
+        # from source validity so dry coverage survives regional fusion.
+        undetect = raw == _attribute_number(data_what["undetect"])
+        rain_rate = np.where(undetect, 0.0, decoded * 12.0)
         valid = (
             (raw != _attribute_number(data_what["nodata"]))
-            & (raw != _attribute_number(data_what["undetect"]))
+            & np.isfinite(raw)
             & np.isfinite(rain_rate)
-            & (rain_rate >= 0.1)
+            & (rain_rate >= 0.0)
             & (rain_rate < 500.0)
         )
+        echo_valid = valid & ~undetect & (rain_rate >= 0.1)
         crs = _attribute_text(where["projdef"])
         xscale = _attribute_number(where["xscale"])
         yscale = _attribute_number(where["yscale"])
@@ -2196,7 +2202,7 @@ def _decode_meteofrance_radar(
 
     observations = _national_radar_observations(
         rain_rate,
-        valid,
+        echo_valid,
         request,
         observed_at=observed_at,
         received_at=received_at,
