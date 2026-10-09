@@ -1,8 +1,8 @@
 {
   "kind": "recovered_archive_source",
   "component": "worker",
-  "version": "1.18.82",
-  "source_id": "feda4e037b73963c0ed2b0f8bd24b69f1245fb74d500dffbb57122417fd34f7f",
+  "version": "1.18.83",
+  "source_id": "b1fea552b23375376e56046580bee50be95e5f1044a65a4bbc0aab9fdce55616",
   "recovered_on": "2026-10-09",
   "files": [
     {
@@ -32,7 +32,7 @@
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "1c3f7d1e3b900c45c9972a9c7b753a851c231116bb33e6a5d6b7a916b21c3410",
+      "sha256": "6d91cdc7b83099821372c010c5a7daa319a1563b238c6570f275c9df24fdff6c",
       "size": 64
     },
     {
@@ -272,7 +272,7 @@
     {
       "path": "config.yaml",
       "mode": 420,
-      "sha256": "c814679aad5f6f0af2016695ff8f6a263520b02c8572df3cbb1a649609330095",
+      "sha256": "dc5a034b05c1443515082af35242478f7d77e44666b8625b1f4e219e84252107",
       "size": 2669
     },
     {
@@ -1124,8 +1124,8 @@
     {
       "path": "thin_provider_adapters.py",
       "mode": 420,
-      "sha256": "3db8d32b1588ef827c1181e8e8578899130e5749b8cd9cc676e231fda846b274",
-      "size": 153058
+      "sha256": "ca79d65c6a48c75f7d0f41d02ff55ce3eb97e3a5b13168f727c3d62c2af22c38",
+      "size": 153115
     },
     {
       "path": "thin_provider_catalog.py",
@@ -1622,12 +1622,12 @@
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_worker_v1.18.82_deploy.tar.gz",
-      "archive_sha256": "c53f5850639d88814d1ea39a6f157df43309e9c4aacb62bd25c0ec9399306c55",
-      "bytes": 2404267,
+      "filename": "storm_tracker_worker_v1.18.83_deploy.tar.gz",
+      "archive_sha256": "d8083667586e419e7cc18d2d1c362c6d1479068846a568ec5cae666afddef515",
+      "bytes": 2404284,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.152_worker_v1.18.82_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.152_worker_v1.18.83_evidence.json",
           "archive_and_source_match": true
         }
       ]

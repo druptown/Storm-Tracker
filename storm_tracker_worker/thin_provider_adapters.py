@@ -740,6 +740,7 @@ class KmiAwsAdapter:
                 )
 
         observations: list[NormalizedObservation] = []
+        ground_radius_km = max(0.0, float(request.ground_radius_km))
         measurement_specs = (
             ("temp_dry_shelter_avg", ObservationKind.TEMPERATURE, "°C", "temperature"),
             ("pressure", ObservationKind.PRESSURE, "hPa", "pressure"),
@@ -765,7 +766,7 @@ class KmiAwsAdapter:
                     longitude,
                     target.latitude,
                     target.longitude,
-                ) > target.observation_radius_km:
+                ) > ground_radius_km:
                     continue
                 common = {
                     "provider_id": request.provider_id,
