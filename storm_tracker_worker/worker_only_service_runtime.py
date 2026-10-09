@@ -426,6 +426,8 @@ class WorkerOnlyServiceRuntime:
         self,
         runtime: OperationalSnapshotRuntime,
         output: Mapping[str, Any],
+        *,
+        restage_current_authority: bool = False,
     ) -> Mapping[str, Any]:
         if self._snapshot_output_ready(output):
             return output
@@ -438,7 +440,16 @@ class WorkerOnlyServiceRuntime:
         for _ in range(MAX_SNAPSHOT_SETTLE_TICKS):
             if not self._snapshot_output_was_safely_superseded(output):
                 break
-            output = await runtime.async_tick()
+            if restage_current_authority and await self._stage_cycle():
+                # The previous fact was bound to the authority that was live
+                # before HA's coalesced target update.  An output-only tick can
+                # publish a safe fallback, but it cannot turn that obsolete
+                # fact into a rich current-authority snapshot.  Rebuild only
+                # the bounded fact from already-retained captures and publish
+                # it; no provider I/O is repeated here.
+                output = await runtime.async_publish_ready_fact()
+            else:
+                output = await runtime.async_tick()
             if self._snapshot_output_ready(output):
                 return output
         raise WorkerOnlyServiceRuntimeError(
@@ -450,7 +461,11 @@ class WorkerOnlyServiceRuntime:
         output: Mapping[str, Any],
     ) -> Mapping[str, Any]:
         assert self._output is not None
-        return await self._settle_snapshot_runtime(self._output, output)
+        return await self._settle_snapshot_runtime(
+            self._output,
+            output,
+            restage_current_authority=True,
+        )
 
     def _snapshot_provider_projection_missing(self) -> bool:
         """Return whether the durable head is only the safe fallback."""

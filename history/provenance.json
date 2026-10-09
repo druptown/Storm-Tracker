@@ -1,8 +1,8 @@
 {
   "kind": "recovered_archive_source",
   "component": "worker",
-  "version": "1.17.62",
-  "source_id": "c821b8d6a63ed2fe8c1256442f34af3f49af92d003ca9dab25ad727aa0ebb2df",
+  "version": "1.17.63",
+  "source_id": "581737b392dd6ffd65c447a2c9012080b21df005711d1f87ce75fae32f1528af",
   "recovered_on": "2026-10-09",
   "files": [
     {
@@ -32,7 +32,7 @@
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "fcf1835a012154a52e82f8140ef3f549aeb14d9755037d97f1cc6983cda1944c",
+      "sha256": "16764d9c724e081cedb09a07dfc8bc064bacd15a847886deca4b54a4b11b9ec0",
       "size": 64
     },
     {
@@ -272,7 +272,7 @@
     {
       "path": "config.yaml",
       "mode": 420,
-      "sha256": "111adc9ffcbffc9a29a3a1f99f95bf1add55b04417546ec2ec579b49e2487655",
+      "sha256": "73f3f70dfcd7b97af5fb912ad1ebd02d5381a786c3ea920d813fe79ef25baf1e",
       "size": 2681
     },
     {
@@ -1400,22 +1400,22 @@
     {
       "path": "worker_only_service_runtime.py",
       "mode": 420,
-      "sha256": "44ac79d74d6779fcad78eda29d76faba98790d4ee1e26902166ca17b3075789f",
-      "size": 66966
+      "sha256": "bac0074d338ef34080043322c0a086a7f781e4fece967a5a24359e13cde27ac6",
+      "size": 67709
     }
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_worker_v1.17.62_deploy.tar.gz",
-      "archive_sha256": "f7269f3332307f35d2664d4553b593f898fef022897f26c1334925b872a9eeed",
-      "bytes": 2241848,
+      "filename": "storm_tracker_worker_v1.17.63_deploy.tar.gz",
+      "archive_sha256": "785c61dc8ab4f81eb8610437e75cce0e624fa240652ef29d535e52ab9f7b0167",
+      "bytes": 2242023,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.58_worker_v1.17.62_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.59_worker_v1.17.63_evidence.json",
           "archive_and_source_match": true
         },
         {
-          "manifest": "storm_tracker_release_v1.14.58_worker_v1.17.62_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.59_worker_v1.17.63_evidence.json",
           "archive_and_source_match": true
         }
       ]
