@@ -12,7 +12,10 @@ import time
 from typing import Any
 
 from .protocol import decode, encode, envelope, job_payload, topic
-from .thin_operational_runtime import ThinOperationalRuntime
+from .thin_operational_runtime import (
+    MAX_GEOJSON_PAYLOAD_BYTES,
+    ThinOperationalRuntime,
+)
 from .thin_blitzortung import ThinBlitzortungFeed
 from .thin_postgis import ThinPostGISSettings, ThinPostGISWriter
 from .thin_provider_adapters import (
@@ -31,7 +34,7 @@ from .tracking_core.operational_snapshot import encode_control_envelope
 
 
 _LOGGER = logging.getLogger(__name__)
-WORKER_VERSION = "1.18.8"
+WORKER_VERSION = "1.18.9"
 
 
 class ThinMqttService:
@@ -274,7 +277,7 @@ class ThinMqttService:
                     separators=(",", ":"),
                     sort_keys=True,
                 ).encode("utf-8")
-                if len(geojson_payload) > 900_000:
+                if len(geojson_payload) > MAX_GEOJSON_PAYLOAD_BYTES:
                     raise ValueError("geojson_payload_too_large")
                 self.client.publish(
                     topic(self.topic_root, "operational/geojson"),

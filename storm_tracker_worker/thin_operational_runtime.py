@@ -17,6 +17,7 @@ from .tracking_core.operational_snapshot import MAX_UI_STORM_SUMMARIES, validate
 
 
 SNAPSHOT_TTL_SECONDS = 120.0
+MAX_GEOJSON_PAYLOAD_BYTES = 900_000
 SNAPSHOT_REVISION_EPOCH_SECONDS = 1_577_836_800  # 2020-01-01T00:00:00Z
 SNAPSHOT_PROVIDER_IDS = {
     "kmi_radar": "radar.kmi.radqpe_native",
@@ -258,12 +259,14 @@ class ThinOperationalRuntime:
         nowcast: ThinNowcast,
     ) -> dict[str, Any]:
         assert self._state is not None
-        features: list[dict[str, Any]] = []
+        target_features: list[dict[str, Any]] = []
+        cell_feature_groups: list[tuple[float, str, list[dict[str, Any]]]] = []
+        lightning_features: list[dict[str, Any]] = []
         region_id = "thin-operational"
         for target in self._state.targets:
             if not target.available:
                 continue
-            features.append({
+            target_features.append({
                 "type": "Feature",
                 "id": f"target:{target.target_id}",
                 "geometry": {
@@ -281,9 +284,9 @@ class ThinOperationalRuntime:
                 },
             })
 
-        for cell in nowcast.storm_cells[:64]:
+        for cell in nowcast.storm_cells:
             geometry = json.loads(json.dumps(dict(cell.geometry), allow_nan=False))
-            features.append({
+            group = [{
                 "type": "Feature",
                 "id": f"cell:{cell.cell_id}",
                 "geometry": geometry,
@@ -299,15 +302,20 @@ class ThinOperationalRuntime:
                     "provider_id": cell.provider_id,
                     "observed_at": cell.observed_at,
                 },
-            })
+            }]
             if cell.heading_deg is None or cell.speed_kmh < 0.5:
+                cell_feature_groups.append((
+                    float(cell.reflectivity_dbz or -100.0),
+                    cell.cell_id,
+                    group,
+                ))
                 continue
             hours = 1.0
             latitude_delta = cell.velocity_north_kmh * hours / 110.574
             longitude_delta = cell.velocity_east_kmh * hours / (
                 111.320 * max(0.05, abs(math.cos(math.radians(cell.latitude))))
             )
-            features.append({
+            group.append({
                 "type": "Feature",
                 "id": f"motion:{cell.cell_id}",
                 "geometry": {
@@ -327,12 +335,17 @@ class ThinOperationalRuntime:
                     "motion_model": "linear",
                 },
             })
+            cell_feature_groups.append((
+                float(cell.reflectivity_dbz or -100.0),
+                cell.cell_id,
+                group,
+            ))
 
         lightning_count = 0
         for index, observation in enumerate(fusion.observations):
             if observation.kind.value != "lightning_strike" or lightning_count >= 300:
                 continue
-            features.append({
+            lightning_features.append({
                 "type": "Feature",
                 "id": f"lightning:{observation.observed_at:.3f}:{index}",
                 "geometry": {
@@ -352,21 +365,65 @@ class ThinOperationalRuntime:
             })
             lightning_count += 1
 
-        return {
-            "type": "FeatureCollection",
-            "features": features,
-            "metadata": {
+        total_cells = len(cell_feature_groups)
+
+        def _collection(
+            selected: list[tuple[float, str, list[dict[str, Any]]]],
+        ) -> dict[str, Any]:
+            selected_ids = {item[1] for item in selected}
+            cell_features = [
+                feature
+                for item in cell_feature_groups
+                if item[1] in selected_ids
+                for feature in item[2]
+            ]
+            features = target_features + cell_features + lightning_features
+            return {
+                "type": "FeatureCollection",
+                "features": features,
+                "metadata": {
                 "schema_version": 1,
                 "feature_count": len(features),
-                "radar_cells_included": len(nowcast.storm_cells[:64]),
-                "radar_cells_total": len(nowcast.storm_cells),
+                "radar_cells_included": len(selected),
+                "radar_cells_total": total_cells,
                 "lightning_events_included": lightning_count,
-                "truncated": len(nowcast.storm_cells) > 64,
+                "truncated": len(selected) < total_cells,
                 "state": "operational",
                 "builder": "thin_worker",
                 "built_at": fusion.evaluated_at,
-            },
-        }
+                },
+            }
+
+        def _encoded_size(collection: Mapping[str, Any]) -> int:
+            return len(json.dumps(
+                collection,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8"))
+
+        complete = _collection(cell_feature_groups)
+        if _encoded_size(complete) <= MAX_GEOJSON_PAYLOAD_BYTES:
+            return complete
+
+        strongest = sorted(
+            cell_feature_groups,
+            key=lambda item: (item[0], item[1]),
+            reverse=True,
+        )
+        low = 0
+        high = len(strongest)
+        best = _collection([])
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = _collection(strongest[:middle])
+            if _encoded_size(candidate) <= MAX_GEOJSON_PAYLOAD_BYTES:
+                best = candidate
+                low = middle + 1
+            else:
+                high = middle - 1
+        return best
 
     def _build_snapshot(
         self,
@@ -563,4 +620,8 @@ class ThinOperationalRuntime:
         return validate_snapshot(snapshot)
 
 
-__all__ = ["ThinCycleResult", "ThinOperationalRuntime"]
+__all__ = [
+    "MAX_GEOJSON_PAYLOAD_BYTES",
+    "ThinCycleResult",
+    "ThinOperationalRuntime",
+]
