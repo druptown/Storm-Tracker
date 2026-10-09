@@ -2990,11 +2990,44 @@ class MetarAdapter:
                 )
             except HttpStatusError as error:
                 if error.status_code == 204:
-                    continue
-                raise
+                    response = []
+                else:
+                    raise
             if not isinstance(response, list):
                 raise ValueError("metar_payload_invalid")
             payload.extend(response)
+            if "ids" in query:
+                # Catalog proximity does not prove a station still reports.
+                # Resolve uncovered targets from actual fresh local reports,
+                # with at most one bounded discovery query per target in this
+                # normal provider cycle (never a faster retry/poll).
+                for target in request.targets:
+                    covered = False
+                    for station in response:
+                        if not isinstance(station, Mapping):
+                            continue
+                        latitude = _optional_float(station.get("lat"))
+                        longitude = _optional_float(station.get("lon"))
+                        observed_at = _parse_timestamp(station.get("obsTime"), fallback=float("nan"))
+                        if (latitude is None or longitude is None
+                                or not 0 <= now - observed_at <= 3600  # same one-hour report window as the API query
+                                or _haversine_km(latitude, longitude, target.latitude, target.longitude) > request.ground_radius_km):
+                            continue
+                        if any(_optional_float(station.get(name)) is not None
+                               for name in ("temp", "altim", "wspd", "wgst", "wdir", "precip")):
+                            covered = True
+                            break
+                    if covered:
+                        continue
+                    bounds = (
+                        f"{max(-90.0, target.latitude - 2):.3f},"
+                        f"{max(-180.0, target.longitude - 3):.3f},"
+                        f"{min(90.0, target.latitude + 2):.3f},"
+                        f"{min(180.0, target.longitude + 3):.3f}"
+                    )
+                    discovery = {"format": "json", "hours": "1", "bbox": bounds}
+                    if discovery not in queries:
+                        queries.append(discovery)
         observations: list[NormalizedObservation] = []
         seen = set()
         for station in payload:
