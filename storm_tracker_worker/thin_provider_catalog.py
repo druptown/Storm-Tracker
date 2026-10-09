@@ -46,6 +46,9 @@ class ThinProviderRequest:
     requested_at: float
     regions: tuple[ThinAcquisitionRegion, ...] = ()
     ground_radius_km: float = 20.0
+    selected_station_ids: tuple[str, ...] = ()
+    station_selection_applied: bool = False
+    station_selection_reason: str | None = None
 
 
 EUROPE = CoverageBox(south=34.0, north=72.0, west=-25.0, east=45.0)
@@ -78,6 +81,7 @@ PROVIDERS: tuple[ThinProviderSpec, ...] = (
     ThinProviderSpec("open_meteo", "forecast", 600.0, None),
     ThinProviderSpec("metar", "ground_observation", 600.0, EUROPE),
     ThinProviderSpec("netatmo", "ground_observation", 300.0, None),
+    ThinProviderSpec("wunderground", "ground_observation", 300.0, None),
     ThinProviderSpec("blitzortung", "lightning_events", 30.0, EUROPE),
     ThinProviderSpec("aemet_radar", "radar_composite", 300.0, SPAIN),
 )

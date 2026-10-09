@@ -10,6 +10,7 @@ from typing import Any, Callable, Mapping
 
 from .desired_state import METHOD, DesiredState, DesiredStateConflict, parse_desired_state
 from .thin_fusion import FusionCycle, fuse_observations
+from .thin_ground_validation import ForecastValidation, GroundValidationRuntime
 from .thin_nowcast import StormCell, ThinNowcast, ThinNowcastRuntime
 from .thin_observation import ObservationKind
 from .thin_radar_tracking import ThinRadarTracker
@@ -30,6 +31,7 @@ SNAPSHOT_PROVIDER_IDS = {
     "open_meteo": "model.openmeteo.region",
     "metar": "ground.metar.global",
     "netatmo": "ground.netatmo.region",
+    "wunderground": "ground.wunderground.station",
     "blitzortung": "lightning.blitzortung.event_ingress",
     "aemet_radar": "radar.aemet.composite",
 }
@@ -109,6 +111,7 @@ class ThinCycleResult:
     fusion: FusionCycle
     nowcast: ThinNowcast
     postgis: PostGISWriteResult
+    validations: tuple[ForecastValidation, ...] = ()
 
 
 def _collection(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -158,6 +161,7 @@ class ThinOperationalRuntime:
         self._region_planner = ThinRegionPlanner()
         self._nowcast = ThinNowcastRuntime(targets={})
         self._radar_tracker = ThinRadarTracker()
+        self._ground_validation = GroundValidationRuntime()
         # A worker App restart must not reset revisions below the snapshot still
         # cached by Home Assistant. Seconds since a recent fixed epoch fit the
         # snapshot contract's 1e9 counter ceiling. The service runs no faster
@@ -325,7 +329,11 @@ class ThinOperationalRuntime:
         region_plan = self._region_planner.plan(state, now=now)
         active_targets = region_plan.targets
         self._nowcast.update_targets({
-            item.target_id: (item.latitude, item.longitude)
+            item.target_id: (
+                item.latitude,
+                item.longitude,
+                max(0.0, item.location_accuracy_m / 1000.0),
+            )
             for item in active_targets
         })
         requests = build_due_requests(
@@ -362,7 +370,7 @@ class ThinOperationalRuntime:
                             provider_id=item.provider_id,
                             observed_at=item.observed_at, latitude=item.latitude,
                             longitude=item.longitude,
-                            geometry={"type": "Point", "coordinates": [item.longitude, item.latitude]},
+                            geometry=item.geometry,
                             precipitation_rate_mm_h=item.rain_rate_mm_h,
                             reflectivity_dbz=None, radar_level=None,
                             velocity_east_kmh=item.velocity_east_kmh,
@@ -372,6 +380,11 @@ class ThinOperationalRuntime:
         nowcast = self._nowcast.advance(
             fusion,
             tracked_cells=tuple({item.cell_id: item for item in tracked_cells}.values()) or None,
+        )
+        validations = self._ground_validation.advance(
+            nowcast.target_passages,
+            fusion.observations,
+            evaluated_at=float(self._clock()),
         )
         self._latest_geojson = self._build_geojson(
             fusion,
@@ -388,7 +401,9 @@ class ThinOperationalRuntime:
                 dropped_cycles=0,
             )
         else:
-            postgis = await self._postgis.write_cycle(fusion, nowcast)
+            postgis = await self._postgis.write_cycle(
+                fusion, nowcast, validations,
+            )
         self._revision += 1
         snapshot = self._build_snapshot(
             fusion,
@@ -397,7 +412,13 @@ class ThinOperationalRuntime:
             state=state,
             region_plan=region_plan,
         )
-        return ThinCycleResult(snapshot=snapshot, fusion=fusion, nowcast=nowcast, postgis=postgis)
+        return ThinCycleResult(
+            snapshot=snapshot,
+            fusion=fusion,
+            nowcast=nowcast,
+            postgis=postgis,
+            validations=validations,
+        )
 
     def _build_geojson(
         self,

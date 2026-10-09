@@ -12,6 +12,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
 from .thin_fusion import FusionCycle
+from .thin_ground_validation import ForecastValidation
 from .thin_nowcast import ThinNowcast
 
 
@@ -138,6 +139,50 @@ ON CONFLICT(target_id,evaluated_at) DO UPDATE SET
     reason_code=EXCLUDED.reason_code,contributors=EXCLUDED.contributors
 """
 
+_INSERT_TARGET_POSITION = """
+INSERT INTO stv3_target_position(
+    target_id,observed_at,position,accuracy_km
+) VALUES(
+    %s,to_timestamp(%s),
+    ST_SetSRID(ST_MakePoint(%s,%s),4326),%s
+)
+ON CONFLICT(target_id,observed_at) DO UPDATE SET
+    position=EXCLUDED.position,accuracy_km=EXCLUDED.accuracy_km
+"""
+
+_INSERT_PASSAGE = """
+INSERT INTO stv3_target_passage(
+    target_id,evaluated_at,cell_id,provider_id,entry_at,exit_at,
+    method,predicted_intensity_mm_h,footprint,metadata
+) VALUES(
+    %s,to_timestamp(%s),%s,%s,to_timestamp(%s),to_timestamp(%s),
+    %s,%s,ST_SetSRID(ST_GeomFromGeoJSON(%s),4326),%s::jsonb
+)
+ON CONFLICT(target_id,evaluated_at,cell_id) DO UPDATE SET
+    entry_at=EXCLUDED.entry_at,exit_at=EXCLUDED.exit_at,
+    method=EXCLUDED.method,
+    predicted_intensity_mm_h=EXCLUDED.predicted_intensity_mm_h,
+    footprint=EXCLUDED.footprint,metadata=EXCLUDED.metadata
+"""
+
+_INSERT_VALIDATION = """
+INSERT INTO stv3_forecast_validation(
+    validation_key,target_id,evaluated_at,cell_id,provider_id,
+    station_provider_id,station_id,outcome,entry_error_seconds,
+    exit_error_seconds,predicted_intensity_mm_h,observed_intensity_mm_h,
+    details
+) VALUES(
+    %s,%s,to_timestamp(%s),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb
+)
+ON CONFLICT(validation_key) DO UPDATE SET
+    outcome=EXCLUDED.outcome,
+    entry_error_seconds=EXCLUDED.entry_error_seconds,
+    exit_error_seconds=EXCLUDED.exit_error_seconds,
+    predicted_intensity_mm_h=EXCLUDED.predicted_intensity_mm_h,
+    observed_intensity_mm_h=EXCLUDED.observed_intensity_mm_h,
+    details=EXCLUDED.details
+"""
+
 
 def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -156,7 +201,9 @@ class ThinPostGISWriter:
     ) -> None:
         self._settings = settings
         self._connect_factory = connect_factory
-        self._queue: deque[tuple[FusionCycle, ThinNowcast]] = deque()
+        self._queue: deque[
+            tuple[FusionCycle, ThinNowcast, tuple[ForecastValidation, ...]]
+        ] = deque()
         self._lock = asyncio.Lock()
         self._dropped_cycles = 0
         self._last_error_code: str | None = None
@@ -171,7 +218,9 @@ class ThinPostGISWriter:
 
     def _write_batch(
         self,
-        batch: tuple[tuple[FusionCycle, ThinNowcast], ...],
+        batch: tuple[
+            tuple[FusionCycle, ThinNowcast, tuple[ForecastValidation, ...]], ...
+        ],
     ) -> dict[str, int]:
         connection = self._connect()
         counts = {
@@ -180,11 +229,14 @@ class ThinPostGISWriter:
             "storm_cells": 0,
             "track_points": 0,
             "target_forecasts": 0,
+            "target_positions": 0,
+            "target_passages": 0,
+            "forecast_validations": 0,
         }
         try:
             with connection.cursor() as cursor:
                 observation_rows: list[tuple[Any, ...]] = []
-                for cycle, nowcast in batch:
+                for cycle, nowcast, _validations in batch:
                     for observation in cycle.observations:
                         payload = observation.as_dict()
                         geometry = payload["geometry"] or {
@@ -219,7 +271,7 @@ class ThinPostGISWriter:
                 if observation_rows:
                     cursor.executemany(_INSERT_OBSERVATION, observation_rows)
 
-                for cycle, nowcast in batch:
+                for cycle, nowcast, validations in batch:
                     targets = {
                         key: value.as_dict() for key, value in cycle.targets.items()
                     }
@@ -285,6 +337,61 @@ class ThinPostGISWriter:
                             _json(list(forecast.contributors)),
                         ))
                         counts["target_forecasts"] += 1
+                        if (
+                            forecast.target_latitude is not None
+                            and forecast.target_longitude is not None
+                        ):
+                            cursor.execute(_INSERT_TARGET_POSITION, (
+                                target_id,
+                                nowcast.evaluated_at,
+                                forecast.target_longitude,
+                                forecast.target_latitude,
+                                forecast.target_accuracy_km,
+                            ))
+                            counts["target_positions"] += 1
+
+                    for passage in nowcast.target_passages:
+                        cursor.execute(_INSERT_PASSAGE, (
+                            passage.target_id,
+                            passage.evaluated_at,
+                            passage.cell_id,
+                            passage.provider_id,
+                            passage.entry_at,
+                            passage.exit_at,
+                            passage.method,
+                            passage.predicted_intensity_mm_h,
+                            _json(dict(passage.footprint)),
+                            _json({
+                                "fallback_reason": passage.fallback_reason,
+                                "horizon_clipped": passage.horizon_clipped,
+                            }),
+                        ))
+                        counts["target_passages"] += 1
+
+                    for validation in validations:
+                        cursor.execute(_INSERT_VALIDATION, (
+                            validation.validation_key,
+                            validation.target_id,
+                            validation.evaluated_at,
+                            validation.cell_id,
+                            validation.provider_id,
+                            validation.station_provider_id,
+                            validation.station_id,
+                            validation.outcome,
+                            validation.entry_error_seconds,
+                            validation.exit_error_seconds,
+                            validation.predicted_intensity_mm_h,
+                            validation.observed_intensity_mm_h,
+                            _json({
+                                "intensity_error_mm_h": (
+                                    validation.intensity_error_mm_h
+                                ),
+                                "contributing_stations": list(
+                                    validation.contributing_stations
+                                ),
+                            }),
+                        ))
+                        counts["forecast_validations"] += 1
             connection.commit()
             return counts
         except BaseException:
@@ -297,12 +404,13 @@ class ThinPostGISWriter:
         self,
         cycle: FusionCycle,
         nowcast: ThinNowcast,
+        validations: tuple[ForecastValidation, ...] = (),
     ) -> PostGISWriteResult:
         async with self._lock:
             if len(self._queue) >= MAX_RETRY_CYCLES:
                 self._queue.popleft()
                 self._dropped_cycles += 1
-            self._queue.append((cycle, nowcast))
+            self._queue.append((cycle, nowcast, tuple(validations)))
             batch = tuple(self._queue)
             try:
                 counts = await asyncio.to_thread(self._write_batch, batch)

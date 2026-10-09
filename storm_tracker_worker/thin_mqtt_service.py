@@ -17,6 +17,7 @@ from .thin_operational_runtime import (
     ThinOperationalRuntime,
 )
 from .thin_blitzortung import ThinBlitzortungFeed
+from .thin_ground_station_runtime import GroundStationRuntime
 from .thin_postgis import ThinPostGISSettings, ThinPostGISWriter
 from .thin_provider_adapters import (
     AioHttpFetcher,
@@ -29,13 +30,15 @@ from .thin_provider_adapters import (
     NetatmoOAuthTokenProvider,
     OpenMeteoAdapter,
     OperaRadarAdapter,
+    WundergroundAdapter,
 )
 from .thin_provider_runtime import ThinProviderRuntime
+from .thin_station_catalog import StationCatalogRepository
 from .tracking_core.operational_snapshot import encode_control_envelope
 
 
 _LOGGER = logging.getLogger(__name__)
-WORKER_VERSION = "1.18.23"
+WORKER_VERSION = "1.18.24"
 
 
 class ThinMqttService:
@@ -271,6 +274,48 @@ class ThinMqttService:
                     qos=1,
                     retain=True,
                 )
+                passages_payload = json.dumps({
+                    "schema_version": 1,
+                    "evaluated_at": result.nowcast.evaluated_at,
+                    "items": [{
+                        "target_id": item.target_id,
+                        "cell_id": item.cell_id,
+                        "provider_id": item.provider_id,
+                        "entry_at": item.entry_at,
+                        "exit_at": item.exit_at,
+                        "method": item.method,
+                        "predicted_intensity_mm_h": item.predicted_intensity_mm_h,
+                        "fallback_reason": item.fallback_reason,
+                        "horizon_clipped": item.horizon_clipped,
+                    } for item in result.nowcast.target_passages[:256]],
+                    "overflow_count": max(
+                        0, len(result.nowcast.target_passages) - 256,
+                    ),
+                }, allow_nan=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+                self.client.publish(
+                    topic(self.topic_root, "operational/passages"),
+                    passages_payload,
+                    qos=1,
+                    retain=True,
+                )
+                validation_counts: dict[str, int] = {}
+                for validation in result.validations:
+                    validation_counts[validation.outcome] = (
+                        validation_counts.get(validation.outcome, 0) + 1
+                    )
+                validation_payload = json.dumps({
+                    "schema_version": 1,
+                    "evaluated_at": result.nowcast.evaluated_at,
+                    "status": "current",
+                    "new_count": len(result.validations),
+                    "outcomes": validation_counts,
+                }, allow_nan=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+                self.client.publish(
+                    topic(self.topic_root, "operational/validation"),
+                    validation_payload,
+                    qos=1,
+                    retain=True,
+                )
                 geojson_payload = json.dumps(
                     self.runtime.geojson_collection(),
                     allow_nan=False,
@@ -407,16 +452,38 @@ def _build_runtime() -> tuple[ThinOperationalRuntime, BlitzortungAdapter]:
                 fetcher=fetcher,
             ).get_access_token,
         ),
+        "wunderground": WundergroundAdapter(),
         "blitzortung": blitzortung,
     }
+    settings = ThinPostGISSettings.from_environment()
+    station_runtime = None
+    if settings is not None:
+        import psycopg
+
+        enabled_ground_providers = {"metar"}
+        if all(os.getenv(name) for name in (
+            "STV3_NETATMO_CLIENT_ID",
+            "STV3_NETATMO_CLIENT_SECRET",
+            "STV3_NETATMO_REFRESH_TOKEN",
+        )):
+            enabled_ground_providers.add("netatmo")
+        if os.getenv("STV3_WUNDERGROUND_API_KEY"):
+            enabled_ground_providers.add("wunderground")
+        station_runtime = GroundStationRuntime(
+            StationCatalogRepository(
+                psycopg.connect,
+                settings.connect_kwargs(),
+            ),
+            enabled_providers=enabled_ground_providers,
+        )
     provider_runtime = ThinProviderRuntime(
         adapters=adapters,
         fetcher=fetcher,
         max_parallel=8,
         timeout_seconds=45.0,
         retries=1,
+        request_preparer=station_runtime,
     )
-    settings = ThinPostGISSettings.from_environment()
     writer = ThinPostGISWriter(settings) if settings is not None else None
     return (
         ThinOperationalRuntime(

@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 from .thin_fusion import FusionCycle
+from .thin_footprint_forecast import TargetPassage, forecast_target_passage
 from .thin_observation import NormalizedObservation, ObservationKind
 from .tracking_core.engine.cell_track import (
     CellDetection,
@@ -67,6 +68,13 @@ class TargetNowcast:
     contributors: tuple[str, ...]
     arrival_cell_id: str | None = None
     arrival_provider_id: str | None = None
+    entry_at: float | None = None
+    exit_at: float | None = None
+    passage_method: str | None = None
+    passage_fallback_reason: str | None = None
+    target_latitude: float | None = None
+    target_longitude: float | None = None
+    target_accuracy_km: float = 0.0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -80,6 +88,13 @@ class TargetNowcast:
             "contributors": list(self.contributors),
             "arrival_cell_id": self.arrival_cell_id,
             "arrival_provider_id": self.arrival_provider_id,
+            "entry_at": self.entry_at,
+            "exit_at": self.exit_at,
+            "passage_method": self.passage_method,
+            "passage_fallback_reason": self.passage_fallback_reason,
+            "target_latitude": self.target_latitude,
+            "target_longitude": self.target_longitude,
+            "target_accuracy_km": self.target_accuracy_km,
         }
 
 
@@ -88,6 +103,7 @@ class ThinNowcast:
     target_results: Mapping[str, TargetNowcast]
     storm_cells: tuple[StormCell, ...]
     evaluated_at: float
+    target_passages: tuple[TargetPassage, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,13 +172,13 @@ def _is_spatial_weather(observation: NormalizedObservation) -> bool:
 
 
 class ThinNowcastRuntime:
-    def __init__(self, *, targets: Mapping[str, tuple[float, float]]) -> None:
+    def __init__(self, *, targets: Mapping[str, tuple[float, ...]]) -> None:
         self._targets = dict(targets)
         self._previous_cells: tuple[_CellFrame, ...] = ()
         self._latest: ThinNowcast | None = None
         self._sequence = 0
 
-    def update_targets(self, targets: Mapping[str, tuple[float, float]]) -> None:
+    def update_targets(self, targets: Mapping[str, tuple[float, ...]]) -> None:
         self._targets = dict(targets)
 
     def _associate(
@@ -295,7 +311,14 @@ class ThinNowcastRuntime:
             frames.append(current)
 
         target_results: dict[str, TargetNowcast] = {}
-        for target_id, (target_latitude, target_longitude) in sorted(self._targets.items()):
+        target_passages: list[TargetPassage] = []
+        for target_id, target_position in sorted(self._targets.items()):
+            target_latitude, target_longitude = target_position[:2]
+            accuracy_buffer_km = (
+                max(0.0, float(target_position[2]))
+                if len(target_position) > 2
+                else 0.0
+            )
             fused = cycle.targets.get(target_id)
             rain_rate = fused.precipitation_rate_mm_h if fused is not None else None
             has_echo = bool(
@@ -306,11 +329,28 @@ class ThinNowcastRuntime:
                 )
             )
             raining = bool((rain_rate is not None and rain_rate > 0.0) or has_echo)
-            arrival = None if raining else self._arrival(
-                target_latitude, target_longitude, cells,
+            passages = tuple(
+                passage
+                for cell in cells
+                if (passage := forecast_target_passage(
+                    cell=cell,
+                    target_id=target_id,
+                    target_latitude=target_latitude,
+                    target_longitude=target_longitude,
+                    evaluated_at=cycle.evaluated_at,
+                    accuracy_buffer_km=accuracy_buffer_km,
+                )) is not None
+            )
+            target_passages.extend(passages)
+            arrival = min(
+                passages,
+                key=lambda item: (item.entry_at, item.exit_at, item.cell_id),
+                default=None,
             )
             eta_minutes = 0.0 if raining else (
-                None if arrival is None else arrival[0]
+                None
+                if arrival is None
+                else round(max(0.0, arrival.entry_at - cycle.evaluated_at) / 60.0, 1)
             )
             if raining:
                 current_state = "regen"
@@ -337,8 +377,17 @@ class ThinNowcastRuntime:
                 confidence=(fused.confidence if fused is not None else 0.0),
                 reason_code=reason,
                 contributors=(fused.contributors if fused is not None else ()),
-                arrival_cell_id=None if arrival is None else arrival[1].cell_id,
-                arrival_provider_id=None if arrival is None else arrival[1].provider_id,
+                arrival_cell_id=None if arrival is None else arrival.cell_id,
+                arrival_provider_id=None if arrival is None else arrival.provider_id,
+                entry_at=None if arrival is None else arrival.entry_at,
+                exit_at=None if arrival is None else arrival.exit_at,
+                passage_method=None if arrival is None else arrival.method,
+                passage_fallback_reason=(
+                    None if arrival is None else arrival.fallback_reason
+                ),
+                target_latitude=target_latitude,
+                target_longitude=target_longitude,
+                target_accuracy_km=accuracy_buffer_km,
             )
 
         self._sequence += 1
@@ -347,6 +396,10 @@ class ThinNowcastRuntime:
             target_results=MappingProxyType(target_results),
             storm_cells=tuple(cells),
             evaluated_at=cycle.evaluated_at,
+            target_passages=tuple(sorted(
+                target_passages,
+                key=lambda item: (item.target_id, item.entry_at, item.cell_id),
+            )),
         )
         return self._latest
 

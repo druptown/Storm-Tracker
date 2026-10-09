@@ -150,6 +150,75 @@ class RadarTrack:
     rain_rate_mm_h: float
     velocity_east_kmh: float
     velocity_north_kmh: float
+    geometry: dict[str, Any]
+
+
+def _footprint_geometry(
+    pixels: tuple[tuple[int, int], ...],
+    grid: AnalysisGrid,
+    inverse: Transformer,
+    *,
+    coordinate_scale: float,
+) -> dict[str, Any]:
+    """Merge equal horizontal pixel runs into exact raster rectangles."""
+
+    by_row: dict[int, list[int]] = {}
+    for row, column in pixels:
+        by_row.setdefault(row, []).append(column)
+    row_runs: dict[int, tuple[tuple[int, int], ...]] = {}
+    for row, columns in by_row.items():
+        ordered = sorted(set(columns))
+        runs: list[tuple[int, int]] = []
+        start = previous = ordered[0]
+        for column in ordered[1:]:
+            if column != previous + 1:
+                runs.append((start, previous + 1))
+                start = column
+            previous = column
+        runs.append((start, previous + 1))
+        row_runs[row] = tuple(runs)
+
+    active: dict[tuple[int, int], int] = {}
+    rectangles: list[tuple[int, int, int, int]] = []
+    previous_row: int | None = None
+    for row in sorted(row_runs):
+        current = set(row_runs[row])
+        if previous_row is None or row != previous_row + 1:
+            rectangles.extend(
+                (start_row, previous_row + 1, run[0], run[1])
+                for run, start_row in active.items()
+            )
+            active.clear()
+        for run in tuple(active):
+            if run not in current:
+                rectangles.append((active.pop(run), row, run[0], run[1]))
+        for run in current:
+            active.setdefault(run, row)
+        previous_row = row
+    if previous_row is not None:
+        rectangles.extend(
+            (start_row, previous_row + 1, run[0], run[1])
+            for run, start_row in active.items()
+        )
+
+    polygons: list[list[list[list[float]]]] = []
+    for first_row, last_row, first_column, last_column in rectangles:
+        left = grid.origin_x_m + first_column * grid.x_resolution_m
+        right = grid.origin_x_m + last_column * grid.x_resolution_m
+        top = grid.origin_y_m - first_row * grid.y_resolution_m
+        bottom = grid.origin_y_m - last_row * grid.y_resolution_m
+        ring = []
+        for x_value, y_value in (
+            (left, top), (right, top), (right, bottom),
+            (left, bottom), (left, top),
+        ):
+            longitude, latitude = inverse.transform(
+                x_value * coordinate_scale,
+                y_value * coordinate_scale,
+            )
+            ring.append([float(longitude), float(latitude)])
+        polygons.append([ring])
+    return {"type": "MultiPolygon", "coordinates": polygons}
 
 
 class ThinRadarTracker:
@@ -198,6 +267,7 @@ class ThinRadarTracker:
                 x_m, y_m = x_m / 1_000.0, y_m / 1_000.0
             longitude, latitude = inverse.transform(x_m, y_m)
             hierarchy = state.hierarchy(track.track_id)
+            coordinate_scale = 0.001 if field.provider_id == "knmi_radar" else 1.0
             tracks.append(RadarTrack(
                 track_id=track.track_id,
                 provider_id=field.provider_id,
@@ -206,6 +276,12 @@ class ThinRadarTracker:
                 rain_rate_mm_h=float(hierarchy.maximum_value),
                 velocity_east_kmh=estimate.vx_m_s * 3.6,
                 velocity_north_kmh=estimate.vy_m_s * 3.6,
+                geometry=_footprint_geometry(
+                    hierarchy.footprint_pixels,
+                    state.last_frame.grid,
+                    inverse,
+                    coordinate_scale=coordinate_scale,
+                ),
             ))
         return tuple(tracks)
 

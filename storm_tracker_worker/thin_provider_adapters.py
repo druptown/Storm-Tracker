@@ -37,6 +37,9 @@ OPERA_OBJECT_BASE = "https://s3.waw3-1.cloudferro.com/openradar-24h"
 METAR_ENDPOINT = "https://aviationweather.gov/api/data/metar"
 NETATMO_ENDPOINT = "https://api.netatmo.com/api/getpublicdata"
 NETATMO_TOKEN_ENDPOINT = "https://api.netatmo.com/oauth2/token"
+WUNDERGROUND_CURRENT_ENDPOINT = (
+    "https://api.weather.com/v2/pws/observations/current"
+)
 MAX_OPERA_SPATIAL_CELLS = 64
 DWD_RADOLAN_ENDPOINT = (
     "https://opendata.dwd.de/weather/radar/composite/rv/"
@@ -884,18 +887,25 @@ class MetarAdapter:
         self._endpoint = endpoint
 
     async def fetch(self, request, fetcher, *, now):
+        if request.station_selection_reason:
+            raise ProviderBlocked(request.station_selection_reason)
+        if request.station_selection_applied and not request.selected_station_ids:
+            return ()
         south = min(item.latitude for item in request.targets) - 2.0
         north = max(item.latitude for item in request.targets) + 2.0
         west = min(item.longitude for item in request.targets) - 3.0
         east = max(item.longitude for item in request.targets) + 3.0
+        params = {
+            "format": "json",
+            "hours": "1",
+        }
+        if request.station_selection_applied:
+            params["ids"] = ",".join(sorted(set(request.selected_station_ids)))
+        else:
+            params["bbox"] = f"{south:.3f},{west:.3f},{north:.3f},{east:.3f}"
         payload = await fetcher.get_json(
             self._endpoint,
-            params={
-                # Aviation Weather documents bbox as lat0,lon0,lat1,lon1.
-                "bbox": f"{south:.3f},{west:.3f},{north:.3f},{east:.3f}",
-                "format": "json",
-                "hours": "1",
-            },
+            params=params,
             maximum_bytes=8 * 1024 * 1024,
         )
         if not isinstance(payload, list):
@@ -943,6 +953,36 @@ class MetarAdapter:
                         kind=ObservationKind.PRESSURE,
                         value=pressure,
                         unit="hPa",
+                    ))
+                for key, kind, label in (
+                    ("wspd", ObservationKind.WIND_SPEED, "wind_speed"),
+                    ("wgst", ObservationKind.WIND_SPEED, "wind_gust"),
+                ):
+                    knots = _optional_float(station.get(key))
+                    if knots is not None:
+                        wind_common = dict(common)
+                        wind_common["metadata"] = {
+                            "station_id": station_id,
+                            "measurement": label,
+                        }
+                        observations.append(NormalizedObservation.create(
+                            **wind_common,
+                            kind=kind,
+                            value=knots * 0.514444,
+                            unit="m/s",
+                        ))
+                direction = _optional_float(station.get("wdir"))
+                if direction is not None:
+                    direction_common = dict(common)
+                    direction_common["metadata"] = {
+                        "station_id": station_id,
+                        "measurement": "wind_direction",
+                    }
+                    observations.append(NormalizedObservation.create(
+                        **direction_common,
+                        kind=ObservationKind.WIND_DIRECTION,
+                        value=direction,
+                        unit="°",
                     ))
         return tuple(observations)
 
@@ -1052,11 +1092,15 @@ class NetatmoAdapter:
         self._last_summary_signature: tuple[tuple[str, float], ...] = ()
 
     async def fetch(self, request, fetcher, *, now):
+        if request.station_selection_reason:
+            raise ProviderBlocked(request.station_selection_reason)
         access_token = self._access_token
         if not access_token and self._access_token_provider is not None:
             access_token = await self._access_token_provider()
         if not access_token:
             raise ProviderBlocked("external_access_required")
+        if request.station_selection_applied and not request.selected_station_ids:
+            return ()
         observations: dict[
             tuple[str, str, ObservationKind, str],
             NormalizedObservation,
@@ -1099,6 +1143,9 @@ class NetatmoAdapter:
                 headers={"Authorization": f"Bearer {access_token}"},
                 maximum_bytes=16 * 1024 * 1024,
             )
+            allowed_station_ids = {
+                station_id.casefold() for station_id in request.selected_station_ids
+            }
             for station in payload.get("body", ()) if isinstance(payload, Mapping) else ():
                 place = station.get("place", {}) if isinstance(station, Mapping) else {}
                 location = place.get("location") if isinstance(place, Mapping) else None
@@ -1111,6 +1158,11 @@ class NetatmoAdapter:
                 measures = station.get("measures", {})
                 measurements = _netatmo_measurements(measures)
                 station_id = str(station.get("_id", "unknown"))
+                if (
+                    request.station_selection_applied
+                    and station_id.casefold() not in allowed_station_ids
+                ):
+                    continue
                 for target in group:
                     distance_km = _haversine_km(
                         latitude,
@@ -1157,6 +1209,7 @@ class NetatmoAdapter:
                         self._station_id_for_summary
                         and target.target_id == "home"
                         and not selected_station
+                        and not request.station_selection_applied
                     ):
                         continue
                     for observation in station_observations:
@@ -1197,6 +1250,116 @@ class NetatmoAdapter:
                 self._last_summary_at = float(now)
                 self._last_summary_signature = signature
         return tuple(observations.values())
+
+
+class WundergroundAdapter:
+    """Fetch only catalog-selected PWS observations from the official API."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        endpoint: str = WUNDERGROUND_CURRENT_ENDPOINT,
+    ) -> None:
+        self._api_key = (api_key if api_key is not None else os.getenv(
+            "STV3_WUNDERGROUND_API_KEY", ""
+        )).strip()
+        self._endpoint = endpoint
+
+    async def fetch(self, request, fetcher, *, now):
+        if request.station_selection_reason:
+            raise ProviderBlocked(request.station_selection_reason)
+        station_ids = tuple(sorted(set(request.selected_station_ids)))
+        if not self._api_key:
+            raise ProviderBlocked("blocked_api_key")
+        if request.station_selection_applied and not station_ids:
+            return ()
+        if not request.station_selection_applied:
+            raise ProviderBlocked("station_catalog_required", ready=False)
+
+        observations: list[NormalizedObservation] = []
+        field_map = (
+            ("temp", ObservationKind.TEMPERATURE, "°C", "temperature"),
+            ("windSpeed", ObservationKind.WIND_SPEED, "km/h", "wind_speed"),
+            ("windGust", ObservationKind.WIND_SPEED, "km/h", "wind_gust"),
+            ("pressure", ObservationKind.PRESSURE, "hPa", "pressure"),
+            ("precipRate", ObservationKind.RAIN_RATE, "mm/h", "rain_rate"),
+            ("precipTotal", ObservationKind.RAIN_ACCUMULATION, "mm", "rain_total"),
+        )
+        for station_id in station_ids:
+            payload = await fetcher.get_json(
+                self._endpoint,
+                params={
+                    "stationId": station_id,
+                    "format": "json",
+                    "units": "m",
+                    "numericPrecision": "decimal",
+                    "apiKey": self._api_key,
+                },
+                maximum_bytes=2 * 1024 * 1024,
+            )
+            rows = payload.get("observations", ()) if isinstance(payload, Mapping) else ()
+            if not isinstance(rows, list) or not rows:
+                continue
+            row = rows[0]
+            if not isinstance(row, Mapping):
+                continue
+            latitude = _optional_float(row.get("lat"))
+            longitude = _optional_float(row.get("lon"))
+            metric = row.get("metric")
+            if latitude is None or longitude is None or not isinstance(metric, Mapping):
+                continue
+            observed_at = _parse_timestamp(row.get("epoch"), fallback=now)
+            values = [
+                (kind, _optional_float(metric.get(key)), unit, label)
+                for key, kind, unit, label in field_map
+            ]
+            values.extend((
+                (
+                    ObservationKind.RELATIVE_HUMIDITY,
+                    _optional_float(row.get("humidity")),
+                    "%",
+                    "humidity",
+                ),
+                (
+                    ObservationKind.WIND_DIRECTION,
+                    _optional_float(row.get("winddir")),
+                    "°",
+                    "wind_direction",
+                ),
+            ))
+            actual_station_id = str(row.get("stationID") or station_id)
+            for target in request.targets:
+                if _haversine_km(
+                    latitude, longitude, target.latitude, target.longitude
+                ) > request.ground_radius_km:
+                    continue
+                for kind, value, unit, label in values:
+                    if value is None:
+                        continue
+                    try:
+                        observations.append(NormalizedObservation.create(
+                            provider_id=request.provider_id,
+                            product_id=request.product_id,
+                            target_id=target.target_id,
+                            kind=kind,
+                            value=value,
+                            unit=unit,
+                            observed_at=observed_at,
+                            received_at=now,
+                            latitude=latitude,
+                            longitude=longitude,
+                            quality=ObservationQuality.GOOD,
+                            geometry=_point(longitude, latitude),
+                            metadata={
+                                "station_id": actual_station_id,
+                                "measurement": label,
+                            },
+                            maximum_age_seconds=MAX_GROUND_SOURCE_AGE_SECONDS,
+                        ))
+                    except ThinObservationError:
+                        continue
+        return tuple(observations)
 
 
 class BlitzortungAdapter:
@@ -1766,4 +1929,5 @@ __all__ = [
     "ProviderBlocked",
     "ThinAdapterResult",
     "ThinRadarField",
+    "WundergroundAdapter",
 ]
