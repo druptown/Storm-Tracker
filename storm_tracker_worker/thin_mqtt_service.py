@@ -34,7 +34,7 @@ from .tracking_core.operational_snapshot import encode_control_envelope
 
 
 _LOGGER = logging.getLogger(__name__)
-WORKER_VERSION = "1.18.10"
+WORKER_VERSION = "1.18.11"
 
 
 class ThinMqttService:

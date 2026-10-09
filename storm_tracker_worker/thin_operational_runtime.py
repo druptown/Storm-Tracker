@@ -205,10 +205,6 @@ class ThinOperationalRuntime:
             self._first_received_at = now
             self._last_received_at = now
             self._activated_at = now
-            self._nowcast.update_targets({
-                item.target_id: (item.latitude, item.longitude)
-                for item in candidate.targets if item.available
-            })
             status = "activated"
         return {
             "method": METHOD,
@@ -228,6 +224,13 @@ class ThinOperationalRuntime:
         state = self._state
         if state is None:
             raise RuntimeError("desired_state_unconfigured")
+        # A desired-state message may arrive while provider I/O is pending.
+        # Keep this cycle internally consistent: its fusion, nowcast, map and
+        # snapshot must all describe the same captured target set.
+        self._nowcast.update_targets({
+            item.target_id: (item.latitude, item.longitude)
+            for item in state.targets if item.available
+        })
         now = float(self._clock())
         requests = build_due_requests(state, now=now, last_attempts=self._last_attempts)
         for request in requests:
@@ -253,7 +256,8 @@ class ThinOperationalRuntime:
                         speed = math.hypot(item.velocity_east_kmh, item.velocity_north_kmh)
                         heading = None if speed < 0.5 else math.degrees(math.atan2(item.velocity_east_kmh, item.velocity_north_kmh)) % 360.0
                         tracked_cells.append(StormCell(
-                            cell_id=item.track_id, provider_id=item.provider_id,
+                            cell_id=f"{item.provider_id}:{target.target_id}:{item.track_id}",
+                            provider_id=item.provider_id,
                             observed_at=item.observed_at, latitude=item.latitude,
                             longitude=item.longitude,
                             geometry={"type": "Point", "coordinates": [item.longitude, item.latitude]},
@@ -267,7 +271,7 @@ class ThinOperationalRuntime:
             fusion,
             tracked_cells=tuple({item.cell_id: item for item in tracked_cells}.values()) or None,
         )
-        self._latest_geojson = self._build_geojson(fusion, nowcast)
+        self._latest_geojson = self._build_geojson(fusion, nowcast, state=state)
         if self._postgis is None:
             postgis = PostGISWriteResult(
                 status="disabled",
@@ -279,15 +283,18 @@ class ThinOperationalRuntime:
         else:
             postgis = await self._postgis.write_cycle(fusion, nowcast)
         self._revision += 1
-        snapshot = self._build_snapshot(fusion, nowcast, postgis)
+        snapshot = self._build_snapshot(fusion, nowcast, postgis, state=state)
         return ThinCycleResult(snapshot=snapshot, fusion=fusion, nowcast=nowcast, postgis=postgis)
 
     def _build_geojson(
         self,
         fusion: FusionCycle,
         nowcast: ThinNowcast,
+        *,
+        state: DesiredState | None = None,
     ) -> dict[str, Any]:
-        assert self._state is not None
+        state = self._state if state is None else state
+        assert state is not None
         target_features: list[dict[str, Any]] = []
         cell_feature_groups: list[tuple[float, str, list[dict[str, Any]]]] = []
         lightning_features: list[dict[str, Any]] = []
@@ -459,9 +466,9 @@ class ThinOperationalRuntime:
         fusion: FusionCycle,
         nowcast: ThinNowcast,
         postgis: PostGISWriteResult,
+        *,
+        state: DesiredState,
     ) -> dict[str, Any]:
-        assert self._state is not None
-        state = self._state
         evaluated_at = float(fusion.evaluated_at)
         observations = fusion.observations
         product_valid_at = max((item.observed_at for item in observations), default=None)
@@ -514,9 +521,10 @@ class ThinOperationalRuntime:
         for target in sorted((item for item in state.targets if item.available), key=lambda item: item.target_id):
             result = nowcast.target_results[target.target_id]
             region_id = f"region-{target.target_id}"
-            providers = sorted(
-                {_snapshot_provider_id(item) for item in result.contributors}
-            )
+            provider_ids = {_snapshot_provider_id(item) for item in result.contributors}
+            if result.arrival_provider_id is not None:
+                provider_ids.add(_snapshot_provider_id(result.arrival_provider_id))
+            providers = sorted(provider_ids)
             current_is_rain = result.current_state == "regen"
             current_is_dry = result.current_state == "droog"
             current_freshness = "current" if providers else "unknown"
@@ -527,7 +535,7 @@ class ThinOperationalRuntime:
             )
             if result.forecast_state == "regen_op_komst" and result.eta_minutes is not None:
                 threat_state, threat_freshness = "available", "current"
-                track_id = nowcast.storm_cells[0].cell_id if nowcast.storm_cells else None
+                track_id = result.arrival_cell_id
                 # Confidence currently ranks tracking evidence; it is not an
                 # empirically calibrated probability. Keep the nullable
                 # probability pair empty until calibration data exists.

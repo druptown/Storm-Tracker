@@ -65,6 +65,8 @@ class TargetNowcast:
     confidence: float
     reason_code: str
     contributors: tuple[str, ...]
+    arrival_cell_id: str | None = None
+    arrival_provider_id: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -76,6 +78,8 @@ class TargetNowcast:
             "confidence": self.confidence,
             "reason_code": self.reason_code,
             "contributors": list(self.contributors),
+            "arrival_cell_id": self.arrival_cell_id,
+            "arrival_provider_id": self.arrival_provider_id,
         }
 
 
@@ -302,10 +306,11 @@ class ThinNowcastRuntime:
                 )
             )
             raining = bool((rain_rate is not None and rain_rate > 0.0) or has_echo)
-            eta_minutes = 0.0 if raining else self._eta_minutes(
-                target_latitude,
-                target_longitude,
-                cells,
+            arrival = None if raining else self._arrival(
+                target_latitude, target_longitude, cells,
+            )
+            eta_minutes = 0.0 if raining else (
+                None if arrival is None else arrival[0]
             )
             if raining:
                 current_state = "regen"
@@ -332,6 +337,8 @@ class ThinNowcastRuntime:
                 confidence=(fused.confidence if fused is not None else 0.0),
                 reason_code=reason,
                 contributors=(fused.contributors if fused is not None else ()),
+                arrival_cell_id=None if arrival is None else arrival[1].cell_id,
+                arrival_provider_id=None if arrival is None else arrival[1].provider_id,
             )
 
         self._sequence += 1
@@ -344,12 +351,12 @@ class ThinNowcastRuntime:
         return self._latest
 
     @staticmethod
-    def _eta_minutes(
+    def _arrival(
         target_latitude: float,
         target_longitude: float,
         cells: list[StormCell],
-    ) -> float | None:
-        best: float | None = None
+    ) -> tuple[float, StormCell] | None:
+        best: tuple[float, StormCell] | None = None
         for cell in cells:
             speed_squared = cell.velocity_east_kmh ** 2 + cell.velocity_north_kmh ** 2
             if speed_squared < 0.25:
@@ -368,9 +375,10 @@ class ThinNowcastRuntime:
             miss_north = delta_north - cell.velocity_north_kmh * hours
             if math.hypot(miss_east, miss_north) > THREAT_RADIUS_KM:
                 continue
-            minutes = hours * 60.0
-            best = minutes if best is None else min(best, minutes)
-        return None if best is None else round(best, 1)
+            candidate = (round(hours * 60.0, 1), cell)
+            if best is None or (candidate[0], candidate[1].cell_id) < (best[0], best[1].cell_id):
+                best = candidate
+        return best
 
 
 def _point(longitude: float, latitude: float) -> dict[str, Any]:

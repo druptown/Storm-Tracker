@@ -49,7 +49,11 @@ class ThinRadarTracker:
         self._policy = worker_only_tracking_policy()
         self._states: dict[tuple[str, str], CellTrackEngineState] = {}
 
-    def advance(self, field: ThinRadarField, target: Any) -> CellTrackTransitionResult:
+    def advance(
+        self,
+        field: ThinRadarField,
+        target: Any,
+    ) -> CellTrackTransitionResult | None:
         prepared = build_target_radar_frame(
             field, target, maximum_pixels=self._policy.maximum_frame_pixels
         )
@@ -60,6 +64,11 @@ class ThinRadarTracker:
                 "thin-celltrack:" + _digest({"provider": key[0], "target": key[1]}),
                 self._policy,
             )
+        elif state.last_frame is not None and prepared.frame.valid_at <= state.last_frame.valid_at:
+            # Public radar endpoints return the same native image many times
+            # between products. It is not a failed tracking step: retain the
+            # last confirmed track until a newer meteorological frame arrives.
+            return None
         result = advance_cell_track_engine(state, prepared.frame, self._policy)
         self._states[key] = result.next_state
         return result
