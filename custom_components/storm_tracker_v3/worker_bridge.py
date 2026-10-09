@@ -310,10 +310,10 @@ def _compact_worker_status(status: dict, current: dict, *, now: float) -> dict:
     if rejection_code is not None:
         compact["job_admission_rejection_code"] = rejection_code
     profile = status.get("compute_profile")
-    if profile in {"shared_ha", "dedicated_nas"}:
+    if profile in {"shared_ha", "dedicated_nas", "dedicated_nas_fast"}:
         compact["compute_profile"] = profile
     for source_key, minimum, maximum in (
-        ("cpu_limit_percent", 1, 100),
+        ("cpu_limit_percent", 1, 200),
         ("worker_nice", 0, 19),
         ("cpu_threads", 1, 64),
     ):
@@ -322,6 +322,14 @@ def _compact_worker_status(status: dict, current: dict, *, now: float) -> dict:
         )
         if value is not None:
             compact[source_key] = value
+    provider_cycle_seconds = status.get("provider_cycle_seconds")
+    if (
+        isinstance(provider_cycle_seconds, (int, float))
+        and not isinstance(provider_cycle_seconds, bool)
+        and math.isfinite(float(provider_cycle_seconds))
+        and 2 <= float(provider_cycle_seconds) <= 300
+    ):
+        compact["provider_cycle_seconds"] = float(provider_cycle_seconds)
     for source_key in ("queue_depth", "failed_jobs"):
         value = _bounded_worker_counter(status.get(source_key))
         if value is not None:

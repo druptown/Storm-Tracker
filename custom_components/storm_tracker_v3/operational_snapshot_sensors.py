@@ -257,10 +257,14 @@ def _worker_runtime_attribute_projection(hass: Any) -> dict[str, Any]:
     if isinstance(version, str) and 0 < len(version) <= 96:
         projection["worker_version"] = version
     profile = status.get("compute_profile")
-    if profile in {"shared_ha", "dedicated_nas"}:
+    if profile in {"shared_ha", "dedicated_nas", "dedicated_nas_fast"}:
         projection["compute_profile"] = profile
     cpu_limit = status.get("cpu_limit_percent")
-    if isinstance(cpu_limit, int) and not isinstance(cpu_limit, bool) and 1 <= cpu_limit <= 100:
+    if (
+        isinstance(cpu_limit, int)
+        and not isinstance(cpu_limit, bool)
+        and 1 <= cpu_limit <= 200
+    ):
         projection["cpu_limit_percent"] = cpu_limit
     worker_nice = status.get("worker_nice")
     if isinstance(worker_nice, int) and not isinstance(worker_nice, bool) and 0 <= worker_nice <= 19:
@@ -268,6 +272,14 @@ def _worker_runtime_attribute_projection(hass: Any) -> dict[str, Any]:
     cpu_threads = status.get("cpu_threads")
     if isinstance(cpu_threads, int) and not isinstance(cpu_threads, bool) and 1 <= cpu_threads <= 64:
         projection["cpu_threads"] = cpu_threads
+    provider_cycle_seconds = status.get("provider_cycle_seconds")
+    if (
+        isinstance(provider_cycle_seconds, (int, float))
+        and not isinstance(provider_cycle_seconds, bool)
+        and math.isfinite(float(provider_cycle_seconds))
+        and 2 <= float(provider_cycle_seconds) <= 300
+    ):
+        projection["provider_cycle_seconds"] = float(provider_cycle_seconds)
     for key in (
         "runtime_provider_count",
         "runtime_captured_provider_count",
