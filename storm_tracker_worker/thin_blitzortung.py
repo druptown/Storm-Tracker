@@ -80,10 +80,14 @@ class ThinBlitzortungFeed:
         client: Any,
         adapter: BlitzortungAdapter,
         clock: Callable[[], float] = time.time,
+        archive: Any | None = None,
+        context_factory: Callable[[], Any] | None = None,
     ) -> None:
         self._client = client
         self._adapter = adapter
         self._clock = clock
+        self._archive = archive
+        self._context_factory = context_factory
         self._topics: set[str] = set()
         self._subscribed_topics: set[str] = set()
         self._connected = False
@@ -156,7 +160,24 @@ class ThinBlitzortungFeed:
         self._adapter.set_transport_state(False)
 
     def _on_message(self, client: Any, userdata: Any, message: Any) -> None:
-        self._adapter.feed_message(bytes(message.payload), received_at=float(self._clock()))
+        payload = bytes(message.payload)
+        received_at = float(self._clock())
+        raw_capture_id = None
+        if self._archive is not None and self._context_factory is not None:
+            from .thin_raw_archive import capture_scope, capture_received
+            context = self._context_factory()
+            subscribed = any(message.topic.startswith(topic[:-1])
+                             for topic in self._subscribed_topics if topic.endswith('#'))
+            if context is not None and subscribed:
+                with capture_scope(context,self._archive):
+                    raw_capture_id = capture_received(f"mqtt://{MQTT_HOST}/{message.topic}",payload,
+                                     received_at=received_at,transport="mqtt")
+            else:
+                self._archive.mark_gap("mqtt_region_context_missing")
+        if raw_capture_id is None:
+            self._adapter.feed_message(payload, received_at=received_at)
+        else:
+            self._adapter.feed_message(payload, received_at=received_at, raw_capture_id=raw_capture_id)
 
 
 __all__ = ["ThinBlitzortungFeed", "topics_for_targets"]

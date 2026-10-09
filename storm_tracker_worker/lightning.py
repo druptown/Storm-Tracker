@@ -161,6 +161,9 @@ def _bounded_request(
             raise ValueError("EUMETSAT-response overschrijdt bytecontract")
         if declared is not None and len(value) != int(declared):
             raise ValueError("EUMETSAT-response is onvolledig")
+        from .thin_raw_archive import capture_received
+        capture_received(str(response.geturl()), value, received_at=time.time(),
+                         content_type=response.headers.get('Content-Type'), http_status=getattr(response,'status',None))
         return value
 
 

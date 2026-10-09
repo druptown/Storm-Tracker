@@ -7,7 +7,7 @@ import hashlib
 import json
 import math
 from types import MappingProxyType
-from typing import Iterable, Mapping
+from typing import Any, Iterable, Mapping
 
 import numpy as np
 from pyproj import CRS, Transformer
@@ -101,6 +101,7 @@ class FusedRegionalRadarField:
     confidence: np.ndarray
     contributor_mask: np.ndarray
     summary: RegionalFusionSummary
+    archive_inputs: tuple[tuple[Any, tuple[str, ...]], ...] = ()
 
 
 def _empty_fusion(

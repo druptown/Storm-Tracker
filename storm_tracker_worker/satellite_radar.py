@@ -218,6 +218,9 @@ def _bounded_url(url: str, maximum: int) -> bytes:
             raise ValueError("satellietresponse overschrijdt bytecontract")
         if declared is not None and len(value) != int(declared):
             raise ValueError("satellietresponse is onvolledig")
+        from .thin_raw_archive import capture_received
+        capture_received(str(response.geturl()), value, received_at=time.time(),
+                         content_type=response.headers.get('Content-Type'), http_status=getattr(response,'status',None))
         return value
 
 
@@ -460,9 +463,19 @@ def hsaf_h40b_fetch(job) -> dict:
 
             ftp.retrbinary(f"RETR {remote_name}", receive, blocksize=64 * 1024)
             downloaded = len(payload)
-            result = _hsaf_parse(bytes(payload), areas, timestamp)
+            native_payload = bytes(payload)
+            from .thin_raw_archive import capture_received, current_capture_references
+            capture_received(f"ftp://{HSAF_HOST}/{remote_name.lstrip('/')}",
+                             native_payload, received_at=time.time(), transport="ftp")
+            result = _hsaf_parse(native_payload, areas, timestamp)
+            references = current_capture_references()
+            if references:
+                result = {**result, "_thin_raw_capture_ids": references}
             _HSAF_CACHE.clear()
             _HSAF_CACHE[cache_key] = result
+        else:
+            from .thin_raw_archive import reference_captures
+            reference_captures(result.get("_thin_raw_capture_ids", ()))
         _validate_product_time(
             float(result["frame_timestamp"]), HSAF_MAX_AGE, "H40B-cache"
         )
@@ -702,7 +715,14 @@ def goes_rrqpe_fetch(job) -> dict:
             )
             downloaded += len(payload)
             result = _goes_parse(payload, satellite, satellite_areas)
+            from .thin_raw_archive import current_capture_references
+            references = current_capture_references()
+            if references:
+                result = {**result, "_thin_raw_capture_ids": references}
             _GOES_CACHE[cache_key] = result
+        else:
+            from .thin_raw_archive import reference_captures
+            reference_captures(result.get("_thin_raw_capture_ids", ()))
         _validate_product_time(
             float(result["frame_timestamp"]),
             GOES_MAX_AGE,

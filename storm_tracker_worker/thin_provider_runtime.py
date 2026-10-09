@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from uuid import uuid4
 import time
 from typing import Any, Callable, Mapping
 
@@ -16,6 +17,7 @@ from .thin_provider_adapters import (
     ThinVisualRadarField,
 )
 from .thin_provider_catalog import ThinProviderRequest
+from .thin_raw_archive import RawCaptureContext, capture_scope, current_capture_references
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +31,8 @@ class ProviderResult:
     completed_at: float
     radar_fields: tuple[ThinRadarField, ...] = ()
     visual_radar_fields: tuple[ThinVisualRadarField, ...] = ()
+    raw_capture_ids: tuple[str, ...] = ()
+    archive_reason_codes: tuple[str, ...] = ()
 
 
 class ThinProviderRuntime:
@@ -43,6 +47,8 @@ class ThinProviderRuntime:
         retry_delay_seconds: float = 0.25,
         clock: Callable[[], float] = time.time,
         request_preparer: Any | None = None,
+        archive: Any | None = None,
+        code_revision: str = 'unregistered',
     ) -> None:
         if max_parallel < 1:
             raise ValueError("max_parallel must be positive")
@@ -56,6 +62,8 @@ class ThinProviderRuntime:
         self._retry_delay_seconds = float(retry_delay_seconds)
         self._clock = clock
         self._request_preparer = request_preparer
+        self.archive = archive
+        self.code_revision = code_revision
         self._locks = {provider_id: asyncio.Lock() for provider_id in self._adapters}
         self._failure_counts: dict[str, int] = {}
         self._backoff_until: dict[str, float] = {}
@@ -66,6 +74,29 @@ class ThinProviderRuntime:
         return frozenset(self._adapters)
 
     async def _one(self, request: ThinProviderRequest) -> ProviderResult:
+        if self.archive is None:
+            return await self._one_impl(request)
+        context = RawCaptureContext(str(uuid4()), request.provider_id, request.product_id,
+            request.requested_at, 0, tuple(r.region_revision_id for r in request.regions),
+            tuple((t.target_id,t.latitude,t.longitude,t.position_observed_at) for t in request.targets),
+            self.code_revision)
+        with capture_scope(context,self.archive):
+            result = await self._one_impl(request,context)
+            references = current_capture_references()
+        receipts = tuple(r.capture_id for r in self.archive.pending()
+                         if r.context.request_id == context.request_id)
+        if result.status == 'error' and not receipts and not references:
+            self.archive.mark_gap('provider_input_not_received',context)
+        return replace(result,raw_capture_ids=tuple(sorted(set(receipts) | set(references))),
+                       archive_reason_codes=self.archive.status()['reason_codes'])
+
+    async def _fetch_scoped(self, adapter, request, context, attempt):
+        if context is None:
+            return await adapter.fetch(request,self._fetcher,now=float(self._clock()))
+        with capture_scope(replace(context,attempt=attempt),self.archive):
+            return await adapter.fetch(request,self._fetcher,now=float(self._clock()))
+
+    async def _one_impl(self, request: ThinProviderRequest, context=None) -> ProviderResult:
         attempted_at = float(self._clock())
         adapter = self._adapters.get(request.provider_id)
         if adapter is None:
@@ -94,11 +125,7 @@ class ThinProviderRuntime:
             for attempt in range(self._retries + 1):
                 try:
                     adapter_result = await asyncio.wait_for(
-                        adapter.fetch(
-                            request,
-                            self._fetcher,
-                            now=float(self._clock()),
-                        ),
+                        self._fetch_scoped(adapter,request,context,attempt),
                         timeout=self._timeout_seconds,
                     )
                     if isinstance(adapter_result, ThinAdapterResult):

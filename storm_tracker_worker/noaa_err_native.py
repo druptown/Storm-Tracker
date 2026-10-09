@@ -404,12 +404,16 @@ def _fetch_s3(
             declared_bytes=declared,
             maximum_bytes=maximum_bytes,
         )
+        received_at = time.time()
+        from .thin_raw_archive import capture_received
+        capture_received(validated_url, payload, received_at=received_at,
+                         content_type=content_type,http_status=200)
         return S3HttpResponse(
             payload=payload,
             content_type=content_type,
             content_length=len(payload),
             declared_content_length=declared,
-            received_at=time.time(),
+            received_at=received_at,
             etag=etag.lower() if etag is not None else None,
             last_modified=last_modified,
             last_modified_timestamp=last_modified_timestamp,
