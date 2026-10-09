@@ -63,6 +63,16 @@ def _candidate_process_sha(
             "entry_seconds": candidate.entry_seconds,
             "exit_seconds": candidate.exit_seconds,
             "method": candidate.method,
+            "motion_agreement_angle_deg": (
+                candidate.motion_agreement_angle_deg
+            ),
+            "motion_confidence": candidate.motion_confidence,
+            "motion_method": candidate.motion_method,
+            "motion_reason_codes": candidate.motion_reason_codes,
+            "motion_status": candidate.motion_status,
+            "motion_supporting_methods": (
+                candidate.motion_supporting_methods
+            ),
             "reference_valid_at": candidate.reference_valid_at,
             "source_candidate_content_sha256": (
                 candidate.source_candidate_content_sha256
@@ -139,6 +149,14 @@ def build_radar_motion_nowcast_revision(
             raise WorkerOnlyMotionSnapshotError(
                 "motion_arrival_shadow_contract_changed"
             )
+        if (
+            candidate.motion_status
+            not in {"ready_high", "ready_medium", "fallback", "stationary"}
+            or candidate.motion_confidence not in {"high", "medium"}
+        ):
+            raise WorkerOnlyMotionSnapshotError(
+                "motion_arrival_consensus_not_admitted"
+            )
         if candidate.low_confidence_fragment:
             continue
         if candidate.target_id not in available_targets:
@@ -186,7 +204,12 @@ def build_radar_motion_nowcast_revision(
             "passage_status": "possible",
             "product_valid_at": candidate.reference_valid_at,
             "provider_ids": [candidate.workload_id],
-            "reason_codes": [MOTION_THREAT_REASON],
+            "reason_codes": sorted(set((
+                MOTION_THREAT_REASON,
+                f"motion_status_{candidate.motion_status}",
+                f"motion_method_{candidate.motion_method}",
+                *candidate.motion_reason_codes,
+            ))),
         })
         if target["current_precipitation"]["state"] != "raining":
             target["status_text"] = (
@@ -209,7 +232,12 @@ def build_radar_motion_nowcast_revision(
             decided_at=evaluated,
             valid_until=float(snapshot["valid_until"]),
             disposition=AdmissionDisposition.ADMITTED,
-            reason_codes=(MOTION_THREAT_REASON,),
+            reason_codes=tuple(sorted(set((
+                MOTION_THREAT_REASON,
+                f"motion_status_{candidate.motion_status}",
+                f"motion_method_{candidate.motion_method}",
+                *candidate.motion_reason_codes,
+            )))),
         ))
 
     committed = CommittedOperationalFactRevision.create(

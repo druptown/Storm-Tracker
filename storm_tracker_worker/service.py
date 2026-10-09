@@ -3321,7 +3321,6 @@ class WorkerService:
         if self._worker_first_runtime_mode == WORKER_ONLY_MODE:
             expected_fields = {
                 "captured_provider_count",
-                "acquisition_terminal_results",
                 "contract",
                 "counts",
                 "cycle_status_counts",
@@ -3456,9 +3455,6 @@ class WorkerService:
             raw_calibration = diagnostics.get("raw_calibration")
             postgis_projection = diagnostics.get("postgis_projection")
             parallel_acquisition = diagnostics.get("parallel_acquisition")
-            acquisition_terminal_results = diagnostics.get(
-                "acquisition_terminal_results"
-            )
             snapshot_diagnostic_counts = tuple(
                 diagnostics.get(key)
                 for key in (
@@ -3566,30 +3562,6 @@ class WorkerService:
                 and diagnostics.get("last_error_code") is None
                 and diagnostics.get("provider_count")
                 == WORKER_ONLY_PROVIDER_COUNT
-                and type(acquisition_terminal_results) is list
-                and len(acquisition_terminal_results)
-                <= WORKER_ONLY_PROVIDER_COUNT
-                and len({
-                    item.get("workload_id")
-                    for item in acquisition_terminal_results
-                    if isinstance(item, Mapping)
-                }) == len(acquisition_terminal_results)
-                and all(
-                    isinstance(item, Mapping)
-                    and set(item)
-                    == {"reason_code", "status", "workload_id"}
-                    and isinstance(item.get("workload_id"), str)
-                    and re.fullmatch(
-                        r"[a-z][a-z0-9_.]{0,95}", item["workload_id"]
-                    ) is not None
-                    and item.get("status")
-                    in {"blocked", "completed_shadow_raw"}
-                    and isinstance(item.get("reason_code"), str)
-                    and re.fullmatch(
-                        r"[a-z][a-z0-9_]{0,95}", item["reason_code"]
-                    ) is not None
-                    for item in acquisition_terminal_results
-                )
                 and isinstance(parallel_acquisition, Mapping)
                 and set(parallel_acquisition)
                 == {
