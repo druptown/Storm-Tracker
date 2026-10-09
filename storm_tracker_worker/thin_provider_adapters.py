@@ -61,6 +61,10 @@ KMI_APPV4_ALLOWED_IMAGE_HOSTS = frozenset({"app.meteo.be", "cdn.meteo.be"})
 KMI_APPV4_BOUNDS = (-2.5, 46.5, 10.5, 53.0)
 _KMI_APPV4_REQUEST_SECRET = "r9EnW374jkJ9acc"
 MAX_OPERA_SPATIAL_CELLS = 64
+OPERA_MAX_FRAME_AGE_SECONDS = 15 * 60
+OPERA_KEY_RE = re.compile(
+    r"^\d{4}/\d{2}/\d{2}/OPERA/COMP/OPERA@(?P<stamp>\d{8}T\d{4})@0@DBZH\.h5$"
+)
 DWD_RADOLAN_ENDPOINT = (
     "https://opendata.dwd.de/weather/radar/composite/rv/"
     "composite_rv_LATEST.tar"
@@ -192,6 +196,14 @@ class ProviderBlocked(RuntimeError):
         super().__init__(reason_code)
         self.reason_code = reason_code
         self.ready = bool(ready)
+
+
+class ProviderStale(RuntimeError):
+    """The provider transport works, but its newest product is too old."""
+
+    def __init__(self, reason_code: str = "product_stale") -> None:
+        super().__init__(reason_code)
+        self.reason_code = str(reason_code)
 
 
 class BlockedProviderAdapter:
@@ -1605,16 +1617,28 @@ class OperaRadarAdapter:
             maximum_bytes=4 * 1024 * 1024,
         )
         root = ET.fromstring(listing)
-        keys = [
-            str(node.text)
+        candidates = [
+            (match.group("stamp"), str(node.text))
             for node in root.iter()
             if node.tag.rsplit("}", 1)[-1] == "Key"
             and node.text
-            and node.text.endswith("@0@DBZH.h5")
+            and (match := OPERA_KEY_RE.fullmatch(str(node.text))) is not None
         ]
-        if not keys:
+        historical = [
+            (stamp, key)
+            for stamp, key in candidates
+            if datetime.strptime(stamp, "%Y%m%dT%H%M").replace(
+                tzinfo=timezone.utc,
+            ).timestamp() <= now + 30.0
+        ]
+        if not historical:
             raise ValueError("opera_product_missing")
-        key = max(keys)
+        stamp, key = max(historical)
+        observed_at = datetime.strptime(stamp, "%Y%m%dT%H%M").replace(
+            tzinfo=timezone.utc,
+        ).timestamp()
+        if now - observed_at > OPERA_MAX_FRAME_AGE_SECONDS:
+            raise ProviderStale("product_stale")
         data = await fetcher.get_bytes(
             f"{self._object_base_url}/{key}",
             maximum_bytes=384 * 1024 * 1024,
@@ -3637,6 +3661,7 @@ __all__ = [
     "OpenMeteoAdapter",
     "OperaRadarAdapter",
     "ProviderBlocked",
+    "ProviderStale",
     "RainViewerRadarAdapter",
     "ThinAdapterResult",
     "ThinRadarField",

@@ -704,6 +704,8 @@ class ThinOperationalRuntime:
                     provider_state, freshness = "operational", "unknown"
                 elif result.status == "blocked" and result.reason_code == "external_access_required":
                     provider_state, freshness = "api_required", "unknown"
+                elif result.status == "stale":
+                    provider_state, freshness = "stale", "stale"
                 elif result.status in {"error", "backoff"}:
                     provider_state, freshness = "degraded", "unknown"
                 else:

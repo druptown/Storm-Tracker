@@ -8,7 +8,12 @@ import time
 from typing import Any, Callable, Mapping
 
 from .thin_observation import NormalizedObservation
-from .thin_provider_adapters import ProviderBlocked, ThinAdapterResult, ThinRadarField
+from .thin_provider_adapters import (
+    ProviderBlocked,
+    ProviderStale,
+    ThinAdapterResult,
+    ThinRadarField,
+)
 from .thin_provider_catalog import ThinProviderRequest
 
 
@@ -119,6 +124,18 @@ class ThinProviderRuntime:
                         provider_id=request.provider_id,
                         ready=error.ready,
                         status="blocked",
+                        reason_code=error.reason_code,
+                        observations=(),
+                        attempted_at=attempted_at,
+                        completed_at=float(self._clock()),
+                    )
+                except ProviderStale as error:
+                    self._failure_counts.pop(request.provider_id, None)
+                    self._backoff_until.pop(request.provider_id, None)
+                    return ProviderResult(
+                        provider_id=request.provider_id,
+                        ready=True,
+                        status="stale",
                         reason_code=error.reason_code,
                         observations=(),
                         attempted_at=attempted_at,
