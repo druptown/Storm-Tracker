@@ -940,6 +940,11 @@ class RawCaptureServiceRuntime:
 
         return self._acquisition.retained_successful_captures()
 
+    def latest_terminal_results(self):
+        """Expose bounded provider outcomes without targets or credentials."""
+
+        return self._acquisition.latest_terminal_results()
+
     def _increment(self, key: str) -> None:
         self._counts[key] = min(MAX_COUNTER, self._counts[key] + 1)
 

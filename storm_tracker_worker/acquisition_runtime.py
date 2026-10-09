@@ -445,6 +445,9 @@ class AcquisitionShadowRuntime:
         self._last_tick = ShadowTickResult(
             "idle", "not_started", None, None, None, None, False
         )
+        self._latest_terminal_observations: dict[
+            str, tuple[tuple[float, str, str], dict[str, str]]
+        ] = {}
         self._raw_store = self._validate_storage_envelope()
         self._capture_reconciler = CaptureCapacityReconciler(
             raw_store=self._raw_store,
@@ -467,6 +470,50 @@ class AcquisitionShadowRuntime:
             raise AcquisitionRuntimeError(
                 "existing raw capture accounting failed closed"
             ) from err
+        self._recover_terminal_observations()
+
+    @staticmethod
+    def _terminal_status(receipt: ExecutionReceipt) -> str:
+        return (
+            "completed_shadow_raw"
+            if receipt.outcome == "completed_shadow_raw"
+            else "blocked"
+        )
+
+    def _remember_terminal_observation(
+        self,
+        workload_id: str,
+        receipt: ExecutionReceipt,
+    ) -> None:
+        if workload_id not in self._selection.workload_ids or not receipt.terminal:
+            return
+        order = (
+            receipt.created_at,
+            receipt.acquisition_job_id,
+            receipt.receipt_sha256,
+        )
+        previous = self._latest_terminal_observations.get(workload_id)
+        if previous is not None and previous[0] >= order:
+            return
+        self._latest_terminal_observations[workload_id] = (
+            order,
+            {
+                "reason_code": receipt.reason_code,
+                "status": self._terminal_status(receipt),
+            },
+        )
+
+    def _recover_terminal_observations(self) -> None:
+        """Rebuild one safe terminal result per workload after restart."""
+
+        terminals = self._execution_store.terminal_receipts()
+        workloads_by_job = self._scheduler.workload_ids_for_jobs(tuple(
+            receipt.scheduler_job_id for receipt in terminals
+        ))
+        for receipt in terminals:
+            workload_id = workloads_by_job.get(receipt.scheduler_job_id)
+            if workload_id is not None:
+                self._remember_terminal_observation(workload_id, receipt)
 
     def _validate_storage_envelope(self) -> RawArtifactStore:
         profile = self._capacity_ledger.profile
@@ -636,7 +683,7 @@ class AcquisitionShadowRuntime:
         if _SAFE_REASON.fullmatch(reason_code) is None:
             reason_code = "unclassified_runtime_failure"
         evidence = evidence or {}
-        return self._execution_store.record(
+        receipt = self._execution_store.record(
             scheduler_job_id=claimed.job_id,
             acquisition_job_id=bound.acquisition_job.job_id,
             binding_sha256=bound.binding_receipt.binding_sha256,
@@ -649,6 +696,12 @@ class AcquisitionShadowRuntime:
             capture_sha256=evidence.get("capture_sha256"),
             capacity_commit_sha256=evidence.get("capacity_commit_sha256"),
         )
+        if terminal:
+            self._remember_terminal_observation(
+                bound.acquisition_job.workload_id,
+                receipt,
+            )
+        return receipt
 
     def _complete(
         self,
@@ -1675,15 +1728,8 @@ class AcquisitionShadowRuntime:
             requirements_ready = available == total
             if not requirements_ready:
                 unavailable_workload_ids.append(workload_id)
-            last_terminal = None
-            if (
-                self._last_tick.terminal
-                and self._last_tick.workload_id == workload_id
-            ):
-                last_terminal = {
-                    "reason_code": self._last_tick.reason_code,
-                    "status": self._last_tick.status,
-                }
+            observation = self._latest_terminal_observations.get(workload_id)
+            last_terminal = None if observation is None else dict(observation[1])
             configured_workloads.append({
                 "handler_configured": bool(
                     rule.executable
@@ -1755,6 +1801,22 @@ class AcquisitionShadowRuntime:
         if len(_canonical(result)) > MAX_DIAGNOSTIC_BYTES:
             raise AcquisitionRuntimeError("runtime diagnostics exceed bound")
         return result
+
+    def latest_terminal_results(
+        self,
+    ) -> tuple[tuple[str, str, str], ...]:
+        """Return one bounded, secret-free terminal result per workload."""
+
+        return tuple(
+            (
+                workload_id,
+                observation[1]["status"],
+                observation[1]["reason_code"],
+            )
+            for workload_id, observation in sorted(
+                self._latest_terminal_observations.items()
+            )
+        )
 
     def request_stop(self) -> None:
         """Close acquisition admission and cancel an active isolated child."""

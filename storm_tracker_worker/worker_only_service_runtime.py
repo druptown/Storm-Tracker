@@ -921,6 +921,28 @@ class WorkerOnlyServiceRuntime:
             seen.add(workload_id)
             self._increment("restored_captures")
 
+        terminal_reader = getattr(self._raw, "latest_terminal_results", None)
+        if not callable(terminal_reader):
+            return
+        terminal_results = terminal_reader()
+        if not isinstance(terminal_results, tuple):
+            raise WorkerOnlyServiceRuntimeError(
+                "worker_only_terminal_result_inventory_invalid"
+            )
+        for item in terminal_results:
+            if (
+                not isinstance(item, tuple)
+                or len(item) != 3
+                or not all(isinstance(value, str) for value in item)
+            ):
+                raise WorkerOnlyServiceRuntimeError(
+                    "worker_only_terminal_result_inventory_invalid"
+                )
+            workload_id, status, reason_code = item
+            if workload_id in seen or status in SUCCESS_STATUSES:
+                continue
+            self._source_errors[workload_id] = reason_code
+
     async def _process_ground_capture(
         self,
         *,

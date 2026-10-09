@@ -3984,18 +3984,21 @@ class WorkerService:
                 provider_ready = provider_ready and (
                     observed_unavailable == unavailable_ids
                 )
-                expected_terminal = []
+                expected_terminal = None
                 if last_tick.get("terminal"):
-                    expected_terminal = [(
+                    expected_terminal = (
                         workload_id,
                         {
                             "reason_code": tick_reason,
                             "status": tick_status,
                         },
-                    )]
+                    )
                 provider_ready = (
                     provider_ready
-                    and observed_terminal == expected_terminal
+                    and (
+                        expected_terminal is None
+                        or expected_terminal in observed_terminal
+                    )
                 )
             operation_ready = (
                 counts["start_calls"] >= 1
