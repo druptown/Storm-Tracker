@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from typing import Callable
 
 from .acquisition_activation import ACTIVATION_RULES
 from .analysis_grid_transform import AnalysisGridTransformConfig
@@ -280,11 +281,46 @@ def _previous_awn_payload(config: RawCaptureServiceConfig) -> bytes:
     return _canonical(mapping)
 
 
+def _catalog_membership_only_predecessor(
+    existing: bytes,
+    current: RawCaptureServiceConfig,
+) -> bool:
+    try:
+        previous = json.loads(existing.decode("ascii"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(previous, dict) or _canonical(previous) != existing:
+        return False
+    current_mapping = current.to_mapping()
+    previous_acquisition = previous.get("acquisition")
+    current_acquisition = current_mapping.get("acquisition")
+    if not isinstance(previous_acquisition, dict) or not isinstance(
+        current_acquisition, dict
+    ):
+        return False
+    previous_capacity = previous_acquisition.get("capacity_profile")
+    current_capacity = current_acquisition.get("capacity_profile")
+    if not isinstance(previous_capacity, dict) or not isinstance(
+        current_capacity, dict
+    ):
+        return False
+    if not isinstance(previous_acquisition.get("allowed_workload_ids"), list):
+        return False
+    if not isinstance(previous_capacity.get("providers"), list):
+        return False
+    previous_acquisition["allowed_workload_ids"] = current_acquisition[
+        "allowed_workload_ids"
+    ]
+    previous_capacity["providers"] = current_capacity["providers"]
+    return _canonical(previous) == _canonical(current_mapping)
+
+
 def _publish_identical(
     path: Path,
     payload: bytes,
     *,
     accepted_previous: tuple[bytes, ...] = (),
+    accepted_previous_check: Callable[[bytes], bool] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -293,7 +329,10 @@ def _publish_identical(
         existing = path.read_bytes()
         if existing == payload:
             return
-        if existing not in accepted_previous:
+        if existing not in accepted_previous and not (
+            accepted_previous_check is not None
+            and accepted_previous_check(existing)
+        ):
             raise WorkerOnlyBootstrapError("existing bootstrap config differs")
         temporary: Path | None = None
         try:
@@ -363,6 +402,9 @@ def materialize_worker_only_runtime(root: str | Path = DEFAULT_ROOT) -> dict[str
             original_legacy_payload,
             failed_intermediate_payload,
             previous_awn_payload,
+        ),
+        accepted_previous_check=lambda existing: (
+            _catalog_membership_only_predecessor(existing, config)
         ),
     )
     return {
