@@ -11,6 +11,7 @@ import re
 import time
 import uuid
 from datetime import timedelta
+from typing import Any, Mapping
 
 from homeassistant.components import mqtt
 from homeassistant.core import HomeAssistant, callback
@@ -67,6 +68,10 @@ _WORKER_STALE_HANDLE = "_worker_stale_handle"
 _PENDING_OPERATIONAL_SNAPSHOT_PAYLOAD = (
     "_operational_snapshot_pending_authority_payload"
 )
+_PRESERVE_LIVENESS_SNAPSHOT = (
+    "_operational_snapshot_preserve_liveness_transition"
+)
+_AWAITING_METEOROLOGICAL_EVIDENCE = "awaiting_meteorological_evidence"
 
 
 def _on_hass_event_loop(hass: HomeAssistant) -> bool:
@@ -159,6 +164,68 @@ def _clear_pending_operational_snapshot(data: dict) -> None:
     """Forget the single bounded snapshot awaiting confirmed authority."""
 
     data.pop(_PENDING_OPERATIONAL_SNAPSHOT_PAYLOAD, None)
+
+
+def _is_liveness_handoff_fallback(
+    snapshot: Mapping[str, Any],
+    *,
+    expected_desired_state_sha256: str,
+) -> bool:
+    """Recognize only the exact no-evidence authority fallback.
+
+    During a liveness-only transition the previous meteorological projection
+    remains valid until its existing deadline.  The worker may nevertheless
+    publish this bounded fallback before its richer retained projection is
+    rebound.  Do not let that temporary control-plane fact erase newer useful
+    weather evidence in Home Assistant.
+    """
+
+    if (
+        snapshot.get("desired_state_sha256")
+        != expected_desired_state_sha256
+        or snapshot.get("product_valid_at") is not None
+        or snapshot.get("received_at") is not None
+        or snapshot.get("provenance_complete") is not False
+        or snapshot.get("provenance_source_ids") != []
+        or snapshot.get("provenance_reason_codes")
+        != [_AWAITING_METEOROLOGICAL_EVIDENCE]
+    ):
+        return False
+    providers = snapshot.get("providers")
+    targets = snapshot.get("targets")
+    provider_items = (
+        providers.get("items") if isinstance(providers, Mapping) else None
+    )
+    target_items = targets.get("items") if isinstance(targets, Mapping) else None
+    if not isinstance(provider_items, list) or not provider_items:
+        return False
+    if not isinstance(target_items, list) or not target_items:
+        return False
+    if not all(
+        isinstance(item, Mapping)
+        and item.get("state") == "unknown"
+        and item.get("freshness") == "unknown"
+        and item.get("product_valid_at") is None
+        and item.get("received_at") is None
+        and item.get("reason_codes")
+        == [_AWAITING_METEOROLOGICAL_EVIDENCE]
+        for item in provider_items
+    ):
+        return False
+    return all(
+        isinstance(item, Mapping)
+        and isinstance(item.get("current_precipitation"), Mapping)
+        and isinstance(item.get("next_threat"), Mapping)
+        and item["current_precipitation"].get("state") == "unknown"
+        and item["current_precipitation"].get("freshness") == "unknown"
+        and item["current_precipitation"].get("reason_codes")
+        == [_AWAITING_METEOROLOGICAL_EVIDENCE]
+        and item["next_threat"].get("state") == "unknown"
+        and item["next_threat"].get("freshness") == "unknown"
+        and item["next_threat"].get("reason_codes")
+        == [_AWAITING_METEOROLOGICAL_EVIDENCE]
+        for item in target_items
+    )
 
 
 def _bounded_worker_counter(value) -> int | None:
@@ -637,6 +704,30 @@ def _apply_operational_snapshot_payload(
             raise OperationalSnapshotError(
                 "desired-state-authoriteit is nog niet bevestigd"
             )
+        if (
+            authority_required
+            and isinstance(expected_authority, str)
+            and data.get(_PRESERVE_LIVENESS_SNAPSHOT) is True
+        ):
+            candidate = decode_control_envelope(payload)["snapshot"]
+            if _is_liveness_handoff_fallback(
+                candidate,
+                expected_desired_state_sha256=expected_authority,
+            ):
+                diagnostics.update({
+                    "state": cache.availability,
+                    "last_action": "liveness_fallback_withheld",
+                    "revision": cache.revision,
+                    "snapshot_sha256": cache.snapshot_sha256,
+                    "desired_state_sha256": cache.get_status()[
+                        "desired_state_sha256"
+                    ],
+                    "availability": cache.availability,
+                    "valid_until": cache.valid_until,
+                    "last_error_type": None,
+                    "last_error": None,
+                })
+                return None
         result = cache.apply_bytes(
             payload,
             expected_desired_state_sha256=(
@@ -660,6 +751,8 @@ def _apply_operational_snapshot_payload(
         })
         _increment_diagnostic(diagnostics, "rejected_count")
         return None
+
+    data.pop(_PRESERVE_LIVENESS_SNAPSHOT, None)
 
     diagnostics.update({
         "state": cache.availability,
@@ -888,6 +981,10 @@ def mark_operational_snapshot_authority_changed(
         return False
     if type(preserve_current_snapshot) is not bool:
         raise TypeError("preserve_current_snapshot moet bool zijn")
+    if preserve_current_snapshot:
+        data[_PRESERVE_LIVENESS_SNAPSHOT] = True
+    else:
+        data.pop(_PRESERVE_LIVENESS_SNAPSHOT, None)
     if not preserve_current_snapshot:
         _cancel_timer(data, _SNAPSHOT_EXPIRY_HANDLE)
     previous_authority = data.get(
