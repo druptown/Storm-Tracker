@@ -2,7 +2,7 @@
   "kind": "recovered_archive_source",
   "component": "worker",
   "version": "1.18.53",
-  "source_id": "2f4735d95b6226db5653fdd465f1d88309be62b79f7cb9a51aa0e95e2d38d02f",
+  "source_id": "3bd3400d1229f29841dd6922f9587ca9d63b9f98e0d50dd4698e49e97522ef82",
   "recovered_on": "2026-10-09",
   "files": [
     {
@@ -1106,8 +1106,8 @@
     {
       "path": "thin_postgis_station_migration.py",
       "mode": 420,
-      "sha256": "b5912ef43bfb5bcea491a2097db2ed566c3b58aff5fa8c6a6b26227ed63448fb",
-      "size": 12348
+      "sha256": "93f513404bba22e7e059948e09c2a155308f31ff7f2454cc7e74b1c67dda91cd",
+      "size": 13520
     },
     {
       "path": "thin_provider_adapters.py",
@@ -1605,8 +1605,8 @@
   "artifacts": [
     {
       "filename": "storm_tracker_worker_v1.18.53_deploy.tar.gz",
-      "archive_sha256": "87c586fa8190d7fd35937cce0392df4b52824cd27e0b95bfc5a1969637475ed2",
-      "bytes": 2384817,
+      "archive_sha256": "fd1c0621207e3860cefa2257c04e726c15f0d2d135206b8d59418e80cc124254",
+      "bytes": 2384947,
       "evidence_checks": [
         {
           "manifest": "storm_tracker_release_v1.14.142_worker_v1.18.53_evidence.json",

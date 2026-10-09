@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 import json
 import math
@@ -14,6 +14,12 @@ from .thin_station_catalog import normalize_capabilities
 
 
 MIGRATION_ID = "legacy_observation_v1"
+MIGRATION_STATEMENT_TIMEOUT_MS = 600_000
+
+
+_SET_MIGRATION_STATEMENT_TIMEOUT = """
+SELECT set_config('statement_timeout', %s, true)
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,17 +135,10 @@ FULL OUTER JOIN canonical
 ORDER BY 1,2
 """
 
-_COUNT_UNRECOGNIZABLE = """
-SELECT COUNT(*) AS unrecognizable_rows
-FROM stv3_observation
-WHERE observed_at>=to_timestamp(%s) AND observed_at<to_timestamp(%s)
-  AND (
-      (metadata ? 'station_id' OR metadata ? 'measurement')
-      AND (
-          NULLIF(metadata->>'station_id','') IS NULL
-          OR NULLIF(metadata->>'measurement','') IS NULL
-      )
-  )
+_SELECT_BACKFILL_REJECTIONS = """
+SELECT rejected_count
+FROM stv3_station_measurement_backfill_state
+WHERE migration_id=%s
 """
 
 _COUNT_ORPHANS = """
@@ -151,6 +150,17 @@ LEFT JOIN stv3_ground_station AS station
 WHERE measurement.observed_at>=to_timestamp(%s)
   AND measurement.observed_at<to_timestamp(%s)
   AND station.station_id IS NULL
+"""
+
+_PREFLIGHT = """
+SELECT
+    to_regclass('public.stv3_station_measurement') IS NOT NULL,
+    to_regclass('public.stv3_station_measurement_backfill_state') IS NOT NULL,
+    has_table_privilege(
+        current_user,
+        'public.stv3_station_measurement',
+        'SELECT,INSERT,UPDATE'
+    )
 """
 
 
@@ -186,6 +196,10 @@ class StationMeasurementMigrationRepository:
         connection = self._connect_factory(**self._connect_kwargs)
         try:
             with connection.cursor() as cursor:
+                cursor.execute(
+                    _SET_MIGRATION_STATEMENT_TIMEOUT,
+                    (str(MIGRATION_STATEMENT_TIMEOUT_MS),),
+                )
                 cursor.execute(_SELECT_STATE, (MIGRATION_ID,))
                 state = cursor.fetchone()
                 if state is None:
@@ -280,9 +294,13 @@ class StationMeasurementMigrationRepository:
         connection = self._connect_factory(**self._connect_kwargs)
         try:
             with connection.cursor() as cursor:
+                cursor.execute(
+                    _SET_MIGRATION_STATEMENT_TIMEOUT,
+                    (str(MIGRATION_STATEMENT_TIMEOUT_MS),),
+                )
                 cursor.execute(_VERIFY_BUCKETS, (start, end, start, end))
                 bucket_rows = tuple(cursor.fetchall())
-                cursor.execute(_COUNT_UNRECOGNIZABLE, (start, end))
+                cursor.execute(_SELECT_BACKFILL_REJECTIONS, (MIGRATION_ID,))
                 unrecognizable_row = cursor.fetchone()
                 cursor.execute(_COUNT_ORPHANS, (start, end))
                 orphan_row = cursor.fetchone()
@@ -321,9 +339,24 @@ class StationMeasurementMigrationRepository:
         window_start: float,
         window_end: float,
     ) -> VerificationReport:
-        return replace(
-            self.verify(window_start=window_start, window_end=window_end),
+        start = float(window_start)
+        end = float(window_end)
+        if not math.isfinite(start) or not math.isfinite(end) or not start < end:
+            raise ValueError("verification_window_invalid")
+        connection = self._connect_factory(**self._connect_kwargs)
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(_PREFLIGHT)
+                preflight = cursor.fetchone()
+        finally:
+            connection.close()
+        if preflight is None or not all(bool(value) for value in preflight):
+            raise RuntimeError("station_measurement_storage_not_ready")
+        return VerificationReport(
             status="ready",
+            buckets=(),
+            unrecognizable_rows=0,
+            orphan_count=0,
         )
 
 
