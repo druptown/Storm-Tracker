@@ -665,11 +665,16 @@ async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
     if mode == RUNTIME_MODE_LEGACY:
         return await _async_setup_legacy_entry(hass, entry)
     if mode == RUNTIME_MODE_WORKER_ONLY:
+        from .http import StormTrackerGeoJsonView
         from .worker_only_entry import async_setup_worker_only_entry
 
         started = await async_setup_worker_only_entry(hass, entry)
         if not started:
             return False
+        if not hass.data.get(_LEGACY_HTTP_REGISTRATION):
+            hass.http.register_view(StormTrackerGeoJsonView(hass))
+            hass.data[_LEGACY_HTTP_REGISTRATION] = True
+        hass.data[DOMAIN]["geojson_http_registered"] = True
         entry.async_on_unload(entry.add_update_listener(_async_options_updated))
         return True
     return False
@@ -2244,7 +2249,7 @@ async def _async_setup_runtime(
     )
     durable_processing_store = DurableProcessingStore(
         calibration_store.path,
-        build_id="integration-1.14.111-worker-1.18.1",
+        build_id="integration-1.14.112-worker-1.18.2",
     )
     durable_processing_stats = await hass.async_add_executor_job(
         durable_processing_store.initialize
