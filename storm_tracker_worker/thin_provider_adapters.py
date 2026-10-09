@@ -3096,14 +3096,21 @@ class NetatmoAdapter:
         self._last_summary_signature: tuple[tuple[str, float], ...] = ()
 
     async def fetch(self, request, fetcher, *, now):
-        if request.station_selection_reason:
+        catalog_discovery = (
+            request.station_selection_reason == "station_catalog_no_match"
+        )
+        if request.station_selection_reason and not catalog_discovery:
             raise ProviderBlocked(request.station_selection_reason)
         access_token = self._access_token
         if not access_token and self._access_token_provider is not None:
             access_token = await self._access_token_provider()
         if not access_token:
             raise ProviderBlocked("external_access_required")
-        if request.station_selection_applied and not request.selected_station_ids:
+        if (
+            request.station_selection_applied
+            and not request.selected_station_ids
+            and not catalog_discovery
+        ):
             return ()
         observations: dict[
             tuple[str, str, ObservationKind, str],
@@ -3164,6 +3171,7 @@ class NetatmoAdapter:
                 station_id = str(station.get("_id", "unknown"))
                 if (
                     request.station_selection_applied
+                    and not catalog_discovery
                     and station_id.casefold() not in allowed_station_ids
                 ):
                     continue
