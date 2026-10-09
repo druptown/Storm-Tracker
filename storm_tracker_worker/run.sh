@@ -18,9 +18,6 @@ export STV3_NETATMO_CLIENT_ID
 export STV3_NETATMO_CLIENT_SECRET
 export STV3_NETATMO_REFRESH_TOKEN
 export STV3_NETATMO_TOKEN_STATE
-export STV3_AWN_APPLICATION_KEY
-export STV3_AWN_API_KEY
-export STV3_AWN_RAW_RETENTION_AUTHORITY
 export STV3_SYNOPTIC_TOKEN
 export STV3_SYNOPTIC_RAW_RETENTION_AUTHORITY
 export STV3_RAINVIEWER_CACHE_ATTRIBUTION_AUTHORITY
@@ -70,9 +67,6 @@ if [[ -n "${STV3_MQTT_HOST:-}" ]]; then
   STV3_NETATMO_CLIENT_SECRET="${STV3_NETATMO_CLIENT_SECRET:-}"
   STV3_NETATMO_REFRESH_TOKEN="${STV3_NETATMO_REFRESH_TOKEN:-}"
   STV3_NETATMO_TOKEN_STATE="${STV3_NETATMO_TOKEN_STATE:-/share/storm_tracker_worker/private/netatmo_token_state.json}"
-  STV3_AWN_APPLICATION_KEY="${STV3_AWN_APPLICATION_KEY:-}"
-  STV3_AWN_API_KEY="${STV3_AWN_API_KEY:-}"
-  STV3_AWN_RAW_RETENTION_AUTHORITY="${STV3_AWN_RAW_RETENTION_AUTHORITY:-}"
   STV3_SYNOPTIC_TOKEN="${STV3_SYNOPTIC_TOKEN:-}"
   STV3_SYNOPTIC_RAW_RETENTION_AUTHORITY="${STV3_SYNOPTIC_RAW_RETENTION_AUTHORITY:-}"
   STV3_RAINVIEWER_CACHE_ATTRIBUTION_AUTHORITY="${STV3_RAINVIEWER_CACHE_ATTRIBUTION_AUTHORITY:-}"
@@ -150,14 +144,7 @@ else
   STV3_NETATMO_CLIENT_SECRET="$(bashio::config netatmo_client_secret)"
   STV3_NETATMO_REFRESH_TOKEN="$(bashio::config netatmo_refresh_token)"
   STV3_NETATMO_TOKEN_STATE="${STV3_NETATMO_TOKEN_STATE:-/data/netatmo_token_state.json}"
-  STV3_AWN_APPLICATION_KEY="$(bashio::config awn_application_key)"
-  STV3_AWN_API_KEY="$(bashio::config awn_api_key)"
   STV3_SYNOPTIC_TOKEN="$(bashio::config synoptic_token)"
-  if [[ "$(bashio::config awn_private_raw_retention_authorized)" == "true" ]]; then
-    STV3_AWN_RAW_RETENTION_AUTHORITY="worker_authority.awn_private_raw_retention_v1"
-  else
-    STV3_AWN_RAW_RETENTION_AUTHORITY=""
-  fi
   if [[ "$(bashio::config synoptic_raw_retention_terms_accepted)" == "true" ]]; then
     STV3_SYNOPTIC_RAW_RETENTION_AUTHORITY="worker_authority.synoptic_raw_retention_terms_v1"
   else
@@ -317,9 +304,6 @@ case "${STV3_RUNTIME_MODE}" in
     unset STV3_NETATMO_CLIENT_SECRET
     unset STV3_NETATMO_REFRESH_TOKEN
     unset STV3_NETATMO_TOKEN_STATE
-    unset STV3_AWN_APPLICATION_KEY
-    unset STV3_AWN_API_KEY
-    unset STV3_AWN_RAW_RETENTION_AUTHORITY
     unset STV3_SYNOPTIC_TOKEN
     unset STV3_SYNOPTIC_RAW_RETENTION_AUTHORITY
     unset STV3_RAINVIEWER_CACHE_ATTRIBUTION_AUTHORITY

@@ -559,14 +559,6 @@ _WORKLOADS: tuple[_WorkloadDefinition, ...] = (
         "global", "global", 600, 540, 42, _budget(36, 2, 75),
     ),
     _WorkloadDefinition(
-        "ground.awn.authorized_devices", WorkloadClass.GROUND, "ambientweather", "awn_authorized_devices_native_json",
-        "global", "global", 300, 240, 53, _budget(8, 1, 45),
-        (
-            "worker_secret.awn_api_key",
-            "worker_secret.awn_application_key",
-        ),
-    ),
-    _WorkloadDefinition(
         "ground.metar.global", WorkloadClass.GROUND, "aviationweather", "metar_cache_native_csv_gzip",
         # The exact-native handler enforces a 16 MiB compressed-body ceiling.
         # Keep the planner reservation identical to that hard transport bound;

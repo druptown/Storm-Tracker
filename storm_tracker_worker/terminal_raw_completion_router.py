@@ -194,12 +194,6 @@ def _consumer(
 # decision.  Quantitative decoder references below do not claim that decoding
 # has run; audit consumers only validate the immutable manifest boundary.
 TERMINAL_RAW_CONSUMER_CATALOG = MappingProxyType({
-    "ground.awn.authorized_devices": _consumer(
-        "ground.awn.authorized_devices",
-        "awn-raw-manifest-audit-v1",
-        "raw_manifest_audit",
-        "terminal_raw_reference_audit_v1",
-    ),
     "ground.kmi.aws_10min": _consumer(
         "ground.kmi.aws_10min",
         "kmi-aws-raw-manifest-audit-v1",

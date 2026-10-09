@@ -37,6 +37,9 @@ from .autonomous_scheduler import (
     SchedulerDesiredStateError,
 )
 from .operational_snapshot_runtime import OperationalSnapshotRuntime
+from .multi_source_operational_cycle import (
+    SOURCE_COUNT as WORKER_ONLY_PROVIDER_COUNT,
+)
 from .protocol import DEFAULT_TOPIC_ROOT, decode, encode, envelope, job_payload, topic
 from .worker_first_service_activation import (
     RAW_CAPTURE_SHADOW_MODE,
@@ -3397,7 +3400,8 @@ class WorkerService:
                 or set(cycle_counts)
                 != {"blocked", "current", "error", "not_applicable", "stale"}
                 or any(
-                    type(value) is not int or not 0 <= value <= 29
+                    type(value) is not int
+                    or not 0 <= value <= WORKER_ONLY_PROVIDER_COUNT
                     for value in cycle_counts.values()
                 )
             ):
@@ -3536,7 +3540,8 @@ class WorkerService:
                 and diagnostics.get("ownership_fence_held") is True
                 and diagnostics.get("shutdown_complete") is False
                 and diagnostics.get("last_error_code") is None
-                and diagnostics.get("provider_count") == 29
+                and diagnostics.get("provider_count")
+                == WORKER_ONLY_PROVIDER_COUNT
                 and isinstance(raw_calibration, Mapping)
                 and raw_calibration.get("status") in {"ready", "not_configured"}
                 and raw_calibration.get("exact_raw") is True
@@ -3554,7 +3559,7 @@ class WorkerService:
                     for value in snapshot_diagnostic_counts
                 )
                 and type(captured) is int
-                and 0 <= captured <= 29
+                and 0 <= captured <= WORKER_ONLY_PROVIDER_COUNT
                 and type(quantitative_captured) is int
                 and 0 <= quantitative_captured <= 4
                 and isinstance(quantitative_errors, Mapping)
@@ -3637,7 +3642,7 @@ class WorkerService:
                     and value == "tracking_processing_failed"
                     for key, value in tracking_errors.items()
                 )
-                and cycle_total in {0, 29}
+                and cycle_total in {0, WORKER_ONLY_PROVIDER_COUNT}
                 and type(revision) is int
                 and 0 <= revision <= OPERATIONAL_SNAPSHOT_MAX_COUNTER
                 and (

@@ -1,5 +1,5 @@
 name: "Storm Tracker Worker"
-version: "1.17.53"
+version: "1.17.54"
 slug: "storm_tracker_worker"
 description: "Geisoleerde radar- en nowcastworker voor Storm Tracker V3"
 startup: services
@@ -35,9 +35,6 @@ options:
   netatmo_client_id: ""
   netatmo_client_secret: ""
   netatmo_refresh_token: ""
-  awn_application_key: ""
-  awn_api_key: ""
-  awn_private_raw_retention_authorized: false
   synoptic_token: ""
   synoptic_raw_retention_terms_accepted: false
   rainviewer_cache_attribution_accepted: false
@@ -74,9 +71,6 @@ schema:
   netatmo_client_id: "str?"
   netatmo_client_secret: "password?"
   netatmo_refresh_token: "password?"
-  awn_application_key: "password?"
-  awn_api_key: "password?"
-  awn_private_raw_retention_authorized: "bool"
   synoptic_token: "password?"
   synoptic_raw_retention_terms_accepted: "bool"
   rainviewer_cache_attribution_accepted: "bool"

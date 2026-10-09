@@ -6,8 +6,7 @@ turns a candidate into an operational rain/dry claim.  Every configured
 ground workload and every requested target receives an explicit result.
 
 KMI AWS, METAR, Netatmo and Synoptic currently have canonical receipt
-producers. AWN has an exact raw capture path but no certified canonical ground
-decoder, so applicable targets remain explicitly blocked here.
+producers.
 """
 from __future__ import annotations
 
@@ -88,7 +87,6 @@ _OBSERVATION_KEY_RE = re.compile(r"^ground-observation-[0-9a-f]{64}$")
 _CAPTURE_ID_RE = re.compile(r"^capture-[0-9a-f]{64}$")
 
 GROUND_SOURCE_IDS = frozenset({
-    "ground.awn.authorized_devices",
     "ground.kmi.aws_10min",
     "ground.metar.global",
     "ground.netatmo.region",
@@ -125,16 +123,6 @@ class GroundDecoderBinding:
 
 
 GROUND_DECODER_BINDINGS = MappingProxyType({
-    "ground.awn.authorized_devices": GroundDecoderBinding(
-        source_id="ground.awn.authorized_devices",
-        fact_provider=None,
-        fact_product=None,
-        decoder_identity=None,
-        decoder_version=None,
-        semantics_profile="raw_structure_only_rain_semantics_uncertified",
-        maximum_age_ms=None,
-        blocked_reason="canonical_ground_decoder_unavailable",
-    ),
     "ground.kmi.aws_10min": GroundDecoderBinding(
         source_id="ground.kmi.aws_10min",
         fact_provider="kmi",

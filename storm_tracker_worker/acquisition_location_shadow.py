@@ -57,7 +57,6 @@ _LOCATION_WORKLOADS = frozenset({
     *_PUBLIC_SOURCE_LOCATION_WORKLOADS,
 })
 _NO_QUERY_WORKLOADS = frozenset({
-    "ground.awn.authorized_devices",
     "validation.italiameteo.dpc_sri_historical_catalog",
 })
 GUARDED_RAW_WORKLOAD_IDS = frozenset(

@@ -195,8 +195,6 @@ METEOFRANCE_HANDLER_ID = "meteofrance_dpradar_catalog_hdf5_exact_raw_v1"
 METEOFRANCE_WORKLOAD_ID = "radar.meteofrance.dpradar"
 HSAF_H40B_HANDLER_ID = "hsaf_h40b_nlst_netcdf_gzip_exact_raw_v1"
 HSAF_H40B_WORKLOAD_ID = "satellite.hsaf.h40b"
-AWN_HANDLER_ID = "ambientweather_authorized_devices_exact_raw_v1"
-AWN_WORKLOAD_ID = "ground.awn.authorized_devices"
 NETATMO_HANDLER_ID = "netatmo_getpublicdata_exact_raw_v1"
 NETATMO_WORKLOAD_ID = "ground.netatmo.region"
 SYNOPTIC_HANDLER_ID = "synoptic_timeseries_exact_raw_v1"
@@ -979,30 +977,6 @@ _HANDLERS = MappingProxyType({
         ledger_provider="hsaf",
         capture_provenance_kind="hsaf_h40b_v1",
     ),
-    AWN_HANDLER_ID: _HandlerSpec(
-        AWN_HANDLER_ID,
-        AWN_WORKLOAD_ID,
-        "ambientweather",
-        "awn_authorized_devices_capture",
-        ":capture",
-        None,
-        "sources",
-        "",
-        (_RoleSpec(
-            "response_json",
-            "awn_authorized_devices_native_json",
-            ":response_json",
-            8 * 1024 * 1024,
-            frozenset({"application/json", "text/json"}),
-            "awn_v1",
-        ),),
-        "ground_semantics_not_decoded",
-        8 * 1024 * 1024,
-        ledger_provider="ambientweather",
-        capture_provenance_kind="awn_v1",
-        capture_state="captured_structure_inspected_not_decoded",
-        safe_native_identity=True,
-    ),
     NETATMO_HANDLER_ID: _HandlerSpec(
         NETATMO_HANDLER_ID,
         NETATMO_WORKLOAD_ID,
@@ -1495,10 +1469,6 @@ def _run_native(
         from .hsaf_h40b_native import capture_latest_hsaf_h40b
 
         return capture_latest_hsaf_h40b(job, raw_store=store)
-    if spec.handler_id == AWN_HANDLER_ID:
-        from .awn_native import capture_authorized_awn_devices
-
-        return capture_authorized_awn_devices(job, raw_store=store)
     if spec.handler_id == NETATMO_HANDLER_ID:
         from .netatmo_native import capture_netatmo_public_data
 
@@ -1903,8 +1873,6 @@ def execute_shadow_capture(
 __all__ = [
     "AEMET_HANDLER_ID",
     "AEMET_WORKLOAD_ID",
-    "AWN_HANDLER_ID",
-    "AWN_WORKLOAD_ID",
     "CONTRACT",
     "DPC_HANDLER_ID",
     "DPC_WORKLOAD_ID",

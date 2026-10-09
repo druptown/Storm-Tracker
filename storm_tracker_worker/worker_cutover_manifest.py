@@ -208,22 +208,20 @@ _WORKLOADS = (
         "provider.ground_networks",
         entrypoints=("_poll_netatmo",),
         legacy_modules=("netatmo",),
-        providers=(
-            "ambientweather", "aviationweather", "metar", "netatmo", "synoptic",
-        ),
+        providers=("aviationweather", "metar", "netatmo", "synoptic"),
         acquisition_workloads=(
-            "ground.awn.authorized_devices", "ground.metar.global",
-            "ground.netatmo.region", "ground.synoptic.region",
+            "ground.metar.global", "ground.netatmo.region",
+            "ground.synoptic.region",
         ),
         jobs=("metar_fetch", "netatmo_fetch", "synoptic_fetch"),
         components=(
-            "awn_native", "canonical_ground_evidence_store",
-            "metar_ground_evidence", "ground_fusion_shadow_runtime", "metar_native",
+            "canonical_ground_evidence_store", "metar_ground_evidence",
+            "ground_fusion_shadow_runtime", "metar_native",
             "netatmo_ground_decoder", "netatmo_native",
             "synoptic_ground_decoder", "synoptic_native",
         ),
         state=CutoverState.SHADOW_CANDIDATE,
-        gate="AWN exact authorized-device JSON and ground fusion remain shadow only; instantaneous-rain semantics, global site/capability catalogues, footprint certificates, process isolation, retention and held-out proof remain open",
+        gate="ground fusion remains shadow only; global site/capability catalogues, footprint certificates, process isolation, retention and held-out proof remain open",
     ),
     _workload(
         "provider.model_guidance",

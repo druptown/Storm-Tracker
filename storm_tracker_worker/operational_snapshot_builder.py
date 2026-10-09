@@ -16,9 +16,14 @@ from typing import Any
 from .desired_state import DesiredState
 from .tracking_core.operational_snapshot import (
     MAX_SNAPSHOT_TTL_SECONDS,
+    SnapshotSizeError,
+    build_control_envelope,
     validate_snapshot,
 )
-from .worker_acquisition_plan import build_worker_acquisition_regions
+from .worker_acquisition_plan import (
+    acquisition_catalog_snapshot,
+    build_worker_acquisition_regions,
+)
 
 
 METHOD = "worker_unknown_operational_snapshot_v1"
@@ -33,6 +38,35 @@ _REASON_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,159}$")
 _WORKER_STATES = frozenset({
     "online", "busy", "degraded", "offline", "unknown",
 })
+
+
+def _catalog_source_ids() -> tuple[str, ...]:
+    """Return every closed pull/push source identity in canonical order."""
+
+    catalog = acquisition_catalog_snapshot()
+    workloads = catalog.get("workloads")
+    ingresses = catalog.get("event_ingresses")
+    if not isinstance(workloads, list) or not isinstance(ingresses, list):
+        raise RuntimeError("acquisitiecatalogus mist bronlijsten")
+    source_ids = [
+        item.get("workload_id")
+        for item in workloads
+        if isinstance(item, dict)
+    ] + [
+        item.get("ingress_id")
+        for item in ingresses
+        if isinstance(item, dict)
+    ]
+    if (
+        len(source_ids) != len(workloads) + len(ingresses)
+        or any(not isinstance(item, str) or not item for item in source_ids)
+        or len(source_ids) != len(set(source_ids))
+    ):
+        raise RuntimeError("acquisitiecatalogus bevat ongeldige bronidentiteiten")
+    return tuple(sorted(source_ids))
+
+
+_CATALOG_SOURCE_IDS = _catalog_source_ids()
 
 
 class OperationalSnapshotBuildError(ValueError):
@@ -123,6 +157,21 @@ def _unknown_target(
     }
 
 
+def _unknown_provider(source_id: str, reason_code: str) -> dict[str, Any]:
+    """Expose catalog presence without manufacturing provider health."""
+
+    return {
+        "provider_id": source_id,
+        "display_name": source_id,
+        "state": "unknown",
+        "freshness": "unknown",
+        "product_valid_at": None,
+        "received_at": None,
+        "error": None,
+        "reason_codes": [reason_code],
+    }
+
+
 def build_unknown_operational_snapshot(
     desired_state: DesiredState,
     *,
@@ -134,7 +183,7 @@ def build_unknown_operational_snapshot(
     reason_code: str = "awaiting_meteorological_evidence",
     worker_status_text: str = "",
 ) -> dict[str, Any]:
-    """Build a target-complete snapshot containing no weather assertions.
+    """Build a target- and provider-complete snapshot without weather claims.
 
     Coordinates, location accuracy, target availability and desired-state
     settings intentionally do not cross this read-model boundary.  They remain
@@ -232,7 +281,10 @@ def build_unknown_operational_snapshot(
         "providers": {
             "complete": True,
             "overflow_count": 0,
-            "items": [],
+            "items": [
+                _unknown_provider(source_id, reason)
+                for source_id in _CATALOG_SOURCE_IDS
+            ],
         },
         "ui_storms": {
             "complete": True,
@@ -241,7 +293,23 @@ def build_unknown_operational_snapshot(
         },
         "map_artifact": {"artifact_handle": None, "etag": None},
     }
-    return validate_snapshot(snapshot)
+    validated = validate_snapshot(snapshot)
+    try:
+        build_control_envelope(validated)
+    except SnapshotSizeError:
+        # Sixty-four long target rows can legitimately consume the fixed
+        # 64-KiB control envelope by themselves.  Keep every target, mark the
+        # provider projection explicitly incomplete and let HA show the
+        # catalog entities as unknown.  Normal household snapshots retain all
+        # catalog rows; no provider state is silently truncated.
+        snapshot["providers"] = {
+            "complete": False,
+            "overflow_count": len(_CATALOG_SOURCE_IDS),
+            "items": [],
+        }
+        validated = validate_snapshot(snapshot)
+        build_control_envelope(validated)
+    return validated
 
 
 __all__ = [

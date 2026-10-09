@@ -6,9 +6,9 @@ admission, prediction, or alerting.  A cycle is useful here only when every
 catalog identity has exactly one explicit outcome and every target has an
 explicit applicability decision for every identity.
 
-The acquisition catalog currently contains 28 cadence identities: 27 are
+The acquisition catalog currently contains 27 cadence identities: 26 are
 dispatchable and ``radar.kmi.radqpe_native`` is externally blocked.  The
-Blitzortung push ingress is a twenty-ninth identity.  All 29 remain visible in
+Blitzortung push ingress is a twenty-eighth identity.  All 28 remain visible in
 every cycle; blocked or out-of-scope sources are never collapsed to unknown.
 """
 from __future__ import annotations
@@ -37,7 +37,7 @@ MODEL_INPUT_CONTRACT = "stv3-multi-source-model-input-v1"
 VALIDATION_INPUT_CONTRACT = "stv3-multi-source-validation-input-v1"
 
 EXPECTED_ACQUISITION_CATALOG_SHA256 = (
-    "5f224f9aea2d5d77446a8df5b08dcaa44478611184fb312a7c5849399b9c4e6b"
+    "3d9ff419d390c8c73ca6173ca083e8514a86aee6ab12329f0a4dc605cac86397"
 )
 
 MAX_TARGETS = 64
@@ -79,7 +79,6 @@ class CycleStatus(str, Enum):
 
 
 _EXPECTED_CADENCE_SOURCE_IDS = frozenset({
-    "ground.awn.authorized_devices",
     "ground.kmi.aws_10min",
     "ground.metar.global",
     "ground.netatmo.region",
@@ -115,7 +114,7 @@ EXPECTED_SOURCE_IDS = frozenset(
     _EXPECTED_CADENCE_SOURCE_IDS | _EXPECTED_EVENT_INGRESS_IDS
 )
 CADENCE_SOURCE_COUNT = len(_EXPECTED_CADENCE_SOURCE_IDS)
-DISPATCHABLE_CADENCE_SOURCE_COUNT = 27
+DISPATCHABLE_CADENCE_SOURCE_COUNT = 26
 EVENT_INGRESS_SOURCE_COUNT = len(_EXPECTED_EVENT_INGRESS_IDS)
 SOURCE_COUNT = len(EXPECTED_SOURCE_IDS)
 MAX_APPLICABILITY_ROWS = SOURCE_COUNT * MAX_TARGETS

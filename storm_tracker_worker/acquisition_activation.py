@@ -30,8 +30,6 @@ METAR_TARGET = SHADOW_CAPTURE_TARGET
 
 _ENV_REQUIREMENTS = MappingProxyType({
     "worker_secret.aemet_api_key": "STV3_AEMET_API_KEY",
-    "worker_secret.awn_api_key": "STV3_AWN_API_KEY",
-    "worker_secret.awn_application_key": "STV3_AWN_APPLICATION_KEY",
     "worker_secret.eumetsat_consumer_key": "STV3_EUMETSAT_CONSUMER_KEY",
     "worker_secret.eumetsat_consumer_secret": "STV3_EUMETSAT_CONSUMER_SECRET",
     "worker_secret.knmi_api_key": "STV3_KNMI_API_KEY",
@@ -45,10 +43,6 @@ _ENV_REQUIREMENTS = MappingProxyType({
 # the environment value is the exact authority identifier, so a generic
 # truthy option cannot silently authorize retention.
 _AUTHORIZATION_ENV_REQUIREMENTS = MappingProxyType({
-    "worker_authority.awn_private_raw_retention_v1": (
-        "STV3_AWN_RAW_RETENTION_AUTHORITY",
-        "worker_authority.awn_private_raw_retention_v1",
-    ),
     "worker_authority.synoptic_raw_retention_terms_v1": (
         "STV3_SYNOPTIC_RAW_RETENTION_AUTHORITY",
         "worker_authority.synoptic_raw_retention_terms_v1",
@@ -721,33 +715,6 @@ def _build_rules() -> MappingProxyType[str, ActivationRule]:
                 ),
                 raw_capture_service_only=True,
             )
-        elif workload_id == "ground.awn.authorized_devices":
-            rule = ActivationRule(
-                **common,
-                status=ActivationStatus.ACTIVE_SHADOW_RAW,
-                reason_code="exact_raw_shadow_capture_audited",
-                handler_id="ambientweather_authorized_devices_exact_raw_v1",
-                process_target=SHADOW_CAPTURE_TARGET,
-                required_roles=("response_json",),
-                handler_payload_contract="exact_empty_object_v1",
-                maximum_transport_bytes=8 * 1024 * 1024,
-                maximum_artifacts=1,
-                maximum_wall_seconds=45,
-                expected_scope_id="global",
-                secret_requirement_ids=(
-                    "worker_secret.awn_api_key",
-                    "worker_secret.awn_application_key",
-                ),
-                secret_delivery="worker_environment_presence_v1",
-                authorization_requirement_ids=(
-                    "worker_authority.awn_private_raw_retention_v1",
-                ),
-                authorization_delivery="worker_environment_exact_authority_v1",
-                authorization_unavailable_reason_code=(
-                    "authorized_private_raw_retention_approval_required"
-                ),
-                raw_capture_service_only=True,
-            )
         elif workload_id == "ground.netatmo.region":
             rule = ActivationRule(
                 **common,
@@ -880,26 +847,6 @@ RAW_CAPTURE_WORKLOAD_IDS = frozenset(
 # into implicit runtime wiring.  The dedicated candidate assessor below is the
 # only activation path until that later integration is separately reviewed.
 LOCATION_SHADOW_CANDIDATE_RULES = MappingProxyType({
-    "ground.awn.authorized_devices": ActivationRule(
-        workload_id="ground.awn.authorized_devices",
-        provider_id="ambientweather",
-        product_id="awn_authorized_devices_native_json",
-        status=ActivationStatus.BLOCKED_UNWIRED,
-        reason_code="authorized_private_raw_retention_approval_required",
-        handler_id="ambientweather_authorized_devices_exact_raw_v1",
-        process_target=SHADOW_CAPTURE_TARGET,
-        required_roles=("response_json",),
-        handler_payload_contract="exact_empty_object_v1",
-        maximum_transport_bytes=8 * 1024 * 1024,
-        maximum_artifacts=1,
-        maximum_wall_seconds=45,
-        expected_scope_id="global",
-        secret_requirement_ids=(
-            "worker_secret.awn_api_key",
-            "worker_secret.awn_application_key",
-        ),
-        secret_delivery="worker_environment_presence_v1",
-    ),
     "ground.netatmo.region": ActivationRule(
         workload_id="ground.netatmo.region",
         provider_id="netatmo",

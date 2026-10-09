@@ -96,7 +96,6 @@ _FORBIDDEN_PROVENANCE_VALUES = (
     "x-amz-signature",
 )
 _ALLOWED_PUBLIC_PROVENANCE_LOCATORS = frozenset({
-    "https://api.ambientweather.net",
     "https://api.netatmo.com",
     "https://api.synopticdata.com",
     "https://radar.protezionecivile.it",
@@ -107,7 +106,6 @@ _RECEIPT_PROVENANCE_KINDS = frozenset({
     "aemet_data_v1",
     "aemet_envelope_v1",
     "aemet_metadata_v1",
-    "awn_v1",
     "closed_role_set_v1",
     "dpc_catalog_v1",
     "dpc_geotiff_v1",
@@ -145,7 +143,6 @@ _RECEIPT_PROVENANCE_KINDS = frozenset({
 })
 _CAPTURE_PROVENANCE_KINDS = frozenset({
     "aemet_opendata_v1",
-    "awn_v1",
     "closed_role_set_v1",
     "dpc_sri_v1",
     "dwd_rv_v2",
@@ -1117,25 +1114,6 @@ RECOVERY_BINDING_CATALOG = MappingProxyType({
         ),
         maximum_transport_bytes=66 * 1024 * 1024,
         capture_provenance_kind="hsaf_h40b_v1",
-    ),
-    "ambientweather_authorized_devices_exact_raw_v1": RawRecoveryBinding(
-        handler_id="ambientweather_authorized_devices_exact_raw_v1",
-        workload_id="ground.awn.authorized_devices",
-        ledger_provider="ambientweather",
-        raw_provider="ambientweather",
-        capture_product="awn_authorized_devices_capture",
-        capture_suffix=":capture",
-        members=(RawRecoveryMemberBinding(
-            role="response_json",
-            raw_product="awn_authorized_devices_native_json",
-            receipt_suffix=":response_json",
-            maximum_transport_bytes=8 * 1024 * 1024,
-            allowed_content_types=frozenset({"application/json", "text/json"}),
-            provenance_kind="awn_v1",
-        ),),
-        maximum_transport_bytes=8 * 1024 * 1024,
-        capture_provenance_kind="awn_v1",
-        job_identity_kind="safe_native_alias_v1",
     ),
     "netatmo_getpublicdata_exact_raw_v1": RawRecoveryBinding(
         handler_id="netatmo_getpublicdata_exact_raw_v1",
@@ -2341,12 +2319,6 @@ def _validate_provenance(
                 "H SAF raw provenance drifted"
             ) from err
         return basename
-    if member.provenance_kind == "awn_v1":
-        from . import awn_native
-
-        if provenance != awn_native._provenance():  # noqa: SLF001
-            raise CaptureRecoveryIntegrityError("AWN raw provenance drifted")
-        return None
     if member.provenance_kind == "netatmo_v2":
         from . import netatmo_native
 
@@ -2940,11 +2912,6 @@ def _validate_receipt(
             f"{hsaf_h40b_native.PRODUCT_ID}:{filename}"
             f"|content_sha256={receipt.content_sha256}"
         )
-    elif member.provenance_kind == "awn_v1":
-        expected = (
-            "api.ambientweather.net/v1/devices"
-            f"|content_sha256={receipt.content_sha256}"
-        )
     elif member.provenance_kind == "netatmo_v2":
         from . import netatmo_native
 
@@ -3492,12 +3459,6 @@ def _validate_capture(
             f"|listing={listing.content_sha256}"
             f"|netcdf_gzip={product.content_sha256}"
         )
-    elif binding.capture_provenance_kind == "awn_v1":
-        receipt = receipts_by_role["response_json"]
-        expected_upstream = (
-            f"{binding.capture_product}|content_sha256={receipt.content_sha256}"
-        )
-        expected_timestamp = None
     elif binding.capture_provenance_kind in {"netatmo_v2", "synoptic_v5"}:
         receipt = receipts_by_role["response_json"]
         query_sha = metadata_by_role["response_json"]

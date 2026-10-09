@@ -453,7 +453,7 @@ class WorkerOnlyServiceRuntime:
         return await self._settle_snapshot_runtime(self._output, output)
 
     def _snapshot_provider_projection_missing(self) -> bool:
-        """Return whether the durable head is only the safe empty fallback."""
+        """Return whether the durable head is only the safe fallback."""
 
         if self._snapshot_store is None:
             return True
@@ -467,15 +467,28 @@ class WorkerOnlyServiceRuntime:
         if not isinstance(providers, Mapping):
             return True
         items = providers.get("items")
-        return not isinstance(items, list) or len(items) != SOURCE_COUNT
+        if not isinstance(items, list) or len(items) != SOURCE_COUNT:
+            return True
+        # The safe fallback now enumerates the full closed catalog so HA can
+        # distinguish "not evaluated yet" from a missing entity.  It remains
+        # a fallback and must still be replaced by the retained cycle view.
+        return all(
+            isinstance(item, Mapping)
+            and item.get("state") == "unknown"
+            and item.get("freshness") == "unknown"
+            and item.get("reason_codes")
+            == ["awaiting_meteorological_evidence"]
+            for item in items
+        )
 
     async def _restore_provider_projection_if_missing(self) -> bool:
         """Replace an authority-race fallback with the complete status view.
 
         Settling an MQTT publication while Life360 updates desired-state can
         legitimately publish an all-unknown fallback for the newest authority.
-        That fallback contains no provider rows.  Rebuild those rows from the
-        already retained capture/error state; this performs no provider I/O.
+        That fallback now enumerates every provider as explicitly unknown.
+        Rebuild those rows from the already retained capture/error state; this
+        performs no provider I/O.
         """
 
         if not self._snapshot_provider_projection_missing():
