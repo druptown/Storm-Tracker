@@ -15,7 +15,6 @@ from .tracking_core.operational_snapshot import validate_snapshot
 
 
 SNAPSHOT_TTL_SECONDS = 120.0
-SNAPSHOT_REVISION_EPOCH_SECONDS = 1_577_836_800  # 2020-01-01T00:00:00Z
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,15 +51,7 @@ class ThinOperationalRuntime:
         self._last_attempts: dict[str, float] = {}
         self._latest_provider_results: dict[str, Any] = {}
         self._nowcast = ThinNowcastRuntime(targets={})
-        # A worker App restart must not reset revisions below the snapshot still
-        # cached by Home Assistant. Seconds since a recent fixed epoch fit the
-        # snapshot contract's 1e9 counter ceiling. The service runs no faster
-        # than once every two seconds, so a restarted seed advances faster than
-        # the in-process counter it replaces.
-        self._revision = max(
-            0,
-            int(float(self._clock())) - SNAPSHOT_REVISION_EPOCH_SECONDS,
-        )
+        self._revision = 0
         self._failed_cycles = 0
 
     @property
@@ -257,23 +248,14 @@ class ThinOperationalRuntime:
             region_id = f"region-{target.target_id}"
             providers = sorted(result.contributors)
             current_is_rain = result.current_state == "regen"
-            current_is_dry = result.current_state == "droog"
             current_freshness = "current" if providers else "unknown"
-            current_state = (
-                "raining" if current_is_rain
-                else "dry" if current_is_dry and providers
-                else "unknown"
-            )
+            current_state = "raining" if current_is_rain else "unknown"
             if result.forecast_state == "regen_op_komst" and result.eta_minutes is not None:
                 threat_state, threat_freshness = "available", "current"
                 track_id = nowcast.storm_cells[0].cell_id if nowcast.storm_cells else None
                 probability = round(max(0.0, min(1.0, result.confidence)) * 100.0, 1)
                 calibration = "diagnostic:thin-v1"
                 passage = "expected"
-            elif result.forecast_state == "geen_dreiging" and providers:
-                threat_state, threat_freshness = "none", "current"
-                track_id = probability = calibration = None
-                passage = "none"
             else:
                 threat_state = "unknown"
                 threat_freshness = "current" if providers else "unknown"
@@ -291,11 +273,7 @@ class ThinOperationalRuntime:
                 "current_precipitation": {
                     "state": current_state,
                     "freshness": current_freshness,
-                    "rain_rate_mm_h": (
-                        result.precipitation_rate_mm_h
-                        if current_state in {"raining", "dry"}
-                        else None
-                    ),
+                    "rain_rate_mm_h": result.precipitation_rate_mm_h if current_is_rain else None,
                     "product_valid_at": product_valid_at if current_freshness == "current" else None,
                     "provider_ids": providers,
                     "reason_codes": [result.reason_code],
@@ -364,11 +342,11 @@ class ThinOperationalRuntime:
             "received_at": received_at,
             "evaluated_at": evaluated_at,
             "valid_until": evaluated_at + SNAPSHOT_TTL_SECONDS,
-            "provenance_complete": bool(source_ids),
+            "provenance_complete": False,
             "provenance_source_ids": source_ids,
-            "provenance_reason_codes": (
-                [] if source_ids else ["insufficient_observations"]
-            ),
+            "provenance_reason_codes": [
+                "postgis_unavailable"
+            ] if postgis.status == "degraded" else [],
             "worker": {
                 "state": "degraded" if postgis.status == "degraded" else "online",
                 "queue_depth": postgis.queued_cycles,
