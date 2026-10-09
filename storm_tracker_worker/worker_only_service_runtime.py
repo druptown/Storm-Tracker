@@ -1036,6 +1036,58 @@ class WorkerOnlyServiceRuntime:
             return True
         return False
 
+    async def _publish_authority_handoff_if_needed(self) -> bool:
+        """Publish the new desired-state authority before provider I/O.
+
+        Some production decoders perform bounded synchronous work and cannot
+        yield to the maintenance poll while that work is in progress.  A
+        Life360 lease renewal must therefore be rebound before the provider
+        batch starts, otherwise Home Assistant correctly fails the previous
+        authority closed until the whole batch finishes.
+        """
+
+        desired = self._raw.desired_state_store.load_active()
+        if desired is None or self._snapshot_store is None:
+            return False
+        head = self._snapshot_store.head()
+        if not isinstance(head, Mapping):
+            return False
+        snapshot = head.get("snapshot")
+        if not isinstance(snapshot, Mapping):
+            return False
+        previous_sha256 = snapshot.get("desired_state_sha256")
+        if previous_sha256 == desired.state_sha256:
+            return False
+
+        previous = (
+            self._raw.desired_state_store.load_version(previous_sha256)
+            if isinstance(previous_sha256, str)
+            else None
+        )
+        if _meteorological_authority_equivalent(previous, desired):
+            # Only the position observation time/CAS identity changed.  The
+            # retained target-bound evidence is still exact for this geometry.
+            self._quantitative_desired_state_sha256 = desired.state_sha256
+        else:
+            # A real geometry/settings change may not inherit old target-bound
+            # radar/model output.  Publish a safe current-authority fallback;
+            # the normal tick rebuilds evidence afterwards.
+            self._radar_observations.clear()
+            self._model_guidance.clear()
+
+        if self._output is None:
+            raise WorkerOnlyServiceRuntimeError("worker_only_output_unavailable")
+        if not await self._stage_cycle():
+            return False
+        before = self._output.diagnostics()["publication"]["snapshot_revision"]
+        output = await self._output.async_publish_ready_fact()
+        output = await self._settle_snapshot_output(output)
+        after = output["publication"]["snapshot_revision"]
+        if after > before:
+            self._increment("snapshots_published")
+            return True
+        return False
+
     async def _await_with_snapshot_maintenance(
         self,
         operation: Awaitable[Any],
@@ -1710,10 +1762,15 @@ class WorkerOnlyServiceRuntime:
             raise WorkerOnlyServiceRuntimeError("worker_only_runtime_not_running")
         async with self._gate:
             self._increment("ticks")
-            stage = "raw_tick"
+            stage = "authority_handoff"
             try:
                 maintenance_snapshot_published = (
+                    await self._publish_authority_handoff_if_needed()
+                )
+                stage = "raw_tick"
+                maintenance_snapshot_published = (
                     await self._raw_tick_with_snapshot_maintenance()
+                    or maintenance_snapshot_published
                 )
                 stage = "consume_terminal"
                 terminal_results = self._consume_terminal_results()
