@@ -183,14 +183,19 @@ def collection_count_view(
     status = cache.get_collection_status(collection)
     if status is None:
         status = {"complete": False, "overflow_count": 0, "item_count": 0}
+    bounded_item_count = status["item_count"]
+    omitted_item_count = status["overflow_count"]
+    total_item_count = bounded_item_count + omitted_item_count
     return SnapshotSensorView(
-        native_value=status["item_count"],
+        native_value=total_item_count,
         available=True,
         attributes={
             **_status_attributes(cache),
             "collection": collection,
             "complete": status["complete"],
-            "overflow_count": status["overflow_count"],
+            "overflow_count": omitted_item_count,
+            "bounded_item_count": bounded_item_count,
+            "total_item_count": total_item_count,
         },
     )
 

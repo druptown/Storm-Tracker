@@ -741,8 +741,12 @@ class SnapshotOnlySensorEntity(SensorEntity):
                 self._description.collection == "regions"
                 and self._hub.cache.get_region(_PENDING_REGION_ID) is not None
             )
-            bounded_item_count = projected.native_value
-            active_region_count = bounded_item_count
+            total_item_count = projected.native_value
+            bounded_item_count = attributes.get(
+                "bounded_item_count", total_item_count
+            )
+            omitted_item_count = attributes.get("overflow_count", 0)
+            active_region_count = total_item_count
             if (
                 self._description.collection == "regions"
                 and type(bounded_item_count) is int
@@ -754,9 +758,18 @@ class SnapshotOnlySensorEntity(SensorEntity):
             # claim.  It therefore remains valid while value fusion is still
             # collecting provenance for the meteorological facts themselves.
             provenance_required = self._description.collection == "ui_storms"
+            exact_count_available = collection_complete or (
+                self._description.collection == "ui_storms"
+                and type(total_item_count) is int
+                and type(bounded_item_count) is int
+                and type(omitted_item_count) is int
+                and omitted_item_count > 0
+                and total_item_count
+                == bounded_item_count + omitted_item_count
+            )
             count_valid = (
                 snapshot_current
-                and collection_complete
+                and exact_count_available
                 and (provenance_complete or not provenance_required)
                 and (
                     self._description.collection != "regions"
@@ -775,6 +788,8 @@ class SnapshotOnlySensorEntity(SensorEntity):
                 reasons.append("region_assignment_pending")
             attributes.update({
                 "bounded_snapshot_item_count": bounded_item_count,
+                "omitted_snapshot_item_count": omitted_item_count,
+                "total_item_count": total_item_count,
                 "active_region_count": active_region_count,
                 "count_valid": count_valid,
                 "provenance_required": provenance_required,
