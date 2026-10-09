@@ -234,12 +234,22 @@ def provider_status_view(
             attributes={
                 **_status_attributes(cache),
                 "provider_id": provider_id,
+                "readiness": "not_ready",
+                "effective_status": "unknown",
                 "freshness": "unknown",
                 "product_valid_at": None,
                 "provider_received_at": None,
                 "error": error,
                 "reason_codes": [reason_code],
             },
+        )
+    effective_status = provider["state"]
+    readiness = provider.get("readiness")
+    if readiness is None:
+        readiness = (
+            "ready"
+            if effective_status in {"operational", "stale"}
+            else "not_ready"
         )
     return SnapshotSensorView(
         native_value=provider["state"],
@@ -248,6 +258,8 @@ def provider_status_view(
             **_status_attributes(cache),
             "provider_id": provider["provider_id"],
             "provider_name": provider["display_name"],
+            "readiness": readiness,
+            "effective_status": effective_status,
             "freshness": provider["freshness"],
             "product_valid_at": provider["product_valid_at"],
             "provider_received_at": provider["received_at"],

@@ -142,6 +142,7 @@ _PROVIDER_KEYS = frozenset({
     "error",
     "reason_codes",
 })
+_PROVIDER_KEYS_WITH_READINESS = _PROVIDER_KEYS | {"readiness"}
 _STORM_KEYS = frozenset({
     "storm_id",
     "region_id",
@@ -165,6 +166,7 @@ _FRESHNESS_STATES = frozenset({"current", "stale", "unknown"})
 _PROVIDER_STATES = frozenset({
     "operational", "degraded", "offline", "stale", "unknown", "api_required",
 })
+_PROVIDER_READINESS_STATES = frozenset({"ready", "not_ready"})
 _REGION_STATES = frozenset({"current", "degraded", "stale", "unknown"})
 _UI_STORM_STATES = frozenset({
     "active", "developing", "mature", "weakening", "dissipating", "unknown",
@@ -745,12 +747,25 @@ def _validate_target(value: Any, path: str) -> None:
         )
 
 def _validate_provider(value: Any, path: str) -> None:
-    provider = _exact_keys(value, _PROVIDER_KEYS, path)
+    if not isinstance(value, Mapping):
+        raise SnapshotValidationError(f"{path} moet een object zijn")
+    expected = (
+        _PROVIDER_KEYS_WITH_READINESS
+        if "readiness" in value
+        else _PROVIDER_KEYS
+    )
+    provider = _exact_keys(value, expected, path)
     _identifier(provider["provider_id"], f"{path}.provider_id")
     _text(provider["display_name"], f"{path}.display_name", maximum=160)
     state = _token(
         provider["state"], f"{path}.state", allowed=_PROVIDER_STATES
     )
+    if "readiness" in provider:
+        _token(
+            provider["readiness"],
+            f"{path}.readiness",
+            allowed=_PROVIDER_READINESS_STATES,
+        )
     freshness = _token(
         provider["freshness"],
         f"{path}.freshness",
