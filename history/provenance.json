@@ -1,14 +1,14 @@
 {
   "kind": "recovered_archive_source",
   "component": "integration",
-  "version": "1.14.40",
-  "source_id": "96e783b90ceb3e8b43c090c79cdc818398896f1747e44b7d9709c394657a2ce2",
+  "version": "1.14.41",
+  "source_id": "061a3b63e70933b5d5ef4b3d7ddb8fac1fa772d2be15b96c68149c604a094af2",
   "recovered_on": "2026-10-09",
   "files": [
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "9b614cd87229078dc521baff1ee1f5879c2bc047f21f95b9b9c29a5afd754b09",
+      "sha256": "03a26c9a674d18494ed555855fa5ecb96fc1e1ccb41103eb5f7df9a6ab7a946f",
       "size": 268460
     },
     {
@@ -20,7 +20,7 @@
     {
       "path": "const.py",
       "mode": 420,
-      "sha256": "a7591288983b34dd6bdcb2808d7f2b243e74a74d9f61e89fcf26227b227b0e35",
+      "sha256": "81235330512e1405d12db206aaa58471afc190c8ec1c4daf6f26fc24721b46a8",
       "size": 2461
     },
     {
@@ -416,7 +416,7 @@
     {
       "path": "manifest.json",
       "mode": 420,
-      "sha256": "b650607312a99092236f48d9a25bb008abe73649107f382a0ce78162ca97f644",
+      "sha256": "d3a26359ceb912070696d99ea12dbbd8bd423c5608e21dd481675d4cd479e90c",
       "size": 467
     },
     {
@@ -710,16 +710,16 @@
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_v3_v1.14.40_deploy.zip",
-      "archive_sha256": "29e82b710cf460ed831fb2e952fb18b66bdea63b42468ab96a0e837b7c219885",
+      "filename": "storm_tracker_v3_v1.14.41_deploy.zip",
+      "archive_sha256": "b10dec6998e68bfe67bea47daec1fccdff2ca7eed0e013a49b1f372e24ce09f6",
       "bytes": 674528,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.40_worker_v1.17.41_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.41_worker_v1.17.42_evidence.json",
           "archive_and_source_match": true
         },
         {
-          "manifest": "storm_tracker_release_v1.14.40_worker_v1.17.41_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.41_worker_v1.17.42_evidence.json",
           "archive_and_source_match": true
         }
       ]
