@@ -86,6 +86,24 @@ UNITED_KINGDOM_AND_IRELAND = CoverageBox(
     west=-12.0,
     east=4.0,
 )
+EUMETSAT_MTG_DISK = CoverageBox(
+    south=-70.0,
+    north=70.0,
+    west=-70.0,
+    east=70.0,
+)
+GOES18_DISK = CoverageBox(
+    south=-65.0,
+    north=65.0,
+    west=-180.0,
+    east=-55.0,
+)
+GOES19_DISK = CoverageBox(
+    south=-65.0,
+    north=65.0,
+    west=-140.0,
+    east=20.0,
+)
 
 
 PROVIDERS: tuple[ThinProviderSpec, ...] = (
@@ -105,6 +123,9 @@ PROVIDERS: tuple[ThinProviderSpec, ...] = (
     ThinProviderSpec("netatmo", "ground_observation", 300.0, None),
     ThinProviderSpec("wunderground", "ground_observation", 300.0, None),
     ThinProviderSpec("blitzortung", "lightning_events", 30.0, None),
+    ThinProviderSpec("eumetsat_li", "mtg_li", 60.0, EUMETSAT_MTG_DISK),
+    ThinProviderSpec("goes18_glm", "glm_l2", 120.0, GOES18_DISK),
+    ThinProviderSpec("goes19_glm", "glm_l2", 120.0, GOES19_DISK),
     ThinProviderSpec("rainviewer", "visual", 300.0, None),
     ThinProviderSpec("aemet_radar", "radar_composite", 300.0, SPAIN),
     ThinProviderSpec(

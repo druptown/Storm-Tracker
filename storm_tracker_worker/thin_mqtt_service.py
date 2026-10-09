@@ -18,6 +18,7 @@ from .thin_operational_runtime import (
     ThinOperationalRuntime,
 )
 from .thin_blitzortung import ThinBlitzortungFeed
+from .thin_satellite_adapters import EumetsatLightningAdapter, GoesGlmAdapter
 from .thin_ground_station_runtime import GroundStationRuntime
 from .thin_postgis import ThinPostGISSettings, ThinPostGISWriter
 from .thin_provider_adapters import (
@@ -476,6 +477,9 @@ def _build_provider_adapters(fetcher: Any) -> dict[str, Any]:
         ),
         "wunderground": WundergroundAdapter(),
         "blitzortung": blitzortung,
+        "eumetsat_li": EumetsatLightningAdapter(),
+        "goes18_glm": GoesGlmAdapter(18),
+        "goes19_glm": GoesGlmAdapter(19),
         "rainviewer": RainViewerRadarAdapter(),
     }
 
