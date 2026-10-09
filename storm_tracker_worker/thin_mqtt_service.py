@@ -11,6 +11,7 @@ import threading
 import time
 from typing import Any
 
+from . import __version__ as WORKER_VERSION
 from .protocol import decode, encode, envelope, job_payload, topic
 from .thin_operational_runtime import (
     MAX_GEOJSON_PAYLOAD_BYTES,
@@ -38,7 +39,6 @@ from .tracking_core.operational_snapshot import encode_control_envelope
 
 
 _LOGGER = logging.getLogger(__name__)
-WORKER_VERSION = "1.18.27"
 
 
 class ThinMqttService:
