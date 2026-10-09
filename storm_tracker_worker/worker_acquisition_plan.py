@@ -1155,14 +1155,19 @@ def _build_intents(
             and not snapshot.settings.model_guidance_enabled
         ):
             continue
-        selected = (
-            regions
-            if collector_scope == COLLECTOR_SCOPE_ALL_SOURCES
-            else _coverage_regions(definition, regions)
-        )
+        # ``all_sources`` widens the source *classes* admitted for collection
+        # (notably model guidance), never their geographic coverage.  A
+        # country- or bbox-scoped provider must remain absent until at least
+        # one current target falls inside its declared catalog scope.
+        selected = _coverage_regions(definition, regions)
         scopes: list[tuple[str, tuple[AcquisitionRegion, ...]]] = []
         if definition.scope_mode == "global":
-            scopes.append(("global", regions))
+            # A globally deduplicated request may still describe a
+            # geographically bounded catalog (for example the ItaliaMeteo
+            # historical catalog).  Deduplication controls request count; it
+            # must not bypass the source's country/bbox applicability.
+            if selected:
+                scopes.append(("global", selected))
         elif definition.scope_mode in {"coverage", "satellite"}:
             if selected:
                 scopes.append((f"coverage:{definition.coverage_id}", selected))
