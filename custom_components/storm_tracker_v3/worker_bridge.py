@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import gzip
+import hashlib
 import json
 import logging
 import math
@@ -76,6 +77,159 @@ _PRESERVE_LIVENESS_SNAPSHOT = (
     "_operational_snapshot_preserve_liveness_transition"
 )
 _AWAITING_METEOROLOGICAL_EVIDENCE = "awaiting_meteorological_evidence"
+
+_PASSAGE_V2_KEYS = frozenset({
+    "forecast_issue_id", "passage_id", "target_id", "passage_system_id",
+    "cell_id", "provider_id", "interval_ordinal", "status", "entry_at",
+    "exit_at", "entry_bracket", "exit_bracket", "left_censored",
+    "right_censored", "coverage_censored", "method",
+    "predicted_mean_intensity_mm_h", "predicted_peak_intensity_mm_h",
+    "quantity", "unit", "policy_label", "validation_label",
+    "scenario_outcomes", "provenance",
+})
+_PASSAGE_STATES_V2 = frozenset({
+    "candidate", "confirmed", "coasting", "current", "ended",
+    "cancelled", "indeterminate",
+})
+
+
+def _legacy_passage_id(prefix: str, *parts: Any) -> str:
+    digest = hashlib.sha256(
+        json.dumps(parts, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    return f"{prefix}:{digest}"
+
+
+def _normalize_operational_passages(value: Any) -> dict[str, Any]:
+    """Accept rollout schema 1 but keep only strict schema 2 in HA state."""
+
+    if not isinstance(value, dict):
+        raise ValueError("ongeldig passagecontract")
+    evaluated_at = value.get("evaluated_at")
+    if (
+        isinstance(evaluated_at, bool)
+        or not isinstance(evaluated_at, (int, float))
+        or not math.isfinite(float(evaluated_at))
+    ):
+        raise ValueError("ongeldige passage-evaluatietijd")
+    items = value.get("items")
+    overflow = value.get("overflow_count")
+    if (
+        not isinstance(items, list) or len(items) > 256
+        or type(overflow) is not int or overflow < 0
+    ):
+        raise ValueError("ongeldige passage-items")
+    if value.get("schema_version") == 1:
+        normalized = []
+        for ordinal, item in enumerate(items):
+            if not isinstance(item, dict):
+                raise ValueError("ongeldig schema-1 passage-item")
+            target_id = str(item.get("target_id", ""))
+            cell_id = str(item.get("cell_id", ""))
+            issue_id = _legacy_passage_id(
+                "forecast-issue", target_id, evaluated_at,
+            )
+            normalized.append({
+                "forecast_issue_id": issue_id,
+                "passage_id": _legacy_passage_id(
+                    "passage", issue_id, cell_id, ordinal,
+                ),
+                "target_id": target_id,
+                "passage_system_id": cell_id,
+                "cell_id": cell_id,
+                "provider_id": str(item.get("provider_id", "")),
+                "interval_ordinal": ordinal,
+                "status": "candidate",
+                "entry_at": item.get("entry_at"),
+                "exit_at": item.get("exit_at"),
+                "entry_bracket": None,
+                "exit_bracket": None,
+                "left_censored": False,
+                "right_censored": bool(item.get("horizon_clipped")),
+                "coverage_censored": False,
+                "method": str(item.get("method", "legacy")),
+                "predicted_mean_intensity_mm_h": item.get(
+                    "predicted_intensity_mm_h"
+                ),
+                "predicted_peak_intensity_mm_h": None,
+                "quantity": None,
+                "unit": None,
+                "policy_label": "legacy_rollout_compatibility",
+                "validation_label": "unvalidated",
+                "scenario_outcomes": [],
+                "provenance": {
+                    "algorithm_version": "legacy-schema-1",
+                    "policy_version": "legacy-schema-1",
+                    "field_fingerprint": None,
+                },
+            })
+        return {
+            "schema_version": 2,
+            "evaluated_at": float(evaluated_at),
+            "items": normalized,
+            "overflow_count": overflow,
+        }
+    if value.get("schema_version") != 2:
+        raise ValueError("ongeldig passagecontract")
+    if frozenset(value) != {
+        "schema_version", "evaluated_at", "items", "overflow_count",
+    }:
+        raise ValueError("ongeldige schema-2 contractkeys")
+    for item in items:
+        if not isinstance(item, dict) or frozenset(item) != _PASSAGE_V2_KEYS:
+            raise ValueError("ongeldige schema-2 passagekeys")
+        if item["status"] not in _PASSAGE_STATES_V2:
+            raise ValueError("ongeldige passagestatus")
+        if (
+            type(item["interval_ordinal"]) is not int
+            or item["interval_ordinal"] < 0
+            or not all(
+                isinstance(item[key], str) and item[key]
+                for key in (
+                    "forecast_issue_id", "passage_id", "target_id",
+                    "passage_system_id", "cell_id", "provider_id", "method",
+                    "policy_label", "validation_label",
+                )
+            )
+        ):
+            raise ValueError("ongeldige passage-identiteit")
+        for key in ("entry_at", "exit_at"):
+            timestamp = item[key]
+            if timestamp is not None and (
+                isinstance(timestamp, bool)
+                or not isinstance(timestamp, (int, float))
+                or not math.isfinite(float(timestamp))
+            ):
+                raise ValueError("ongeldige passagetijd")
+        for key in ("left_censored", "right_censored", "coverage_censored"):
+            if type(item[key]) is not bool:
+                raise ValueError("ongeldige passagecensoring")
+        for key in ("entry_bracket", "exit_bracket"):
+            bracket = item[key]
+            if bracket is not None and (
+                not isinstance(bracket, dict)
+                or frozenset(bracket) != {"lower_at", "upper_at"}
+                or float(bracket["upper_at"]) < float(bracket["lower_at"])
+            ):
+                raise ValueError("ongeldige passagebracket")
+        if not isinstance(item["scenario_outcomes"], list):
+            raise ValueError("ongeldige scenario-uitkomsten")
+        for scenario in item["scenario_outcomes"]:
+            if not isinstance(scenario, dict) or frozenset(scenario) != {
+                "scenario_id", "outcome", "entry_bracket", "exit_bracket",
+            }:
+                raise ValueError("ongeldige scenario-uitkomst")
+        provenance = item["provenance"]
+        if not isinstance(provenance, dict) or frozenset(provenance) != {
+            "algorithm_version", "policy_version", "field_fingerprint",
+        }:
+            raise ValueError("ongeldige passageprovenance")
+    return {
+        "schema_version": 2,
+        "evaluated_at": float(evaluated_at),
+        "items": [dict(item) for item in items],
+        "overflow_count": overflow,
+    }
 
 
 def _on_hass_event_loop(hass: HomeAssistant) -> bool:
@@ -1294,7 +1448,7 @@ async def async_setup_worker_bridge(hass: HomeAssistant) -> None:
     }
     data["worker_pending_jobs"] = {}
     data["worker_passages"] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "evaluated_at": None,
         "items": [],
         "overflow_count": 0,
@@ -1354,7 +1508,10 @@ async def async_setup_worker_bridge(hass: HomeAssistant) -> None:
                 or not isinstance(metadata, dict)
             ):
                 raise ValueError("ongeldige operationele GeoJSON")
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as err:
+        except (
+            UnicodeDecodeError, json.JSONDecodeError, ValueError,
+            TypeError, OverflowError,
+        ) as err:
             _LOGGER.warning("Ongeldige operationele workerkaart: %s", err)
             return
         data["geojson_worker_collection"] = collection
@@ -1396,7 +1553,9 @@ async def async_setup_worker_bridge(hass: HomeAssistant) -> None:
             if not isinstance(raw, str) or len(raw.encode("utf-8")) > maximum_bytes:
                 raise ValueError("resultaatpayload overschrijdt de grens")
             value = json.loads(raw)
-            if not isinstance(value, dict) or value.get("schema_version") != 1:
+            if data_key == "worker_passages":
+                value = _normalize_operational_passages(value)
+            elif not isinstance(value, dict) or value.get("schema_version") != 1:
                 raise ValueError("ongeldig resultaatcontract")
             if maximum_items is not None:
                 items = value.get("items")

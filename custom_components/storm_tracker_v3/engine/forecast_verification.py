@@ -621,6 +621,11 @@ def build_passage_verification_case(
     source = truth_context.labels.source(label.source_id)
     if source is None or source.is_external_truth_eligible is not True:
         raise ValueError("passage label source is not independent external truth")
+    source_tokens = " ".join(str(getattr(source, name, "")).lower() for name in (
+        "source_id", "producer", "methodology_id",
+    ))
+    if "storm_tracker" in source_tokens or "fusion:" in source_tokens:
+        raise ValueError("internal fused radar is not independent external truth")
     payload = label.payload
     if payload.tracker_id != forecast.tracker_id:
         raise ValueError("passage label/candidate tracker mismatch")
