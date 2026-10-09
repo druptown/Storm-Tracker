@@ -1,14 +1,14 @@
 {
   "kind": "recovered_archive_source",
   "component": "integration",
-  "version": "1.14.56",
-  "source_id": "6b558a7cbbaae22557ea1504ae260d3a110ad9d63f5326af40815a903e420e1d",
+  "version": "1.14.57",
+  "source_id": "2da72da963ceb73128d257f33876b569750a15778a9e8cbaf2e94ffd30f750e8",
   "recovered_on": "2026-10-09",
   "files": [
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "1855b9b5cc362c81955e6080246cde4cec72baa278bb6fcd6bd28c6971431e75",
+      "sha256": "d2a585489f797f1cc38582005d801f6e5fbf76c50142263accdf8502700fde6a",
       "size": 268460
     },
     {
@@ -20,7 +20,7 @@
     {
       "path": "const.py",
       "mode": 420,
-      "sha256": "8755a9ab53bb5facbe10c0edbf961e27f22ddb79f33d4394c6d4d740c76dd1cc",
+      "sha256": "299e974a6e67740bcbdfc50186cc4c10a8310412f598c449ecf97cb263e2e992",
       "size": 2461
     },
     {
@@ -416,7 +416,7 @@
     {
       "path": "manifest.json",
       "mode": 420,
-      "sha256": "da4969a46387a04063b302fc49772fe382974cd9bd0b36cfd0e2933b04553dc5",
+      "sha256": "98d4539b0924694695fa2149645ad0b37a7a2b0389d81ff0b54ac703c5183fa7",
       "size": 467
     },
     {
@@ -710,16 +710,16 @@
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_v3_v1.14.56_deploy.zip",
-      "archive_sha256": "7b78357503f3efbf83b9d0c21c106d1ae41d5bd6f12d15e1f7db84314c30917a",
-      "bytes": 676611,
+      "filename": "storm_tracker_v3_v1.14.57_deploy.zip",
+      "archive_sha256": "b5c92ff28672bd33beed7af5d2c169529d0936c73d0e0761339c04327b71c3c6",
+      "bytes": 676612,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.56_worker_v1.17.56_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.57_worker_v1.17.58_evidence.json",
           "archive_and_source_match": true
         },
         {
-          "manifest": "storm_tracker_release_v1.14.56_worker_v1.17.56_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.57_worker_v1.17.58_evidence.json",
           "archive_and_source_match": true
         }
       ]
