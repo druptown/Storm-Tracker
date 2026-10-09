@@ -75,6 +75,28 @@ SNAPSHOT_PROVIDER_IDS = {
     "meteolux": "validation.meteolux.location",
 }
 
+# Prefer the geographically specific national product while regional raster
+# fusion is still running.  Composite/global products remain fallbacks.  This
+# ordering is only used for the temporary single-source view; completed fusion
+# keeps its own per-pixel quality weighting.
+NATIVE_RADAR_FALLBACK_PRIORITY = (
+    "kmi_radqpe",
+    "kmi_appv4",
+    "knmi_radar",
+    "dwd_radolan",
+    "aemet_radar",
+    "meteofrance_radar",
+    "dpc_radar",
+    "metoffice_radar",
+    "opera_radar",
+    "rainviewer",
+)
+_NATIVE_RADAR_FALLBACK_RANK = {
+    provider_id: rank
+    for rank, provider_id in enumerate(NATIVE_RADAR_FALLBACK_PRIORITY)
+}
+_PROVIDER_SPEC_BY_ID = {spec.provider_id: spec for spec in PROVIDERS}
+
 
 @dataclass(frozen=True, slots=True)
 class _RadarTrackingScope:
@@ -88,6 +110,121 @@ class _RadarTrackingScope:
 
 def _snapshot_provider_id(provider_id: str) -> str:
     return SNAPSHOT_PROVIDER_IDS.get(provider_id, provider_id)
+
+
+def _select_native_radar_fallback(
+    fields: list[Any],
+    region: Any,
+) -> Any | None:
+    """Select one current, geographically applicable native radar field."""
+
+    applicable = []
+    for field in fields:
+        spec = _PROVIDER_SPEC_BY_ID.get(field.provider_id)
+        if spec is not None and not any(
+            spec.applies_to(target) for target in region.targets
+        ):
+            continue
+        applicable.append(field)
+    if not applicable:
+        return None
+    return min(
+        applicable,
+        key=lambda field: (
+            _NATIVE_RADAR_FALLBACK_RANK.get(
+                field.provider_id,
+                len(_NATIVE_RADAR_FALLBACK_RANK),
+            ),
+            -float(field.observed_at),
+            field.provider_id,
+        ),
+    )
+
+
+def _distance_km(
+    latitude_a: float,
+    longitude_a: float,
+    latitude_b: float,
+    longitude_b: float,
+) -> float:
+    latitude_a_rad = math.radians(latitude_a)
+    latitude_b_rad = math.radians(latitude_b)
+    latitude_delta = latitude_b_rad - latitude_a_rad
+    longitude_delta = math.radians(longitude_b - longitude_a)
+    value = math.sin(latitude_delta / 2.0) ** 2 + (
+        math.cos(latitude_a_rad)
+        * math.cos(latitude_b_rad)
+        * math.sin(longitude_delta / 2.0) ** 2
+    )
+    return 6371.0088 * 2.0 * math.atan2(
+        math.sqrt(value), math.sqrt(max(0.0, 1.0 - value)),
+    )
+
+
+def _select_spatial_radar_fallback_observations(
+    fusion: FusionCycle,
+    region_plan: ThinRegionPlan,
+) -> tuple[Any, ...]:
+    """Retain at most one raw radar provider inside each active region."""
+
+    spatial = tuple(
+        observation
+        for observation in fusion.observations
+        if observation.target_id is None
+        and observation.kind in {
+            ObservationKind.RAIN_RATE,
+            ObservationKind.REFLECTIVITY,
+            ObservationKind.RADAR_LEVEL,
+        }
+        and observation.metadata.get("role") != "model_guidance"
+    )
+    selected: dict[tuple[Any, ...], Any] = {}
+    for region in region_plan.regions:
+        radius_km = float(
+            region.radar_analysis_radius_km
+            or region.observation_radius_km
+        )
+        candidates = tuple(
+            observation
+            for observation in spatial
+            if _distance_km(
+                region.center_latitude,
+                region.center_longitude,
+                observation.latitude,
+                observation.longitude,
+            ) <= radius_km
+            and (
+                (spec := _PROVIDER_SPEC_BY_ID.get(observation.provider_id))
+                is None
+                or any(spec.applies_to(target) for target in region.targets)
+            )
+        )
+        if not candidates:
+            continue
+        provider_id = min(
+            {observation.provider_id for observation in candidates},
+            key=lambda candidate: (
+                _NATIVE_RADAR_FALLBACK_RANK.get(
+                    candidate,
+                    len(_NATIVE_RADAR_FALLBACK_RANK),
+                ),
+                candidate,
+            ),
+        )
+        for observation in candidates:
+            if observation.provider_id != provider_id:
+                continue
+            key = (
+                observation.provider_id,
+                observation.product_id,
+                observation.observed_at,
+                observation.latitude,
+                observation.longitude,
+                observation.kind.value,
+                observation.value,
+            )
+            selected[key] = observation
+    return tuple(selected[key] for key in sorted(selected))
 
 
 def _sample_regional_radar_at_target(
@@ -713,21 +850,19 @@ class ThinOperationalRuntime:
                         continue
                     current_native_fields.append(field)
             # Regional fusion normally replaces this path on the next tick.
-            # While it is pending, track only the freshest native field once
-            # per region instead of re-segmenting every national raster for
-            # every target. All fields remain available below for direct
-            # rain-at-target fallback.
-            if (
-                current_native_fields
-                and region.region_id not in pending_region_ids
-            ):
-                track_field(
-                    max(current_native_fields, key=lambda item: item.observed_at),
-                    region,
-                )
-            native_fallback_fields[region.region_id] = tuple(
-                current_native_fields
+            # Until then use exactly one geographically applicable provider.
+            # Passing every raw provider through here creates visibly stacked,
+            # contradictory polygons and can also make target status disagree
+            # with the displayed layer.
+            selected_native = _select_native_radar_fallback(
+                current_native_fields,
+                region,
             )
+            if selected_native is not None:
+                track_field(selected_native, region)
+                native_fallback_fields[region.region_id] = (selected_native,)
+            else:
+                native_fallback_fields[region.region_id] = ()
 
             if regional is not None:
                 regional_summaries.append(regional.summary)
@@ -752,10 +887,26 @@ class ThinOperationalRuntime:
             region_plan,
             native_fallback_fields,
         )
-        nowcast = self._nowcast.advance(
-            fusion,
-            tracked_cells=tuple({item.cell_id: item for item in tracked_cells}.values()) or None,
-        )
+        tracked_cell_values = tuple({
+            item.cell_id: item for item in tracked_cells
+        }.values())
+        if tracked_cell_values:
+            nowcast = self._nowcast.advance(
+                fusion,
+                tracked_cells=tracked_cell_values,
+            )
+        else:
+            # Some visual providers only expose bounded polygons, not a native
+            # raster.  Keep that compatibility path, but select one provider
+            # per region before ThinNowcastRuntime sees the observations.
+            fallback_observations = _select_spatial_radar_fallback_observations(
+                fusion,
+                region_plan,
+            )
+            nowcast = self._nowcast.advance(
+                replace(fusion, observations=fallback_observations),
+                tracked_cells=None if fallback_observations else (),
+            )
         validations = self._ground_validation.advance(
             nowcast.target_passages,
             fusion.observations,
