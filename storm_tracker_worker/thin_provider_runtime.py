@@ -53,6 +53,11 @@ class ThinProviderRuntime:
         self._failure_counts: dict[str, int] = {}
         self._backoff_until: dict[str, float] = {}
 
+    @property
+    def ready_provider_ids(self) -> frozenset[str]:
+        """Providers with a complete adapter, independent of current scope."""
+        return frozenset(self._adapters)
+
     async def _one(self, request: ThinProviderRequest) -> ProviderResult:
         attempted_at = float(self._clock())
         adapter = self._adapters.get(request.provider_id)

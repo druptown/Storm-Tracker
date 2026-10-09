@@ -9,7 +9,12 @@ import time
 from typing import Any, Callable, Mapping
 
 from .desired_state import METHOD, DesiredState, DesiredStateConflict, parse_desired_state
-from .thin_fusion import MAX_FUSION_AGE_SECONDS, FusionCycle, fuse_observations
+from .thin_fusion import (
+    MAX_FUSION_AGE_SECONDS,
+    PROVIDER_FUSION_AGE_SECONDS,
+    FusionCycle,
+    fuse_observations,
+)
 from .thin_ground_validation import ForecastValidation, GroundValidationRuntime
 from .thin_nowcast import StormCell, ThinNowcast, ThinNowcastRuntime
 from .thin_observation import ObservationKind
@@ -24,7 +29,9 @@ SNAPSHOT_TTL_SECONDS = 120.0
 MAX_GEOJSON_PAYLOAD_BYTES = 900_000
 SNAPSHOT_REVISION_EPOCH_SECONDS = 1_577_836_800  # 2020-01-01T00:00:00Z
 SNAPSHOT_PROVIDER_IDS = {
-    "kmi_radar": "radar.kmi.radqpe_native",
+    "kmi_aws": "ground.kmi.aws_10min",
+    "kmi_appv4": "radar.kmi.appv4_visual",
+    "kmi_radqpe": "radar.kmi.radqpe_native",
     "opera_radar": "radar.opera.dbzh",
     "knmi_radar": "radar.knmi.rtcor",
     "dwd_radolan": "radar.dwd.radolan_rv",
@@ -33,7 +40,13 @@ SNAPSHOT_PROVIDER_IDS = {
     "netatmo": "ground.netatmo.region",
     "wunderground": "ground.wunderground.station",
     "blitzortung": "lightning.blitzortung.event_ingress",
+    "rainviewer": "radar.rainviewer.visual",
     "aemet_radar": "radar.aemet.composite",
+    "meteofrance_radar": "radar.meteofrance.dpradar",
+    "dpc_radar": "radar.dpc.sri",
+    "italiameteo_icon2i": "model.openmeteo.italiameteo_icon2i.region",
+    "geosphere": "validation.geosphere.location",
+    "metoffice_radar": "radar.metoffice.uk_rate",
 }
 
 
@@ -359,7 +372,11 @@ class ThinOperationalRuntime:
         # native frames must keep their tracks between fetches.
         for result in self._latest_provider_results.values():
             for field in result.radar_fields:
-                if not 0 <= fusion.evaluated_at - field.observed_at <= MAX_FUSION_AGE_SECONDS:
+                field_maximum_age = PROVIDER_FUSION_AGE_SECONDS.get(
+                    field.provider_id,
+                    MAX_FUSION_AGE_SECONDS,
+                )
+                if not 0 <= fusion.evaluated_at - field.observed_at <= field_maximum_age:
                     continue
                 for target in active_targets:
                     try:
@@ -634,15 +651,38 @@ class ThinOperationalRuntime:
         )
 
         provider_items: list[dict[str, Any]] = []
+        ready_provider_ids = frozenset(
+            getattr(self._providers, "ready_provider_ids", ())
+        )
         for spec in PROVIDERS:
             applicable = any(
                 spec.applies_to(target) for target in region_plan.targets
             )
             if not applicable:
+                provider_items.append({
+                    "provider_id": _snapshot_provider_id(spec.provider_id),
+                    "display_name": spec.provider_id.replace("_", " ").title(),
+                    "readiness": (
+                        "ready"
+                        if spec.provider_id in ready_provider_ids
+                        else "not_ready"
+                    ),
+                    "state": "unknown",
+                    "freshness": "unknown",
+                    "product_valid_at": None,
+                    "received_at": None,
+                    "error": None,
+                    "reason_codes": ["target_outside_catalog_scope"],
+                })
                 continue
             result = self._latest_provider_results.get(spec.provider_id)
             if result is None:
-                provider_state, readiness, freshness = "unknown", "not_ready", "unknown"
+                provider_state, freshness = "unknown", "unknown"
+                readiness = (
+                    "ready"
+                    if spec.provider_id in ready_provider_ids
+                    else "not_ready"
+                )
                 valid_at = receipt = error = None
                 reasons = ["not_attempted"]
             else:

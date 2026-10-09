@@ -6,18 +6,21 @@ import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import hashlib
 import io
 import json
 import logging
 import math
 import os
 from pathlib import Path
+import re
 import tarfile
 import time
 import xml.etree.ElementTree as ET
 from typing import Any, Mapping, Protocol
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
+from zoneinfo import ZoneInfo
 
 from .thin_observation import (
     MAX_GROUND_SOURCE_AGE_SECONDS,
@@ -33,6 +36,10 @@ _LOGGER = logging.getLogger(__name__)
 
 
 OPEN_METEO_ENDPOINT = "https://api.open-meteo.com/v1/forecast"
+GEOSPHERE_INCA_ENDPOINT = (
+    "https://dataset.api.hub.geosphere.at/v1/timeseries/forecast/"
+    "nowcast-v1-15min-1km"
+)
 OPERA_LISTING_ENDPOINT = "https://s3.waw3-1.cloudferro.com/openradar-24h/"
 OPERA_OBJECT_BASE = "https://s3.waw3-1.cloudferro.com/openradar-24h"
 METAR_ENDPOINT = "https://aviationweather.gov/api/data/metar"
@@ -41,11 +48,61 @@ NETATMO_TOKEN_ENDPOINT = "https://api.netatmo.com/oauth2/token"
 WUNDERGROUND_CURRENT_ENDPOINT = (
     "https://api.weather.com/v2/pws/observations/current"
 )
+KMI_APPV4_ENDPOINT = "https://app.meteo.be/services/appv4/"
+KMI_AWS_ENDPOINT = "https://opendata.meteo.be/geoserver/ows"
+KMI_APPV4_USER_AGENT = "be.meteo.app"
+KMI_APPV4_MAX_FRAME_AGE_SECONDS = 20 * 60
+KMI_APPV4_ALLOWED_IMAGE_HOSTS = frozenset({"app.meteo.be", "cdn.meteo.be"})
+KMI_APPV4_BOUNDS = (-2.5, 46.5, 10.5, 53.0)
+_KMI_APPV4_REQUEST_SECRET = "r9EnW374jkJ9acc"
 MAX_OPERA_SPATIAL_CELLS = 64
 DWD_RADOLAN_ENDPOINT = (
     "https://opendata.dwd.de/weather/radar/composite/rv/"
     "composite_rv_LATEST.tar"
 )
+AEMET_RADAR_ENDPOINT = "https://www.aemet.es/es/api-eltiempo/radar/download/compo"
+AEMET_MAX_ARCHIVE_BYTES = 10 * 1024 * 1024
+AEMET_MAX_FRAME_BYTES = 5 * 1024 * 1024
+AEMET_MAX_FRAME_AGE_SECONDS = 45 * 60
+AEMET_FRAME_RE = re.compile(r"^down_radw(\d{12})_4326\.tif$")
+METEOFRANCE_RADAR_ENDPOINT = (
+    "https://public-api.meteofrance.fr/public/DPRadar/v1/mosaiques/"
+    "METROPOLE/observations/LAME_D_EAU/produit?maille=500"
+)
+METEOFRANCE_TOKEN_ENDPOINT = "https://portail-api.meteofrance.fr/token"
+METEOFRANCE_MAX_FRAME_BYTES = 40 * 1024 * 1024
+METEOFRANCE_MAX_FRAME_AGE_SECONDS = 25 * 60
+DPC_CATALOG_ENDPOINT = (
+    "https://radar-api.protezionecivile.it/findLastProductByType"
+)
+DPC_DOWNLOAD_ENDPOINT = "https://radar-api.protezionecivile.it/downloadProduct"
+DPC_ORIGIN = "https://radar.protezionecivile.it"
+DPC_MAX_FRAME_BYTES = 25 * 1024 * 1024
+DPC_MAX_FRAME_AGE_SECONDS = 20 * 60
+DPC_CRS = (
+    "+proj=lcc +lat_0=42 +lon_0=12.5 +lat_1=42 +lat_2=42 "
+    "+x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+)
+METOFFICE_BUCKET_ENDPOINT = (
+    "https://met-office-radar-obs-data.s3.eu-west-2.amazonaws.com/"
+)
+METOFFICE_KEY_RE = re.compile(
+    r"^radar/\d{4}/\d{2}/\d{2}/"
+    r"\d{12}_ODIM_ng_radar_rainrate_composite_1km_UK\.h5$"
+)
+METOFFICE_MAX_LISTING_BYTES = 2 * 1024 * 1024
+METOFFICE_MAX_FRAME_BYTES = 20 * 1024 * 1024
+METOFFICE_MAX_FRAME_AGE_SECONDS = 20 * 60
+METOFFICE_MINIMUM_X_METRES = -405_000.0
+METOFFICE_MAXIMUM_Y_METRES = 1_550_000.0
+RAINVIEWER_MANIFEST_ENDPOINT = (
+    "https://api.rainviewer.com/public/weather-maps.json"
+)
+RAINVIEWER_TILE_HOST = "https://tilecache.rainviewer.com"
+RAINVIEWER_ZOOM = 5
+RAINVIEWER_TILE_SIZE = 256
+RAINVIEWER_MAX_FRAME_AGE_SECONDS = 20 * 60
+RAINVIEWER_MIN_ALPHA = 130
 KNMI_OPEN_DATA_BASE = (
     "https://api.dataplatform.knmi.nl/open-data/v1/datasets/"
     "nl_rdr_data_rtcor_5m/versions/1.0"
@@ -132,6 +189,24 @@ class ProviderBlocked(RuntimeError):
         self.ready = bool(ready)
 
 
+class BlockedProviderAdapter:
+    """Complete provider wiring whose external data contract is unavailable."""
+
+    def __init__(self, reason_code: str = "external_access_required") -> None:
+        self._reason_code = str(reason_code)
+
+    async def fetch(self, request, fetcher, *, now):
+        raise ProviderBlocked(self._reason_code)
+
+
+class HttpStatusError(RuntimeError):
+    """HTTP response status preserved for provider-specific semantics."""
+
+    def __init__(self, status_code: int) -> None:
+        self.status_code = int(status_code)
+        super().__init__(f"http_status_{self.status_code}")
+
+
 class AsyncHttpFetcher(Protocol):
     async def get_json(
         self,
@@ -156,6 +231,7 @@ class AsyncHttpFetcher(Protocol):
         url: str,
         *,
         data: Mapping[str, str] | None = None,
+        json_data: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
         maximum_bytes: int | None = None,
     ) -> Any: ...
@@ -190,7 +266,7 @@ class AioHttpFetcher:
                 timeout=timeout,
             ) as response:
                 if response.status != 200:
-                    raise RuntimeError(f"http_status_{response.status}")
+                    raise HttpStatusError(response.status)
                 declared = response.headers.get("Content-Length")
                 if declared is not None and int(declared) > limit:
                     raise ValueError("response_too_large")
@@ -229,6 +305,7 @@ class AioHttpFetcher:
         url: str,
         *,
         data: Mapping[str, str] | None = None,
+        json_data: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
         maximum_bytes: int | None = None,
     ) -> Any:
@@ -242,6 +319,7 @@ class AioHttpFetcher:
             async with session.post(
                 url,
                 data=None if data is None else dict(data),
+                json=None if json_data is None else dict(json_data),
                 headers=request_headers,
                 timeout=timeout,
             ) as response:
@@ -537,6 +615,370 @@ class OpenMeteoAdapter:
         return tuple(observations)
 
 
+def _kmi_aws_validated(properties: Mapping[str, Any], field: str) -> bool:
+    raw = properties.get("qc_flags")
+    if not isinstance(raw, str):
+        return False
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    validated = parsed.get("validated") if isinstance(parsed, Mapping) else None
+    return (
+        isinstance(validated, Mapping)
+        and validated.get(field.upper()) is True
+    )
+
+
+class KmiAwsAdapter:
+    """Public KMI ten-minute automatic weather-station observations."""
+
+    def __init__(self, *, endpoint: str = KMI_AWS_ENDPOINT) -> None:
+        self._endpoint = endpoint
+
+    async def fetch(
+        self,
+        request: ThinProviderRequest,
+        fetcher: AsyncHttpFetcher,
+        *,
+        now: float,
+    ) -> tuple[NormalizedObservation, ...]:
+        payload = await fetcher.get_json(
+            self._endpoint,
+            params={
+                "service": "WFS",
+                "version": "2.0.0",
+                "request": "GetFeature",
+                "typeNames": "aws:aws_10min",
+                "count": "512",
+                "outputFormat": "application/json",
+                "sortBy": "timestamp D",
+                "srsName": "EPSG:4326",
+            },
+            maximum_bytes=32 * 1024 * 1024,
+        )
+        if not isinstance(payload, Mapping):
+            raise ValueError("kmi_aws_payload_invalid")
+        features = payload.get("features")
+        if not isinstance(features, list) or len(features) > 512:
+            raise ValueError("kmi_aws_features_invalid")
+
+        newest_by_station: dict[str, tuple[float, Mapping[str, Any], float, float]] = {}
+        for feature in features:
+            if not isinstance(feature, Mapping):
+                continue
+            properties = feature.get("properties")
+            geometry = feature.get("geometry")
+            if not isinstance(properties, Mapping) or not isinstance(geometry, Mapping):
+                continue
+            coordinates = geometry.get("coordinates")
+            if (
+                geometry.get("type") != "Point"
+                or not isinstance(coordinates, list)
+                or len(coordinates) < 2
+            ):
+                continue
+            longitude = _optional_float(coordinates[0])
+            latitude = _optional_float(coordinates[1])
+            station_value = properties.get("code")
+            if latitude is None or longitude is None or station_value is None:
+                continue
+            station_id = str(station_value).strip()
+            if not station_id:
+                continue
+            observed_at = _parse_timestamp(properties.get("timestamp"), fallback=now)
+            previous = newest_by_station.get(station_id)
+            if previous is None or observed_at > previous[0]:
+                newest_by_station[station_id] = (
+                    observed_at,
+                    properties,
+                    latitude,
+                    longitude,
+                )
+
+        observations: list[NormalizedObservation] = []
+        measurement_specs = (
+            ("temp_dry_shelter_avg", ObservationKind.TEMPERATURE, "°C", "temperature"),
+            ("pressure", ObservationKind.PRESSURE, "hPa", "pressure"),
+            ("wind_speed_10m", ObservationKind.WIND_SPEED, "m/s", "wind_speed"),
+            ("wind_gusts_speed", ObservationKind.WIND_SPEED, "m/s", "wind_gust"),
+            ("wind_direction", ObservationKind.WIND_DIRECTION, "°", "wind_direction"),
+            (
+                "humidity_rel_shelter_avg",
+                ObservationKind.RELATIVE_HUMIDITY,
+                "%",
+                "relative_humidity",
+            ),
+        )
+        for station_id, (
+            observed_at,
+            properties,
+            latitude,
+            longitude,
+        ) in newest_by_station.items():
+            for target in request.targets:
+                if _haversine_km(
+                    latitude,
+                    longitude,
+                    target.latitude,
+                    target.longitude,
+                ) > target.observation_radius_km:
+                    continue
+                common = {
+                    "provider_id": request.provider_id,
+                    "product_id": request.product_id,
+                    "target_id": target.target_id,
+                    "observed_at": observed_at,
+                    "received_at": now,
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "geometry": _point(longitude, latitude),
+                    "maximum_age_seconds": MAX_GROUND_SOURCE_AGE_SECONDS,
+                }
+
+                precipitation = _optional_float(properties.get("precip_quantity"))
+                if precipitation is not None:
+                    quality = (
+                        ObservationQuality.GOOD
+                        if _kmi_aws_validated(properties, "precip_quantity")
+                        else ObservationQuality.UNKNOWN
+                    )
+                    for kind, value, measurement in (
+                        (
+                            ObservationKind.RAIN_ACCUMULATION,
+                            precipitation,
+                            "rain_accumulation_10min",
+                        ),
+                        (
+                            ObservationKind.RAIN_RATE,
+                            precipitation * 6.0,
+                            "rain_rate_10min_equivalent",
+                        ),
+                    ):
+                        observations.append(NormalizedObservation.create(
+                            **common,
+                            kind=kind,
+                            value=value,
+                            unit="mm" if kind is ObservationKind.RAIN_ACCUMULATION else "mm/h",
+                            quality=quality,
+                            metadata={
+                                "station_id": station_id,
+                                "measurement": measurement,
+                                "accumulation_window_seconds": 600,
+                            },
+                        ))
+
+                for field, kind, unit, measurement in measurement_specs:
+                    value = _optional_float(properties.get(field))
+                    if value is None:
+                        continue
+                    observations.append(NormalizedObservation.create(
+                        **common,
+                        kind=kind,
+                        value=value,
+                        unit=unit,
+                        quality=(
+                            ObservationQuality.GOOD
+                            if _kmi_aws_validated(properties, field)
+                            else ObservationQuality.UNKNOWN
+                        ),
+                        metadata={
+                            "station_id": station_id,
+                            "measurement": measurement,
+                        },
+                    ))
+        return tuple(observations)
+
+
+class ItaliaMeteoIcon2iAdapter:
+    """Current target guidance from Open-Meteo's ItaliaMeteo ICON-2I."""
+
+    MODEL_ID = "italia_meteo_arpae_icon_2i"
+    CURRENT_FIELDS = (
+        "precipitation,pressure_msl,wind_speed_10m,"
+        "wind_direction_10m,wind_gusts_10m"
+    )
+
+    def __init__(self, *, endpoint: str = OPEN_METEO_ENDPOINT) -> None:
+        self._endpoint = endpoint
+
+    async def fetch(
+        self,
+        request: ThinProviderRequest,
+        fetcher: AsyncHttpFetcher,
+        *,
+        now: float,
+    ) -> tuple[NormalizedObservation, ...]:
+        targets = request.targets
+        payload = await fetcher.get_json(
+            self._endpoint,
+            params={
+                "latitude": ",".join(f"{item.latitude:.5f}" for item in targets),
+                "longitude": ",".join(f"{item.longitude:.5f}" for item in targets),
+                "models": self.MODEL_ID,
+                "current": self.CURRENT_FIELDS,
+                "timezone": "UTC",
+            },
+            maximum_bytes=2 * 1024 * 1024,
+        )
+        items = payload if isinstance(payload, list) else [payload]
+        if len(items) != len(targets) or not all(
+            isinstance(item, Mapping) for item in items
+        ):
+            raise ValueError("italiameteo_location_count_mismatch")
+
+        observations: list[NormalizedObservation] = []
+        for target, item in zip(targets, items):
+            current = item.get("current")
+            units = item.get("current_units")
+            if not isinstance(current, Mapping) or not isinstance(units, Mapping):
+                raise ValueError("italiameteo_current_missing")
+            expected_units = {
+                "precipitation": "mm",
+                "pressure_msl": "hPa",
+                "wind_speed_10m": "km/h",
+                "wind_direction_10m": "°",
+                "wind_gusts_10m": "km/h",
+            }
+            if any(units.get(key) != unit for key, unit in expected_units.items()):
+                raise ValueError("italiameteo_units_invalid")
+            interval = _optional_float(current.get("interval"))
+            if interval is None or interval <= 0.0 or interval > 3600.0:
+                raise ValueError("italiameteo_interval_invalid")
+            observed_at = _parse_timestamp(current.get("time"), fallback=now)
+            common = {
+                "provider_id": request.provider_id,
+                "product_id": request.product_id,
+                "target_id": target.target_id,
+                "observed_at": observed_at,
+                "received_at": now,
+                "latitude": target.latitude,
+                "longitude": target.longitude,
+                "quality": ObservationQuality.GOOD,
+                "geometry": _point(target.longitude, target.latitude),
+            }
+            precipitation = _optional_float(current.get("precipitation"))
+            if precipitation is not None:
+                observations.append(NormalizedObservation.create(
+                    **common,
+                    kind=ObservationKind.RAIN_RATE,
+                    value=precipitation * 3600.0 / interval,
+                    unit="mm/h",
+                    metadata={
+                        "role": "model_guidance",
+                        "model": self.MODEL_ID,
+                        "measurement": "precipitation_rate",
+                        "source_interval_seconds": interval,
+                    },
+                ))
+            for field, kind, unit in (
+                ("pressure_msl", ObservationKind.PRESSURE, "hPa"),
+                ("wind_speed_10m", ObservationKind.WIND_SPEED, "km/h"),
+                ("wind_gusts_10m", ObservationKind.WIND_SPEED, "km/h"),
+                ("wind_direction_10m", ObservationKind.WIND_DIRECTION, "°"),
+            ):
+                value = _optional_float(current.get(field))
+                if value is None:
+                    continue
+                observations.append(NormalizedObservation.create(
+                    **common,
+                    kind=kind,
+                    value=value,
+                    unit=unit,
+                    metadata={
+                        "role": "model_guidance",
+                        "model": self.MODEL_ID,
+                        "measurement": field,
+                    },
+                ))
+        return tuple(observations)
+
+
+class GeoSphereNowcastAdapter:
+    """GeoSphere Austria INCA 15-minute precipitation guidance."""
+
+    INTERVAL_SECONDS = 15 * 60
+    MAXIMUM_AGE_SECONDS = 90 * 60
+
+    def __init__(self, *, endpoint: str = GEOSPHERE_INCA_ENDPOINT) -> None:
+        self._endpoint = endpoint
+
+    async def fetch(
+        self,
+        request: ThinProviderRequest,
+        fetcher: AsyncHttpFetcher,
+        *,
+        now: float,
+    ) -> tuple[NormalizedObservation, ...]:
+        observations: list[NormalizedObservation] = []
+        for target in request.targets:
+            payload = await fetcher.get_json(
+                self._endpoint,
+                params={
+                    "parameters": "rr",
+                    "lat_lon": f"{target.latitude:.5f},{target.longitude:.5f}",
+                    "output_format": "geojson",
+                },
+                maximum_bytes=4 * 1024 * 1024,
+            )
+            if not isinstance(payload, Mapping):
+                raise ValueError("geosphere_payload_invalid")
+            reference_text = payload.get("reference_time")
+            reference_time = _parse_timestamp(reference_text, fallback=now)
+            timestamps = payload.get("timestamps")
+            features = payload.get("features")
+            if (
+                not isinstance(timestamps, list)
+                or not timestamps
+                or not isinstance(features, list)
+                or len(features) != 1
+                or not isinstance(features[0], Mapping)
+            ):
+                raise ValueError("geosphere_nowcast_missing")
+            properties = features[0].get("properties")
+            parameters = (
+                properties.get("parameters")
+                if isinstance(properties, Mapping)
+                else None
+            )
+            rain = parameters.get("rr") if isinstance(parameters, Mapping) else None
+            values = rain.get("data") if isinstance(rain, Mapping) else None
+            if (
+                not isinstance(values, list)
+                or len(values) != len(timestamps)
+                or rain.get("unit") != "kg m-2"
+            ):
+                raise ValueError("geosphere_precipitation_invalid")
+            first = _optional_float(values[0])
+            if first is None:
+                continue
+            valid_at = timestamps[0]
+            _parse_timestamp(valid_at, fallback=reference_time)
+            observations.append(NormalizedObservation.create(
+                provider_id=request.provider_id,
+                product_id=request.product_id,
+                target_id=target.target_id,
+                kind=ObservationKind.RAIN_RATE,
+                value=first * 3600.0 / self.INTERVAL_SECONDS,
+                unit="mm/h",
+                observed_at=reference_time,
+                received_at=now,
+                latitude=target.latitude,
+                longitude=target.longitude,
+                quality=ObservationQuality.GOOD,
+                geometry=_point(target.longitude, target.latitude),
+                metadata={
+                    "role": "model_location_validation",
+                    "measurement": "precipitation_rate",
+                    "forecast_valid_at": valid_at,
+                    "source_interval_seconds": self.INTERVAL_SECONDS,
+                    "forecast_steps": len(values),
+                },
+                maximum_age_seconds=self.MAXIMUM_AGE_SECONDS,
+            ))
+        return tuple(observations)
+
+
 _KMI_COLORS = (
     ((144, 238, 144), 1),
     ((0, 200, 100), 2),
@@ -547,6 +989,25 @@ _KMI_COLORS = (
     ((255, 0, 0), 7),
     ((180, 0, 180), 8),
 )
+
+
+def _kmi_appv4_key(timestamp: float) -> str:
+    local_date = datetime.fromtimestamp(
+        float(timestamp), ZoneInfo("Europe/Brussels")
+    ).strftime("%d/%m/%Y")
+    material = f"{_KMI_APPV4_REQUEST_SECRET};getForecasts;{local_date}"
+    return hashlib.md5(material.encode("utf-8")).hexdigest()
+
+
+def _kmi_appv4_frame_url(value: Any) -> str:
+    candidate = urljoin(KMI_APPV4_ENDPOINT, str(value or ""))
+    parsed = urlsplit(candidate)
+    if (
+        parsed.scheme != "https"
+        or (parsed.hostname or "").lower() not in KMI_APPV4_ALLOWED_IMAGE_HOSTS
+    ):
+        raise ValueError("kmi_frame_url_invalid")
+    return candidate
 
 
 def _kmi_level(pixel: tuple[int, int, int, int]) -> int:
@@ -569,19 +1030,25 @@ class KmiRadarAdapter:
     def __init__(
         self,
         *,
-        forecast_url: str | None = None,
-        access_enabled: bool = False,
+        forecast_url: str = KMI_APPV4_ENDPOINT,
         headers: Mapping[str, str] | None = None,
     ) -> None:
         self._forecast_url = forecast_url
-        self._access_enabled = access_enabled
-        self._headers = dict(headers or {})
+        self._headers = {
+            "User-Agent": KMI_APPV4_USER_AGENT,
+            **dict(headers or {}),
+        }
 
     async def fetch(self, request, fetcher, *, now):
-        if not self._access_enabled or not self._forecast_url:
-            raise ProviderBlocked("external_access_required")
+        representative = request.targets[0]
         payload = await fetcher.get_json(
             self._forecast_url,
+            params={
+                "s": "getForecasts",
+                "k": _kmi_appv4_key(now),
+                "lat": f"{representative.latitude:.5f}",
+                "long": f"{representative.longitude:.5f}",
+            },
             headers=self._headers,
             maximum_bytes=4 * 1024 * 1024,
         )
@@ -591,22 +1058,42 @@ class KmiRadarAdapter:
         frames = [item for item in sequence if isinstance(item, Mapping) and item.get("uri")]
         if not frames:
             raise ValueError("kmi_frame_missing")
-        latest = max(frames, key=lambda item: _parse_timestamp(item.get("time"), fallback=0.0))
+        historical = [
+            item
+            for item in frames
+            if _parse_timestamp(item.get("time"), fallback=now) <= now + 30.0
+        ]
+        if not historical:
+            raise ValueError("kmi_observation_frame_missing")
+        latest = max(
+            historical,
+            key=lambda item: _parse_timestamp(item.get("time"), fallback=0.0),
+        )
         observed_at = _parse_timestamp(latest.get("time"), fallback=now)
+        frame_url = _kmi_appv4_frame_url(latest["uri"])
         image_bytes = await fetcher.get_bytes(
-            str(latest["uri"]),
+            frame_url,
             headers=self._headers,
             maximum_bytes=8 * 1024 * 1024,
         )
         from PIL import Image
+        import numpy as np
 
         image = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
         width, height = image.size
+        rgba = np.asarray(image, dtype=np.uint8)
+        rgb = rgba[..., :3].astype(np.int32)
+        palette = np.asarray([item[0] for item in _KMI_COLORS], dtype=np.int32)
+        distances = np.sum((rgb[..., None, :] - palette) ** 2, axis=3)
+        nearest = np.argmin(distances, axis=2)
+        minimum = np.min(distances, axis=2)
+        levels = (nearest + 1).astype(np.uint8)
+        levels[(rgba[..., 3] < 128) | (minimum >= 20_000)] = 0
         observations: list[NormalizedObservation] = []
         for target in request.targets:
             column = min(width - 1, max(0, int((target.longitude + 2.5) / 13.0 * width)))
             row = min(height - 1, max(0, int((53.0 - target.latitude) / 6.5 * height)))
-            level = _kmi_level(image.getpixel((column, row)))
+            level = int(levels[row, column])
             if level <= 0:
                 continue
             observations.append(NormalizedObservation.create(
@@ -620,10 +1107,117 @@ class KmiRadarAdapter:
                 received_at=now,
                 latitude=target.latitude,
                 longitude=target.longitude,
-                quality=ObservationQuality.GOOD,
+                quality=ObservationQuality.SUSPECT,
                 geometry=_point(target.longitude, target.latitude),
-                metadata={"pixel_column": column, "pixel_row": row},
+                metadata={
+                    "pixel_column": column,
+                    "pixel_row": row,
+                    "operational_use": "visualisation_only",
+                    "quantitative_semantics_eligible": False,
+                    "semantic_class": "categorical_visualisation",
+                },
+                maximum_age_seconds=KMI_APPV4_MAX_FRAME_AGE_SECONDS,
             ))
+
+        left, bottom, right, top = KMI_APPV4_BOUNDS
+        roi = np.zeros(levels.shape, dtype=bool)
+        for target in request.targets:
+            latitude_radius = target.observation_radius_km / 110.574
+            longitude_radius = target.observation_radius_km / max(
+                1.0,
+                111.320 * math.cos(math.radians(target.latitude)),
+            )
+            column0 = max(0, math.floor((target.longitude - longitude_radius - left) / (right - left) * width))
+            column1 = min(width, math.ceil((target.longitude + longitude_radius - left) / (right - left) * width))
+            row0 = max(0, math.floor((top - target.latitude - latitude_radius) / (top - bottom) * height))
+            row1 = min(height, math.ceil((top - target.latitude + latitude_radius) / (top - bottom) * height))
+            if row0 < row1 and column0 < column1:
+                roi[row0:row1, column0:column1] = True
+
+        pixel_height_km = (top - bottom) * 110.574 / height
+        mean_latitude = sum(item.latitude for item in request.targets) / len(request.targets)
+        pixel_width_km = (
+            (right - left) * 111.320 * math.cos(math.radians(mean_latitude)) / width
+        )
+        block_rows = max(1, int(round(5.0 / pixel_height_km)))
+        block_columns = max(1, int(round(5.0 / max(pixel_width_km, 0.1))))
+        source = np.where(roi, levels, 0)
+        padded_height = math.ceil(height / block_rows) * block_rows
+        padded_width = math.ceil(width / block_columns) * block_columns
+        padded = np.zeros((padded_height, padded_width), dtype=np.uint8)
+        padded[:height, :width] = source
+        pooled = padded.reshape(
+            padded_height // block_rows,
+            block_rows,
+            padded_width // block_columns,
+            block_columns,
+        ).max(axis=(1, 3))
+        wet = pooled > 0
+        visited = np.zeros(wet.shape, dtype=bool)
+        spatial: list[NormalizedObservation] = []
+        for seed_row, seed_column in np.argwhere(wet):
+            seed_row, seed_column = int(seed_row), int(seed_column)
+            if visited[seed_row, seed_column]:
+                continue
+            stack = [(seed_row, seed_column)]
+            visited[seed_row, seed_column] = True
+            component: list[tuple[int, int]] = []
+            while stack:
+                component_row, component_column = stack.pop()
+                component.append((component_row, component_column))
+                for delta_row, delta_column in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    neighbour_row = component_row + delta_row
+                    neighbour_column = component_column + delta_column
+                    if (
+                        0 <= neighbour_row < wet.shape[0]
+                        and 0 <= neighbour_column < wet.shape[1]
+                        and wet[neighbour_row, neighbour_column]
+                        and not visited[neighbour_row, neighbour_column]
+                    ):
+                        visited[neighbour_row, neighbour_column] = True
+                        stack.append((neighbour_row, neighbour_column))
+
+            def corner_to_lonlat(grid_row: int, grid_column: int) -> tuple[float, float]:
+                pixel_row = min(height, grid_row * block_rows)
+                pixel_column = min(width, grid_column * block_columns)
+                return (
+                    left + pixel_column / width * (right - left),
+                    top - pixel_row / height * (top - bottom),
+                )
+
+            rows = [item[0] for item in component]
+            columns = [item[1] for item in component]
+            center_row = (min(rows) + max(rows) + 1) * block_rows / 2.0
+            center_column = (min(columns) + max(columns) + 1) * block_columns / 2.0
+            longitude = left + center_column / width * (right - left)
+            latitude = top - center_row / height * (top - bottom)
+            spatial.append(NormalizedObservation.create(
+                provider_id=request.provider_id,
+                product_id=request.product_id,
+                target_id=None,
+                kind=ObservationKind.RADAR_LEVEL,
+                value=float(max(pooled[row, column] for row, column in component)),
+                unit="level",
+                observed_at=observed_at,
+                received_at=now,
+                latitude=latitude,
+                longitude=longitude,
+                quality=ObservationQuality.SUSPECT,
+                geometry=_component_polygon_geometry(component, corner_to_lonlat),
+                metadata={
+                    "spatial_cell": True,
+                    "block_count": len(component),
+                    "operational_use": "visualisation_only",
+                    "quantitative_semantics_eligible": False,
+                    "semantic_class": "categorical_visualisation",
+                },
+                maximum_age_seconds=KMI_APPV4_MAX_FRAME_AGE_SECONDS,
+            ))
+        observations.extend(sorted(
+            spatial,
+            key=lambda item: (item.value, item.metadata.get("block_count", 0)),
+            reverse=True,
+        )[:MAX_NATIONAL_RADAR_SPATIAL_CELLS])
         return tuple(observations)
 
 
@@ -910,6 +1504,903 @@ class OperaRadarAdapter:
         return _decode_opera_targets(data, request, received_at=now)
 
 
+def _latest_aemet_frame(payload: bytes) -> tuple[bytes, float]:
+    try:
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+            candidates = []
+            for member in archive.getmembers():
+                match = AEMET_FRAME_RE.fullmatch(member.name)
+                if (
+                    match is not None
+                    and member.isfile()
+                    and 0 < member.size <= AEMET_MAX_FRAME_BYTES
+                ):
+                    candidates.append((match.group(1), member))
+            if not candidates:
+                raise ValueError("aemet_current_frame_missing")
+            stamp, member = max(candidates, key=lambda item: item[0])
+            stream = archive.extractfile(member)
+            if stream is None:
+                raise ValueError("aemet_frame_missing")
+            frame = stream.read(AEMET_MAX_FRAME_BYTES + 1)
+            if len(frame) != member.size or len(frame) > AEMET_MAX_FRAME_BYTES:
+                raise ValueError("aemet_frame_size_invalid")
+    except tarfile.TarError as error:
+        raise ValueError("aemet_archive_invalid") from error
+    observed_at = datetime.strptime(stamp, "%Y%m%d%H%M").replace(
+        tzinfo=timezone.utc,
+    ).timestamp()
+    return frame, observed_at
+
+
+def _decode_aemet_radar(
+    frame: bytes,
+    request: ThinProviderRequest,
+    *,
+    observed_at: float,
+    received_at: float,
+) -> tuple[NormalizedObservation, ...]:
+    import numpy as np
+    from PIL import Image
+
+    if received_at - observed_at > AEMET_MAX_FRAME_AGE_SECONDS:
+        raise ValueError("aemet_frame_stale")
+    if observed_at - received_at > 5 * 60:
+        raise ValueError("aemet_frame_time_invalid")
+    with Image.open(io.BytesIO(frame)) as image:
+        values = np.asarray(image, dtype=np.uint8)
+        tie = image.tag_v2.get(33922)
+        scale = image.tag_v2.get(33550)
+    if values.ndim != 2:
+        raise ValueError("aemet_grid_invalid")
+    if not tie or len(tie) < 6 or not scale or len(scale) < 2:
+        raise ValueError("aemet_georeference_missing")
+    longitude_left = float(tie[3])
+    latitude_top = float(tie[4])
+    longitude_scale = abs(float(scale[0]))
+    latitude_scale = abs(float(scale[1]))
+    if not all(
+        math.isfinite(value) and value > 0.0
+        for value in (longitude_scale, latitude_scale)
+    ):
+        raise ValueError("aemet_georeference_invalid")
+
+    valid = (values >= 1) & (values <= 8)
+
+    def lonlat_to_pixel(longitude: float, latitude: float) -> tuple[float, float]:
+        return (
+            (latitude_top - latitude) / latitude_scale,
+            (longitude - longitude_left) / longitude_scale,
+        )
+
+    def pixel_to_lonlat(row: float, column: float) -> tuple[float, float]:
+        return (
+            longitude_left + column * longitude_scale,
+            latitude_top - row * latitude_scale,
+        )
+
+    approximate_latitude = latitude_top - values.shape[0] * latitude_scale / 2.0
+    level_observations = _national_radar_observations(
+        values.astype(float),
+        valid,
+        request,
+        observed_at=observed_at,
+        received_at=received_at,
+        lonlat_to_pixel=lonlat_to_pixel,
+        pixel_to_lonlat=pixel_to_lonlat,
+        pixel_width_m=(
+            longitude_scale
+            * 111_320.0
+            * max(0.1, abs(math.cos(math.radians(approximate_latitude))))
+        ),
+        pixel_height_m=latitude_scale * 110_574.0,
+        maximum_age_seconds=AEMET_MAX_FRAME_AGE_SECONDS,
+    )
+    return tuple(
+        NormalizedObservation.create(
+            provider_id=item.provider_id,
+            product_id=item.product_id,
+            target_id=item.target_id,
+            kind=ObservationKind.RADAR_LEVEL,
+            value=item.value,
+            unit="level",
+            observed_at=item.observed_at,
+            received_at=item.received_at,
+            latitude=item.latitude,
+            longitude=item.longitude,
+            quality=item.quality,
+            geometry=item.geometry,
+            metadata={**dict(item.metadata), "aemet_visual_class": int(item.value)},
+            maximum_age_seconds=AEMET_MAX_FRAME_AGE_SECONDS,
+        )
+        for item in level_observations
+    )
+
+
+class AemetRadarAdapter:
+    def __init__(self, *, endpoint: str = AEMET_RADAR_ENDPOINT) -> None:
+        self._endpoint = endpoint
+
+    async def fetch(self, request, fetcher, *, now):
+        payload = await fetcher.get_bytes(
+            self._endpoint,
+            maximum_bytes=AEMET_MAX_ARCHIVE_BYTES,
+        )
+        frame, observed_at = _latest_aemet_frame(payload)
+        async with _RADAR_DECODE_SEMAPHORE:
+            return await asyncio.to_thread(
+                _decode_aemet_radar,
+                frame,
+                request,
+                observed_at=observed_at,
+                received_at=now,
+            )
+
+
+def _decode_meteofrance_radar(
+    payload: bytes,
+    request: ThinProviderRequest,
+    *,
+    received_at: float,
+) -> ThinAdapterResult:
+    import h5py
+    import numpy as np
+    from pyproj import CRS, Transformer
+
+    with h5py.File(io.BytesIO(payload), "r") as product:
+        data = np.asarray(product["dataset1/data1/data"])
+        data_what = product["dataset1/data1/what"].attrs
+        frame_what = product["dataset1/what"].attrs
+        where = product["where"].attrs
+        observed_at = datetime.strptime(
+            _attribute_text(frame_what["enddate"])
+            + _attribute_text(frame_what["endtime"]),
+            "%Y%m%d%H%M%S",
+        ).replace(tzinfo=timezone.utc).timestamp()
+        if received_at - observed_at > METEOFRANCE_MAX_FRAME_AGE_SECONDS:
+            raise ValueError("meteofrance_frame_stale")
+        if observed_at - received_at > 5 * 60:
+            raise ValueError("meteofrance_frame_time_invalid")
+
+        raw = data.astype(np.float64)
+        decoded = (
+            raw * _attribute_number(data_what["gain"])
+            + _attribute_number(data_what["offset"])
+        )
+        rain_rate = decoded * 12.0
+        valid = (
+            (raw != _attribute_number(data_what["nodata"]))
+            & (raw != _attribute_number(data_what["undetect"]))
+            & np.isfinite(rain_rate)
+            & (rain_rate >= 0.1)
+            & (rain_rate < 500.0)
+        )
+        crs = _attribute_text(where["projdef"])
+        xscale = _attribute_number(where["xscale"])
+        yscale = _attribute_number(where["yscale"])
+        if xscale <= 0.0 or yscale <= 0.0:
+            raise ValueError("meteofrance_resolution_invalid")
+        projected = CRS.from_user_input(crs)
+        to_lonlat = Transformer.from_crs(
+            projected,
+            "EPSG:4326",
+            always_xy=True,
+        )
+        from_lonlat = Transformer.from_crs(
+            "EPSG:4326",
+            projected,
+            always_xy=True,
+        )
+        if "UL_lon" in where and "UL_lat" in where:
+            origin_x, origin_y = from_lonlat.transform(
+                _attribute_number(where["UL_lon"]),
+                _attribute_number(where["UL_lat"]),
+            )
+        else:
+            origin_x = 0.0
+            origin_y = data.shape[0] * yscale
+
+    def lonlat_to_pixel(longitude: float, latitude: float) -> tuple[float, float]:
+        x, y = from_lonlat.transform(longitude, latitude)
+        return ((origin_y - y) / yscale, (x - origin_x) / xscale)
+
+    def pixel_to_lonlat(row: float, column: float) -> tuple[float, float]:
+        longitude, latitude = to_lonlat.transform(
+            origin_x + column * xscale,
+            origin_y - row * yscale,
+        )
+        return float(longitude), float(latitude)
+
+    observations = _national_radar_observations(
+        rain_rate,
+        valid,
+        request,
+        observed_at=observed_at,
+        received_at=received_at,
+        lonlat_to_pixel=lonlat_to_pixel,
+        pixel_to_lonlat=pixel_to_lonlat,
+        pixel_width_m=xscale,
+        pixel_height_m=yscale,
+        maximum_age_seconds=METEOFRANCE_MAX_FRAME_AGE_SECONDS,
+    )
+    field = ThinRadarField(
+        provider_id=request.provider_id,
+        product_id=request.product_id,
+        observed_at=observed_at,
+        crs=crs,
+        origin_x_m=float(origin_x),
+        origin_y_m=float(origin_y),
+        x_resolution_m=xscale,
+        y_resolution_m=yscale,
+        rain_rate_mm_h=np.where(valid, rain_rate, 0.0),
+        valid_mask=valid,
+    )
+    return ThinAdapterResult(observations, (field,))
+
+
+class MeteoFranceRadarAdapter:
+    def __init__(
+        self,
+        *,
+        access_token: str | None = None,
+        access_token_provider: Callable[[], Awaitable[str | None]] | None = None,
+        endpoint: str = METEOFRANCE_RADAR_ENDPOINT,
+    ) -> None:
+        self._access_token = access_token or os.getenv(
+            "STV3_METEOFRANCE_API_TOKEN"
+        )
+        self._access_token_provider = access_token_provider
+        self._endpoint = endpoint
+
+    async def fetch(self, request, fetcher, *, now):
+        access_token = None
+        if self._access_token_provider is not None:
+            access_token = await self._access_token_provider()
+        if not access_token:
+            access_token = self._access_token
+        if not access_token:
+            raise ProviderBlocked("external_access_required")
+        payload = await fetcher.get_bytes(
+            self._endpoint,
+            headers={"Authorization": f"Bearer {access_token}"},
+            maximum_bytes=METEOFRANCE_MAX_FRAME_BYTES,
+        )
+        async with _RADAR_DECODE_SEMAPHORE:
+            return await asyncio.to_thread(
+                _decode_meteofrance_radar,
+                payload,
+                request,
+                received_at=now,
+            )
+
+
+def _decode_dpc_sri(
+    payload: bytes,
+    request: ThinProviderRequest,
+    *,
+    observed_at: float,
+    received_at: float,
+) -> ThinAdapterResult:
+    import numpy as np
+    from PIL import Image
+    from pyproj import Transformer
+
+    if received_at - observed_at > DPC_MAX_FRAME_AGE_SECONDS:
+        raise ValueError("dpc_frame_stale")
+    if observed_at - received_at > 5 * 60:
+        raise ValueError("dpc_frame_time_invalid")
+    with Image.open(io.BytesIO(payload)) as image:
+        values = np.asarray(image, dtype=np.float32)
+        tie = image.tag_v2.get(33922)
+        scale = image.tag_v2.get(33550)
+    if values.ndim != 2:
+        raise ValueError("dpc_grid_invalid")
+    if not tie or len(tie) < 6 or not scale or len(scale) < 2:
+        raise ValueError("dpc_georeference_missing")
+    origin_x = float(tie[3])
+    origin_y = float(tie[4])
+    xscale = abs(float(scale[0]))
+    yscale = abs(float(scale[1]))
+    if not all(
+        math.isfinite(value) and value > 0.0
+        for value in (xscale, yscale)
+    ):
+        raise ValueError("dpc_georeference_invalid")
+
+    rain_rate = values.astype(np.float64)
+    valid = np.isfinite(rain_rate) & (rain_rate >= 0.0) & (rain_rate < 500.0)
+    to_lonlat = Transformer.from_crs(DPC_CRS, "EPSG:4326", always_xy=True)
+    from_lonlat = Transformer.from_crs("EPSG:4326", DPC_CRS, always_xy=True)
+
+    def lonlat_to_pixel(longitude: float, latitude: float) -> tuple[float, float]:
+        x, y = from_lonlat.transform(longitude, latitude)
+        return ((origin_y - y) / yscale, (x - origin_x) / xscale)
+
+    def pixel_to_lonlat(row: float, column: float) -> tuple[float, float]:
+        longitude, latitude = to_lonlat.transform(
+            origin_x + column * xscale,
+            origin_y - row * yscale,
+        )
+        return float(longitude), float(latitude)
+
+    observations = _national_radar_observations(
+        rain_rate,
+        valid,
+        request,
+        observed_at=observed_at,
+        received_at=received_at,
+        lonlat_to_pixel=lonlat_to_pixel,
+        pixel_to_lonlat=pixel_to_lonlat,
+        pixel_width_m=xscale,
+        pixel_height_m=yscale,
+        maximum_age_seconds=DPC_MAX_FRAME_AGE_SECONDS,
+    )
+    field = ThinRadarField(
+        provider_id=request.provider_id,
+        product_id=request.product_id,
+        observed_at=observed_at,
+        crs=DPC_CRS,
+        origin_x_m=origin_x,
+        origin_y_m=origin_y,
+        x_resolution_m=xscale,
+        y_resolution_m=yscale,
+        rain_rate_mm_h=np.where(valid, rain_rate, 0.0),
+        valid_mask=valid,
+    )
+    return ThinAdapterResult(observations, (field,))
+
+
+class DpcRadarAdapter:
+    def __init__(
+        self,
+        *,
+        catalog_endpoint: str = DPC_CATALOG_ENDPOINT,
+        download_endpoint: str = DPC_DOWNLOAD_ENDPOINT,
+    ) -> None:
+        self._catalog_endpoint = catalog_endpoint
+        self._download_endpoint = download_endpoint
+
+    async def fetch(self, request, fetcher, *, now):
+        headers = {"Origin": DPC_ORIGIN}
+        catalog = await fetcher.get_json(
+            self._catalog_endpoint,
+            params={"type": "SRI"},
+            headers=headers,
+            maximum_bytes=2 * 1024 * 1024,
+        )
+        products = catalog.get("lastProducts") if isinstance(catalog, Mapping) else None
+        if not isinstance(products, list) or not products:
+            raise ValueError("dpc_current_frame_missing")
+        product = products[0]
+        if not isinstance(product, Mapping) or product.get("productType") not in (None, "SRI"):
+            raise ValueError("dpc_catalog_invalid")
+        try:
+            timestamp_ms = int(product["time"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("dpc_catalog_invalid") from error
+        observed_at = timestamp_ms / 1_000.0
+        if now - observed_at > DPC_MAX_FRAME_AGE_SECONDS:
+            raise ValueError("dpc_frame_stale")
+        if observed_at - now > 5 * 60:
+            raise ValueError("dpc_frame_time_invalid")
+
+        descriptor = await fetcher.post_json(
+            self._download_endpoint,
+            json_data={"productType": "SRI", "productDate": timestamp_ms},
+            headers=headers,
+            maximum_bytes=2 * 1024 * 1024,
+        )
+        download_url = descriptor.get("url") if isinstance(descriptor, Mapping) else None
+        if not isinstance(download_url, str) or not download_url:
+            raise ValueError("dpc_download_url_missing")
+        payload = await fetcher.get_bytes(
+            download_url,
+            headers={},
+            maximum_bytes=DPC_MAX_FRAME_BYTES,
+        )
+        async with _RADAR_DECODE_SEMAPHORE:
+            return await asyncio.to_thread(
+                _decode_dpc_sri,
+                payload,
+                request,
+                observed_at=observed_at,
+                received_at=now,
+            )
+
+
+def _latest_metoffice_key(payloads: Sequence[bytes]) -> str:
+    keys: list[str] = []
+    for payload in payloads:
+        try:
+            root = ET.fromstring(payload)
+        except ET.ParseError as error:
+            raise ValueError("metoffice_listing_invalid") from error
+        for node in root.iter():
+            if not node.tag.endswith("Key") or not node.text:
+                continue
+            key = node.text.strip()
+            if METOFFICE_KEY_RE.fullmatch(key):
+                keys.append(key)
+    if not keys:
+        raise ValueError("metoffice_current_frame_missing")
+    return max(keys)
+
+
+def _decode_metoffice_rate(
+    payload: bytes,
+    request: ThinProviderRequest,
+    *,
+    received_at: float,
+) -> ThinAdapterResult:
+    import h5py
+    import numpy as np
+    from pyproj import CRS, Transformer
+
+    with h5py.File(io.BytesIO(payload), "r") as root:
+        radar = np.asarray(root["dataset1/data1/data"], dtype=np.float64)
+        data_what = root["dataset1/data1/what"].attrs
+        frame_what = root["what"].attrs
+        where = root["where"].attrs
+        if _attribute_text(data_what["quantity"]) != "RATE":
+            raise ValueError("metoffice_quantity_invalid")
+        observed_at = datetime.strptime(
+            _attribute_text(frame_what["date"])
+            + _attribute_text(frame_what["time"]),
+            "%Y%m%d%H%M%S",
+        ).replace(tzinfo=timezone.utc).timestamp()
+        if received_at - observed_at > METOFFICE_MAX_FRAME_AGE_SECONDS:
+            raise ValueError("metoffice_frame_stale")
+        if observed_at - received_at > 5 * 60:
+            raise ValueError("metoffice_frame_time_invalid")
+        xscale = _attribute_number(where["xscale"])
+        yscale = _attribute_number(where["yscale"])
+        if (
+            xscale <= 0.0
+            or yscale <= 0.0
+            or int(_attribute_number(where["xsize"])) != radar.shape[1]
+            or int(_attribute_number(where["ysize"])) != radar.shape[0]
+        ):
+            raise ValueError("metoffice_grid_invalid")
+        gain = _attribute_number(data_what["gain"])
+        offset = _attribute_number(data_what["offset"])
+        nodata = _attribute_number(data_what["nodata"])
+        undetect = _attribute_number(data_what["undetect"])
+        rain_rate = radar * gain + offset
+        valid = (
+            np.isfinite(radar)
+            & (radar != nodata)
+            & (radar != undetect)
+            & np.isfinite(rain_rate)
+            & (rain_rate >= 0.0)
+            & (rain_rate < 500.0)
+        )
+        crs = _attribute_text(where["projdef"])
+
+    projected = CRS.from_user_input(crs)
+    to_lonlat = Transformer.from_crs(projected, "EPSG:4326", always_xy=True)
+    from_lonlat = Transformer.from_crs("EPSG:4326", projected, always_xy=True)
+
+    def lonlat_to_pixel(longitude: float, latitude: float) -> tuple[float, float]:
+        x, y = from_lonlat.transform(longitude, latitude)
+        return (
+            (METOFFICE_MAXIMUM_Y_METRES - y) / yscale,
+            (x - METOFFICE_MINIMUM_X_METRES) / xscale,
+        )
+
+    def pixel_to_lonlat(row: float, column: float) -> tuple[float, float]:
+        longitude, latitude = to_lonlat.transform(
+            METOFFICE_MINIMUM_X_METRES + column * xscale,
+            METOFFICE_MAXIMUM_Y_METRES - row * yscale,
+        )
+        return float(longitude), float(latitude)
+
+    observations = _national_radar_observations(
+        rain_rate,
+        valid,
+        request,
+        observed_at=observed_at,
+        received_at=received_at,
+        lonlat_to_pixel=lonlat_to_pixel,
+        pixel_to_lonlat=pixel_to_lonlat,
+        pixel_width_m=xscale,
+        pixel_height_m=yscale,
+        maximum_age_seconds=METOFFICE_MAX_FRAME_AGE_SECONDS,
+    )
+    field = ThinRadarField(
+        provider_id=request.provider_id,
+        product_id=request.product_id,
+        observed_at=observed_at,
+        crs=crs,
+        origin_x_m=METOFFICE_MINIMUM_X_METRES,
+        origin_y_m=METOFFICE_MAXIMUM_Y_METRES,
+        x_resolution_m=xscale,
+        y_resolution_m=yscale,
+        rain_rate_mm_h=np.where(valid, rain_rate, 0.0),
+        valid_mask=valid,
+    )
+    return ThinAdapterResult(observations, (field,))
+
+
+class MetOfficeRadarAdapter:
+    def __init__(self, *, bucket_endpoint: str = METOFFICE_BUCKET_ENDPOINT) -> None:
+        self._bucket_endpoint = bucket_endpoint.rstrip("/") + "/"
+
+    async def fetch(self, request, fetcher, *, now):
+        moment = datetime.fromtimestamp(now, tz=timezone.utc)
+        listings = []
+        for day in (moment, moment - timedelta(days=1)):
+            listings.append(await fetcher.get_bytes(
+                self._bucket_endpoint,
+                params={
+                    "list-type": "2",
+                    "prefix": day.strftime("radar/%Y/%m/%d/"),
+                },
+                maximum_bytes=METOFFICE_MAX_LISTING_BYTES,
+            ))
+        key = _latest_metoffice_key(listings)
+        payload = await fetcher.get_bytes(
+            self._bucket_endpoint + key,
+            maximum_bytes=METOFFICE_MAX_FRAME_BYTES,
+        )
+        async with _RADAR_DECODE_SEMAPHORE:
+            return await asyncio.to_thread(
+                _decode_metoffice_rate,
+                payload,
+                request,
+                received_at=now,
+            )
+
+
+def _rainviewer_global_pixel(
+    latitude: float,
+    longitude: float,
+) -> tuple[float, float]:
+    count = 2**RAINVIEWER_ZOOM
+    clipped_latitude = max(-85.05112878, min(85.05112878, latitude))
+    latitude_radians = math.radians(clipped_latitude)
+    tile_x = (longitude + 180.0) / 360.0 * count
+    tile_y = (
+        1.0
+        - math.log(
+            math.tan(latitude_radians) + 1.0 / math.cos(latitude_radians)
+        ) / math.pi
+    ) / 2.0 * count
+    return tile_x * RAINVIEWER_TILE_SIZE, tile_y * RAINVIEWER_TILE_SIZE
+
+
+def _rainviewer_tile_bounds(
+    tile_x: int,
+    tile_y: int,
+) -> tuple[float, float, float, float]:
+    count = 2**RAINVIEWER_ZOOM
+    longitude_left = tile_x / count * 360.0 - 180.0
+    longitude_right = (tile_x + 1) / count * 360.0 - 180.0
+    latitude_top = math.degrees(math.atan(math.sinh(
+        math.pi * (1.0 - 2.0 * tile_y / count)
+    )))
+    latitude_bottom = math.degrees(math.atan(math.sinh(
+        math.pi * (1.0 - 2.0 * (tile_y + 1) / count)
+    )))
+    return latitude_top, latitude_bottom, longitude_left, longitude_right
+
+
+def _decode_rainviewer_levels(payload: bytes) -> Any:
+    from PIL import Image
+    import numpy as np
+
+    with Image.open(io.BytesIO(payload)) as image:
+        rgba = np.asarray(image.convert("RGBA"), dtype=np.uint8)
+    if rgba.shape != (RAINVIEWER_TILE_SIZE, RAINVIEWER_TILE_SIZE, 4):
+        raise ValueError("rainviewer_tile_dimensions_invalid")
+    rgb = rgba[..., :3].astype(np.int16)
+    alpha = rgba[..., 3]
+    levels = np.zeros(alpha.shape, dtype=np.uint8)
+    translucent = (alpha >= RAINVIEWER_MIN_ALPHA) & (alpha < 255)
+    estimated_dbz = 8 + np.rint(
+        (alpha.astype(np.float64) - RAINVIEWER_MIN_ALPHA) * 6.0 / 60.0
+    ).astype(np.int16)
+    levels[translucent] = np.clip(
+        1 + np.maximum(0, estimated_dbz[translucent] - 8) // 6,
+        1,
+        2,
+    )
+    saturation = np.max(rgb, axis=2) - np.min(rgb, axis=2)
+    maximum = np.max(rgb, axis=2)
+    minimum = np.min(rgb, axis=2)
+    coloured = (alpha == 255) & ((saturation >= 40) | (minimum >= 240))
+    levels[coloured & (maximum < 250)] = 3
+    levels[coloured & (maximum >= 250)] = 8
+    return levels
+
+
+def _rainviewer_tile_observations(
+    levels: Any,
+    request: ThinProviderRequest,
+    *,
+    tile_x: int,
+    tile_y: int,
+    observed_at: float,
+    received_at: float,
+) -> tuple[NormalizedObservation, ...]:
+    import numpy as np
+
+    top, bottom, left, right = _rainviewer_tile_bounds(tile_x, tile_y)
+    roi = np.zeros(levels.shape, dtype=bool)
+    for target in request.targets:
+        latitude_radius = target.observation_radius_km / 110.574
+        longitude_radius = target.observation_radius_km / max(
+            1.0,
+            111.320 * math.cos(math.radians(target.latitude)),
+        )
+        north = min(85.05112878, target.latitude + latitude_radius)
+        south = max(-85.05112878, target.latitude - latitude_radius)
+        west = target.longitude - longitude_radius
+        east = target.longitude + longitude_radius
+        if east < left or west > right or north < bottom or south > top:
+            continue
+        west_px, north_px = _rainviewer_global_pixel(north, max(left, west))
+        east_px, south_px = _rainviewer_global_pixel(south, min(right, east))
+        local_left = tile_x * RAINVIEWER_TILE_SIZE
+        local_top = tile_y * RAINVIEWER_TILE_SIZE
+        column0 = max(0, min(RAINVIEWER_TILE_SIZE, math.floor(west_px - local_left)))
+        column1 = max(0, min(RAINVIEWER_TILE_SIZE, math.ceil(east_px - local_left)))
+        row0 = max(0, min(RAINVIEWER_TILE_SIZE, math.floor(north_px - local_top)))
+        row1 = max(0, min(RAINVIEWER_TILE_SIZE, math.ceil(south_px - local_top)))
+        if row0 < row1 and column0 < column1:
+            roi[row0:row1, column0:column1] = True
+
+    mean_latitude = (top + bottom) / 2.0
+    pixel_height_km = abs(top - bottom) * 110.574 / RAINVIEWER_TILE_SIZE
+    pixel_width_km = (
+        abs(right - left)
+        * 111.320
+        * max(0.1, abs(math.cos(math.radians(mean_latitude))))
+        / RAINVIEWER_TILE_SIZE
+    )
+    block_rows = max(1, int(round(5.0 / max(pixel_height_km, 0.1))))
+    block_columns = max(1, int(round(5.0 / max(pixel_width_km, 0.1))))
+    source = np.where(roi, levels, 0)
+    padded_height = math.ceil(source.shape[0] / block_rows) * block_rows
+    padded_width = math.ceil(source.shape[1] / block_columns) * block_columns
+    padded = np.zeros((padded_height, padded_width), dtype=np.uint8)
+    padded[:source.shape[0], :source.shape[1]] = source
+    pooled = padded.reshape(
+        padded_height // block_rows,
+        block_rows,
+        padded_width // block_columns,
+        block_columns,
+    ).max(axis=(1, 3))
+    wet = pooled > 0
+    visited = np.zeros(wet.shape, dtype=bool)
+    observations: list[NormalizedObservation] = []
+    for seed_row, seed_column in np.argwhere(wet):
+        seed_row, seed_column = int(seed_row), int(seed_column)
+        if visited[seed_row, seed_column]:
+            continue
+        stack = [(seed_row, seed_column)]
+        visited[seed_row, seed_column] = True
+        component: list[tuple[int, int]] = []
+        while stack:
+            row, column = stack.pop()
+            component.append((row, column))
+            for delta_row, delta_column in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                neighbour_row = row + delta_row
+                neighbour_column = column + delta_column
+                if (
+                    0 <= neighbour_row < wet.shape[0]
+                    and 0 <= neighbour_column < wet.shape[1]
+                    and wet[neighbour_row, neighbour_column]
+                    and not visited[neighbour_row, neighbour_column]
+                ):
+                    visited[neighbour_row, neighbour_column] = True
+                    stack.append((neighbour_row, neighbour_column))
+
+        def corner_to_lonlat(row: int, column: int) -> tuple[float, float]:
+            global_column = (
+                tile_x * RAINVIEWER_TILE_SIZE
+                + min(RAINVIEWER_TILE_SIZE, column * block_columns)
+            )
+            global_row = (
+                tile_y * RAINVIEWER_TILE_SIZE
+                + min(RAINVIEWER_TILE_SIZE, row * block_rows)
+            )
+            count_pixels = (2**RAINVIEWER_ZOOM) * RAINVIEWER_TILE_SIZE
+            longitude = global_column / count_pixels * 360.0 - 180.0
+            latitude = math.degrees(math.atan(math.sinh(
+                math.pi * (1.0 - 2.0 * global_row / count_pixels)
+            )))
+            return longitude, latitude
+
+        rows = [item[0] for item in component]
+        columns = [item[1] for item in component]
+        center_row = (min(rows) + max(rows) + 1) * block_rows / 2.0
+        center_column = (min(columns) + max(columns) + 1) * block_columns / 2.0
+        longitude, latitude = corner_to_lonlat(
+            int(center_row / block_rows),
+            int(center_column / block_columns),
+        )
+        observations.append(NormalizedObservation.create(
+            provider_id=request.provider_id,
+            product_id=request.product_id,
+            target_id=None,
+            kind=ObservationKind.RADAR_LEVEL,
+            value=float(max(pooled[row, column] for row, column in component)),
+            unit="level",
+            observed_at=observed_at,
+            received_at=received_at,
+            latitude=latitude,
+            longitude=longitude,
+            quality=ObservationQuality.SUSPECT,
+            geometry=_component_polygon_geometry(component, corner_to_lonlat),
+            metadata={
+                "spatial_cell": True,
+                "block_count": len(component),
+                "operational_use": "visualisation_only",
+                "quantitative_semantics_eligible": False,
+                "semantic_class": "categorical_composite_reflectivity",
+            },
+            maximum_age_seconds=RAINVIEWER_MAX_FRAME_AGE_SECONDS,
+        ))
+    return tuple(observations)
+
+
+class RainViewerRadarAdapter:
+    def __init__(self, *, manifest_url: str = RAINVIEWER_MANIFEST_ENDPOINT) -> None:
+        self._manifest_url = manifest_url
+
+    async def fetch(self, request, fetcher, *, now):
+        manifest = await fetcher.get_json(
+            self._manifest_url,
+            maximum_bytes=2 * 1024 * 1024,
+        )
+        if not isinstance(manifest, Mapping) or manifest.get("host") != RAINVIEWER_TILE_HOST:
+            raise ValueError("rainviewer_manifest_invalid")
+        frames = manifest.get("radar", {}).get("past", [])
+        if not isinstance(frames, list):
+            raise ValueError("rainviewer_manifest_invalid")
+        candidates = [
+            item for item in frames
+            if isinstance(item, Mapping)
+            and isinstance(item.get("time"), (int, float))
+            and isinstance(item.get("path"), str)
+            and float(item["time"]) <= now + 30.0
+            and re.fullmatch(r"/v2/radar/(?:\d{10}|[0-9a-f]{12})", item["path"])
+        ]
+        if not candidates:
+            raise ValueError("rainviewer_current_frame_missing")
+        frame = max(candidates, key=lambda item: float(item["time"]))
+        observed_at = float(frame["time"])
+        if now - observed_at > RAINVIEWER_MAX_FRAME_AGE_SECONDS:
+            raise ValueError("rainviewer_frame_stale")
+        centers = (
+            tuple((item.center_latitude, item.center_longitude) for item in request.regions)
+            or tuple((item.latitude, item.longitude) for item in request.targets)
+        )
+        count = 2**RAINVIEWER_ZOOM
+        tile_keys: set[tuple[int, int]] = set()
+        for latitude, longitude in centers:
+            global_x, global_y = _rainviewer_global_pixel(latitude, longitude)
+            center_x = int(global_x // RAINVIEWER_TILE_SIZE) % count
+            center_y = min(count - 1, max(0, int(global_y // RAINVIEWER_TILE_SIZE)))
+            for delta_x in (-1, 0, 1):
+                for delta_y in (-1, 0, 1):
+                    tile_keys.add(((center_x + delta_x) % count, min(count - 1, max(0, center_y + delta_y))))
+
+        decoded: dict[tuple[int, int], Any] = {}
+        for tile_x, tile_y in sorted(tile_keys):
+            url = (
+                f"{RAINVIEWER_TILE_HOST}{frame['path']}"
+                f"/{RAINVIEWER_TILE_SIZE}/{RAINVIEWER_ZOOM}/{tile_x}/{tile_y}/2/0_0.png"
+            )
+            payload = await fetcher.get_bytes(url, maximum_bytes=4 * 1024 * 1024)
+            decoded[(tile_x, tile_y)] = _decode_rainviewer_levels(payload)
+
+        observations: list[NormalizedObservation] = []
+        for target in request.targets:
+            global_x, global_y = _rainviewer_global_pixel(target.latitude, target.longitude)
+            tile_x = int(global_x // RAINVIEWER_TILE_SIZE) % count
+            tile_y = min(count - 1, max(0, int(global_y // RAINVIEWER_TILE_SIZE)))
+            levels = decoded.get((tile_x, tile_y))
+            if levels is None:
+                continue
+            column = min(RAINVIEWER_TILE_SIZE - 1, max(0, int(global_x) % RAINVIEWER_TILE_SIZE))
+            row = min(RAINVIEWER_TILE_SIZE - 1, max(0, int(global_y) % RAINVIEWER_TILE_SIZE))
+            level = int(levels[row, column])
+            if level > 0:
+                observations.append(NormalizedObservation.create(
+                    provider_id=request.provider_id,
+                    product_id=request.product_id,
+                    target_id=target.target_id,
+                    kind=ObservationKind.RADAR_LEVEL,
+                    value=float(level),
+                    unit="level",
+                    observed_at=observed_at,
+                    received_at=now,
+                    latitude=target.latitude,
+                    longitude=target.longitude,
+                    quality=ObservationQuality.SUSPECT,
+                    geometry=_point(target.longitude, target.latitude),
+                    metadata={
+                        "pixel_column": column,
+                        "pixel_row": row,
+                        "operational_use": "visualisation_only",
+                        "quantitative_semantics_eligible": False,
+                        "semantic_class": "categorical_composite_reflectivity",
+                    },
+                    maximum_age_seconds=RAINVIEWER_MAX_FRAME_AGE_SECONDS,
+                ))
+        spatial = []
+        for (tile_x, tile_y), levels in decoded.items():
+            spatial.extend(_rainviewer_tile_observations(
+                levels,
+                request,
+                tile_x=tile_x,
+                tile_y=tile_y,
+                observed_at=observed_at,
+                received_at=now,
+            ))
+        observations.extend(sorted(
+            spatial,
+            key=lambda item: (item.value, item.metadata.get("block_count", 0)),
+            reverse=True,
+        )[:MAX_NATIONAL_RADAR_SPATIAL_CELLS])
+        return tuple(observations)
+
+
+class MeteoFranceOAuthTokenProvider:
+    """Obtain and cache Météo-France client-credential tokens in memory."""
+
+    def __init__(
+        self,
+        *,
+        fetcher: AsyncHttpFetcher,
+        application_id: str | None = None,
+        static_token: str | None = None,
+        endpoint: str = METEOFRANCE_TOKEN_ENDPOINT,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        raw_application_id = application_id or os.getenv(
+            "STV3_METEOFRANCE_APPLICATION_ID",
+            "",
+        )
+        self._application_id = raw_application_id.removeprefix("Basic ").strip()
+        self._static_token = (
+            static_token or os.getenv("STV3_METEOFRANCE_API_TOKEN", "")
+        ).strip()
+        self._fetcher = fetcher
+        self._endpoint = endpoint
+        self._monotonic = monotonic
+        self._access_token: str | None = None
+        self._expires_at = 0.0
+
+    async def get_access_token(self) -> str | None:
+        now = self._monotonic()
+        if self._access_token and now < self._expires_at:
+            return self._access_token
+        if not self._application_id:
+            return self._static_token or None
+        payload = await self._fetcher.post_json(
+            self._endpoint,
+            data={"grant_type": "client_credentials"},
+            headers={
+                "Authorization": f"Basic {self._application_id}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            maximum_bytes=512 * 1024,
+        )
+        token = payload.get("access_token") if isinstance(payload, Mapping) else None
+        if not isinstance(token, str) or not token.strip():
+            raise ValueError("meteofrance_token_response_invalid")
+        expires_in = (
+            _optional_float(payload.get("expires_in"))
+            if isinstance(payload, Mapping)
+            else None
+        )
+        self._access_token = token.strip()
+        self._expires_at = now + max(60.0, (expires_in or 3600.0) - 30.0)
+        return self._access_token
+
+
 class MetarAdapter:
     def __init__(self, *, endpoint: str = METAR_ENDPOINT) -> None:
         self._endpoint = endpoint
@@ -931,11 +2422,16 @@ class MetarAdapter:
             params["ids"] = ",".join(sorted(set(request.selected_station_ids)))
         else:
             params["bbox"] = f"{south:.3f},{west:.3f},{north:.3f},{east:.3f}"
-        payload = await fetcher.get_json(
-            self._endpoint,
-            params=params,
-            maximum_bytes=8 * 1024 * 1024,
-        )
+        try:
+            payload = await fetcher.get_json(
+                self._endpoint,
+                params=params,
+                maximum_bytes=8 * 1024 * 1024,
+            )
+        except HttpStatusError as error:
+            if error.status_code == 204:
+                return ()
+            raise
         if not isinstance(payload, list):
             raise ValueError("metar_payload_invalid")
         observations: list[NormalizedObservation] = []
@@ -1552,6 +3048,7 @@ def _national_radar_observations(
     pixel_to_lonlat: Any,
     pixel_width_m: float,
     pixel_height_m: float,
+    maximum_age_seconds: float = MAX_RADAR_FRAME_AGE_SECONDS,
 ) -> tuple[NormalizedObservation, ...]:
     """Emit target samples and bounded five-kilometre rain components."""
     import numpy as np
@@ -1583,6 +3080,7 @@ def _national_radar_observations(
             quality=ObservationQuality.GOOD,
             geometry=_point(target.longitude, target.latitude),
             metadata={"pixel_column": column, "pixel_row": row},
+            maximum_age_seconds=maximum_age_seconds,
         ))
 
     block_rows = max(1, int(round(5_000.0 / pixel_height_m)))
@@ -1695,6 +3193,7 @@ def _national_radar_observations(
                         block_columns * pixel_width_m,
                     ),
                 },
+                maximum_age_seconds=maximum_age_seconds,
             )
             previous = spatial.get(key)
             if previous is None or candidate.value > previous.value:
@@ -1998,18 +3497,27 @@ class DwdRadolanAdapter:
 
 
 __all__ = [
+    "AemetRadarAdapter",
     "AioHttpFetcher",
     "AsyncHttpFetcher",
     "BlitzortungAdapter",
     "DwdRadolanAdapter",
+    "DpcRadarAdapter",
+    "GeoSphereNowcastAdapter",
+    "ItaliaMeteoIcon2iAdapter",
+    "KmiAwsAdapter",
     "KmiRadarAdapter",
     "KnmiRadarAdapter",
     "MetarAdapter",
+    "MeteoFranceOAuthTokenProvider",
+    "MeteoFranceRadarAdapter",
+    "MetOfficeRadarAdapter",
     "NetatmoAdapter",
     "NetatmoOAuthTokenProvider",
     "OpenMeteoAdapter",
     "OperaRadarAdapter",
     "ProviderBlocked",
+    "RainViewerRadarAdapter",
     "ThinAdapterResult",
     "ThinRadarField",
     "WundergroundAdapter",

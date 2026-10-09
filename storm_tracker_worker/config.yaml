@@ -1,5 +1,5 @@
 name: "Storm Tracker Worker"
-version: "1.18.28"
+version: "1.18.42"
 slug: "storm_tracker_worker"
 description: "Geisoleerde radar- en nowcastworker voor Storm Tracker V3"
 startup: services
@@ -37,8 +37,6 @@ options:
   netatmo_refresh_token: ""
   netatmo_station_id: ""
   wunderground_api_key: ""
-  synoptic_token: ""
-  synoptic_raw_retention_terms_accepted: false
   rainviewer_cache_attribution_accepted: false
   kmi_appv4_raw_retention_authorized: false
   opera_raw_retention_authorized: false
@@ -75,8 +73,6 @@ schema:
   netatmo_refresh_token: "password?"
   netatmo_station_id: "str?"
   wunderground_api_key: "password?"
-  synoptic_token: "password?"
-  synoptic_raw_retention_terms_accepted: "bool"
   rainviewer_cache_attribution_accepted: "bool"
   kmi_appv4_raw_retention_authorized: "bool"
   opera_raw_retention_authorized: "bool"

@@ -66,10 +66,26 @@ GERMANY_AND_BORDER = CoverageBox(
     east=16.0,
 )
 SPAIN = CoverageBox(south=35.0, north=44.5, west=-10.0, east=5.0)
+FRANCE_METROPOLE = CoverageBox(
+    south=41.0,
+    north=51.5,
+    west=-5.5,
+    east=9.8,
+)
+ITALY = CoverageBox(south=35.0, north=48.0, west=4.5, east=20.5)
+AUSTRIA = CoverageBox(south=45.5, north=49.5, west=8.1, east=17.75)
+UNITED_KINGDOM_AND_IRELAND = CoverageBox(
+    south=48.0,
+    north=62.0,
+    west=-12.0,
+    east=4.0,
+)
 
 
 PROVIDERS: tuple[ThinProviderSpec, ...] = (
-    ThinProviderSpec("kmi_radar", "radar_composite", 300.0, BELGIUM),
+    ThinProviderSpec("kmi_aws", "aws_10min", 600.0, BELGIUM),
+    ThinProviderSpec("kmi_appv4", "appv4_visual", 300.0, BELGIUM),
+    ThinProviderSpec("kmi_radqpe", "radqpe_native", 300.0, BELGIUM),
     ThinProviderSpec("opera_radar", "odyssey_composite", 300.0, EUROPE),
     ThinProviderSpec(
         "knmi_radar",
@@ -79,11 +95,42 @@ PROVIDERS: tuple[ThinProviderSpec, ...] = (
     ),
     ThinProviderSpec("dwd_radolan", "radolan_rw", 300.0, GERMANY_AND_BORDER),
     ThinProviderSpec("open_meteo", "forecast", 600.0, None),
-    ThinProviderSpec("metar", "ground_observation", 600.0, EUROPE),
+    ThinProviderSpec("metar", "ground_observation", 600.0, None),
     ThinProviderSpec("netatmo", "ground_observation", 300.0, None),
     ThinProviderSpec("wunderground", "ground_observation", 300.0, None),
-    ThinProviderSpec("blitzortung", "lightning_events", 30.0, EUROPE),
+    ThinProviderSpec("blitzortung", "lightning_events", 30.0, None),
+    ThinProviderSpec("rainviewer", "visual", 300.0, None),
     ThinProviderSpec("aemet_radar", "radar_composite", 300.0, SPAIN),
+    ThinProviderSpec(
+        "meteofrance_radar",
+        "radar_accumulation",
+        300.0,
+        FRANCE_METROPOLE,
+    ),
+    ThinProviderSpec(
+        "dpc_radar",
+        "surface_rainfall_intensity",
+        300.0,
+        ITALY,
+    ),
+    ThinProviderSpec(
+        "italiameteo_icon2i",
+        "forecast",
+        900.0,
+        ITALY,
+    ),
+    ThinProviderSpec(
+        "geosphere",
+        "inca_nowcast",
+        900.0,
+        AUSTRIA,
+    ),
+    ThinProviderSpec(
+        "metoffice_radar",
+        "uk_rate",
+        300.0,
+        UNITED_KINGDOM_AND_IRELAND,
+    ),
 )
 
 

@@ -16,6 +16,17 @@ from .thin_provider_runtime import ProviderResult
 
 
 MAX_FUSION_AGE_SECONDS = 15 * 60
+PROVIDER_FUSION_AGE_SECONDS = {
+    # The public AEMET composite is officially published in batches and can
+    # legitimately trail wall time by more than the generic radar window.
+    "aemet_radar": 45 * 60,
+    "meteofrance_radar": 25 * 60,
+    "dpc_radar": 20 * 60,
+    "kmi_appv4": 20 * 60,
+    "metoffice_radar": 20 * 60,
+    "rainviewer": 20 * 60,
+    "geosphere": 90 * 60,
+}
 MAX_FUTURE_SKEW_SECONDS = 30
 _GROUND_KINDS = frozenset({
     ObservationKind.TEMPERATURE,
@@ -126,7 +137,10 @@ def fuse_observations(
             maximum_age = (
                 MAX_GROUND_SOURCE_AGE_SECONDS
                 if observation.kind in _GROUND_KINDS
-                else MAX_FUSION_AGE_SECONDS
+                else PROVIDER_FUSION_AGE_SECONDS.get(
+                    observation.provider_id,
+                    MAX_FUSION_AGE_SECONDS,
+                )
             )
             if age > maximum_age:
                 rejected.setdefault(str(provider_id), set()).add("stale")

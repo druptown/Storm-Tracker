@@ -21,16 +21,26 @@ from .thin_blitzortung import ThinBlitzortungFeed
 from .thin_ground_station_runtime import GroundStationRuntime
 from .thin_postgis import ThinPostGISSettings, ThinPostGISWriter
 from .thin_provider_adapters import (
+    AemetRadarAdapter,
     AioHttpFetcher,
     BlitzortungAdapter,
+    BlockedProviderAdapter,
+    DpcRadarAdapter,
     DwdRadolanAdapter,
+    GeoSphereNowcastAdapter,
+    ItaliaMeteoIcon2iAdapter,
+    KmiAwsAdapter,
     KmiRadarAdapter,
     KnmiRadarAdapter,
     MetarAdapter,
+    MeteoFranceOAuthTokenProvider,
+    MeteoFranceRadarAdapter,
+    MetOfficeRadarAdapter,
     NetatmoAdapter,
     NetatmoOAuthTokenProvider,
     OpenMeteoAdapter,
     OperaRadarAdapter,
+    RainViewerRadarAdapter,
     WundergroundAdapter,
 )
 from .thin_provider_runtime import ThinProviderRuntime
@@ -428,14 +438,22 @@ class ThinMqttService:
         )
 
 
-def _build_runtime() -> tuple[ThinOperationalRuntime, BlitzortungAdapter]:
+def _build_provider_adapters(fetcher: Any) -> dict[str, Any]:
     blitzortung = BlitzortungAdapter()
-    fetcher = AioHttpFetcher()
-    adapters = {
-        "kmi_radar": KmiRadarAdapter(
-            forecast_url=os.getenv("STV3_KMI_FORECAST_URL") or None,
-            access_enabled=bool(os.getenv("STV3_KMI_FORECAST_URL")),
+    return {
+        "aemet_radar": AemetRadarAdapter(),
+        "meteofrance_radar": MeteoFranceRadarAdapter(
+            access_token_provider=MeteoFranceOAuthTokenProvider(
+                fetcher=fetcher,
+            ).get_access_token,
         ),
+        "dpc_radar": DpcRadarAdapter(),
+        "italiameteo_icon2i": ItaliaMeteoIcon2iAdapter(),
+        "geosphere": GeoSphereNowcastAdapter(),
+        "metoffice_radar": MetOfficeRadarAdapter(),
+        "kmi_aws": KmiAwsAdapter(),
+        "kmi_appv4": KmiRadarAdapter(),
+        "kmi_radqpe": BlockedProviderAdapter(),
         "opera_radar": OperaRadarAdapter(),
         "knmi_radar": KnmiRadarAdapter(),
         "dwd_radolan": DwdRadolanAdapter(),
@@ -454,7 +472,14 @@ def _build_runtime() -> tuple[ThinOperationalRuntime, BlitzortungAdapter]:
         ),
         "wunderground": WundergroundAdapter(),
         "blitzortung": blitzortung,
+        "rainviewer": RainViewerRadarAdapter(),
     }
+
+
+def _build_runtime() -> tuple[ThinOperationalRuntime, BlitzortungAdapter]:
+    fetcher = AioHttpFetcher()
+    adapters = _build_provider_adapters(fetcher)
+    blitzortung = adapters["blitzortung"]
     settings = ThinPostGISSettings.from_environment()
     station_runtime = None
     if settings is not None:
