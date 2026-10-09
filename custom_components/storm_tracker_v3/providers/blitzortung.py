@@ -14,6 +14,7 @@ Versiegeschiedenis:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import math
@@ -230,7 +231,7 @@ class BlitzortungProvider:
                     task.cancel()
                 if disconnect_task in done:
                     raise ConnectionError("MQTT broker verbrak de verbinding")
-                self._handle_message(message_task.result())
+                await self._handle_message(message_task.result())
         finally:
             self._connected = False
             self._mqttc = None
@@ -238,7 +239,7 @@ class BlitzortungProvider:
             mqttc.loop_stop()
             mqttc.disconnect()
 
-    def _handle_message(self, raw: bytes) -> None:
+    async def _handle_message(self, raw: bytes) -> None:
         try:
             data = json.loads(raw)
             lat = data.get("lat")
@@ -252,13 +253,15 @@ class BlitzortungProvider:
             lon = float(lon)
             timestamp = float(ts) / 1e9 if ts else time.time()
 
-            self._on_obs(Observation(
+            result = self._on_obs(Observation(
                 obs_type  = ObservationType.LIGHTNING,
                 lat       = lat,
                 lon       = lon,
                 timestamp = timestamp,
                 source    = "blitzortung",
             ))
+            if inspect.isawaitable(result):
+                await result
             _LOGGER.debug("Blitzortung: inslag %.3f,%.3f", lat, lon)
 
         except (KeyError, ValueError, json.JSONDecodeError):

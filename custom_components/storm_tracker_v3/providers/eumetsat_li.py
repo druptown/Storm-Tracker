@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import io
+import json
 import logging
 import time
 from typing import Any
@@ -14,6 +15,7 @@ from typing import Any
 import aiohttp
 import h5py
 
+from ..engine.bounded_payload import iter_limited_async
 from ..engine.observation import Observation, ObservationType
 
 _LOGGER = logging.getLogger(__name__)
@@ -25,8 +27,26 @@ SEARCH_URL = (
     "?format=json&pi=EO%3AEUM%3ADAT%3A0691&si=0&c=4"
 )
 MAX_BODY_BYTES = 10 * 1024 * 1024
+MAX_TOKEN_RESPONSE_BYTES = 512 * 1024
+MAX_SEARCH_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_PRODUCT_AGE_S = 30 * 60
 EPOCH_2000 = datetime(2000, 1, 1, tzinfo=timezone.utc).timestamp()
+_HTTP_CHUNK_BYTES = 64 * 1024
+
+
+async def _read_bounded_response(response, *, maximum_bytes: int) -> bytes:
+    headers = response.headers
+    encoding = headers.get("Content-Encoding")
+    if encoding and encoding.lower() != "identity":
+        raise ValueError(
+            "EUMETSAT-response gebruikt onverwachte transportcompressie"
+        )
+    return await iter_limited_async(
+        response.content.iter_chunked(_HTTP_CHUNK_BYTES),
+        maximum_bytes=maximum_bytes,
+        declared_bytes=headers.get("Content-Length"),
+        require_declared_match=headers.get("Content-Length") is not None,
+    )
 
 
 def _dataset_by_name(root: h5py.Group, name: str):
@@ -96,10 +116,18 @@ def parse_lightning_flashes(payload: bytes) -> list[Observation]:
 class EumetsatLightningProvider:
     """Kleine async client voor de gratis MTG LI Lightning Flashes-collectie."""
 
-    def __init__(self, session, consumer_key: str, consumer_secret: str) -> None:
+    def __init__(
+        self,
+        session,
+        consumer_key: str,
+        consumer_secret: str,
+        *,
+        hass=None,
+    ) -> None:
         self._session = session
         self._consumer_key = consumer_key
         self._consumer_secret = consumer_secret
+        self._hass = hass
         self._token: str | None = None
         self._token_expires_at = 0.0
         self._last_product_id: str | None = None
@@ -112,9 +140,14 @@ class EumetsatLightningProvider:
             TOKEN_URL,
             auth=auth,
             data={"grant_type": "client_credentials", "validity_period": "3600"},
+            headers={"Accept-Encoding": "identity"},
         ) as response:
             response.raise_for_status()
-            data = await response.json(content_type=None)
+            raw = await _read_bounded_response(
+                response,
+                maximum_bytes=MAX_TOKEN_RESPONSE_BYTES,
+            )
+            data = json.loads(raw.decode("utf-8"))
         token = data.get("access_token")
         if not token:
             raise ValueError("EUMETSAT authenticatie gaf geen access_token")
@@ -123,9 +156,57 @@ class EumetsatLightningProvider:
         return self._token
 
     async def fetch_observations(self) -> list[Observation]:
-        async with self._session.get(SEARCH_URL) as response:
+        if self._hass is not None:
+            try:
+                from ..worker_bridge import async_request_worker_job
+
+                result = await async_request_worker_job(
+                    self._hass,
+                    "eumetsat_li_fetch",
+                    {
+                        "credential_ref": "worker_environment",
+                        "last_product_id": self._last_product_id,
+                    },
+                    timeout=55,
+                )
+                raw = result.get("observations")
+                if not isinstance(raw, list) or len(raw) > 4000:
+                    raise ValueError("ongeldig EUMETSAT LI-workerresultaat")
+                observations = [
+                    Observation(
+                        obs_type=ObservationType.LIGHTNING,
+                        lat=float(item["lat"]),
+                        lon=float(item["lon"]),
+                        timestamp=float(item["timestamp"]),
+                        source="eumetsat_li",
+                    )
+                    for item in raw
+                    if isinstance(item, dict)
+                    and item.get("obs_type") == "lightning"
+                    and item.get("source") == "eumetsat_li"
+                ]
+                if len(observations) != len(raw):
+                    raise ValueError("onvolledige EUMETSAT LI-workerobservaties")
+                product_id = result.get("product_id")
+                if product_id:
+                    self._last_product_id = str(product_id)
+                return observations
+            except Exception as err:
+                _LOGGER.warning(
+                    "EUMETSAT LI-workerfout; lokale verwerking blijft uit: %s",
+                    err,
+                )
+                return []
+        async with self._session.get(
+            SEARCH_URL,
+            headers={"Accept-Encoding": "identity"},
+        ) as response:
             response.raise_for_status()
-            catalog = await response.json(content_type=None)
+            raw = await _read_bounded_response(
+                response,
+                maximum_bytes=MAX_SEARCH_RESPONSE_BYTES,
+            )
+            catalog = json.loads(raw.decode("utf-8"))
         features = catalog.get("features") or []
         if not features:
             return []
@@ -153,21 +234,19 @@ class EumetsatLightningProvider:
             if not body or not body.get("href"):
                 continue
 
-            chunks = []
-            total = 0
             try:
                 async with self._session.get(
-                    body["href"], headers={"Authorization": f"Bearer {token}"}
+                    body["href"],
+                    headers={
+                        "Accept-Encoding": "identity",
+                        "Authorization": f"Bearer {token}",
+                    },
                 ) as response:
                     response.raise_for_status()
-                    declared = response.content_length
-                    if declared is not None and declared > MAX_BODY_BYTES:
-                        raise ValueError(f"EUMETSAT BODY te groot: {declared} bytes")
-                    async for chunk in response.content.iter_chunked(64 * 1024):
-                        total += len(chunk)
-                        if total > MAX_BODY_BYTES:
-                            raise ValueError("EUMETSAT BODY overschrijdt veiligheidslimiet")
-                        chunks.append(chunk)
+                    payload = await _read_bounded_response(
+                        response,
+                        maximum_bytes=MAX_BODY_BYTES,
+                    )
             except aiohttp.ClientResponseError as err:
                 if err.status != 404:
                     raise
@@ -177,7 +256,7 @@ class EumetsatLightningProvider:
                 )
                 continue
 
-            observations = parse_lightning_flashes(b"".join(chunks))
+            observations = parse_lightning_flashes(payload)
             self._last_product_id = product_id
             _LOGGER.info(
                 "EUMETSAT LI fallback: %d flashes uit product %s",

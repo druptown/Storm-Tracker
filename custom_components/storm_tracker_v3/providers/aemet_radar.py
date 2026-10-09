@@ -10,6 +10,7 @@ import tarfile
 
 import numpy as np
 
+from ..engine.bounded_payload import iter_limited_async
 from ..engine.observation import Observation, ObservationType
 from .base import Capability, CoverageResult
 from .raster_components import extract_components, extract_intensity_runs
@@ -19,7 +20,21 @@ DOWNLOAD_URL = "https://www.aemet.es/es/api-eltiempo/radar/download/compo"
 MAX_ARCHIVE_BYTES = 10 * 1024 * 1024
 MAX_FRAME_BYTES = 5 * 1024 * 1024
 MAX_FRAME_AGE_SECONDS = 25 * 60
+_HTTP_CHUNK_BYTES = 64 * 1024
 FRAME_RE = re.compile(r"^down_radw(\d{12})_4326\.tif$")
+
+
+async def _read_bounded_response(response, *, maximum_bytes: int) -> bytes:
+    """Lees één ongecomprimeerde HTTP-body onder een expliciet bytecontract."""
+    encoding = response.headers.get("Content-Encoding")
+    if encoding and encoding.lower() != "identity":
+        raise ValueError("AEMET-response gebruikt onverwachte transportcompressie")
+    return await iter_limited_async(
+        response.content.iter_chunked(_HTTP_CHUNK_BYTES),
+        maximum_bytes=maximum_bytes,
+        declared_bytes=response.headers.get("Content-Length"),
+        require_declared_match=True,
+    )
 
 
 def latest_frame_from_archive(payload: bytes) -> tuple[bytes, float, str]:
@@ -96,9 +111,11 @@ def parse_aemet_geotiff(payload: bytes, areas: tuple, *, timestamp: float, now: 
             timestamp=timestamp, intensity=component.max_intensity,
             area_km2=area_km2, quality=0.98,
             footprint_points=component.boundary,
+            footprint_polygons=component.polygons,
             radar_cell_id=component_id, parent_system_id=component_id,
             parent_area_km2=area_km2,
             parent_footprint_points=component.boundary,
+            parent_footprint_polygons=component.polygons,
             source="aemet_radar",
         ))
     return observations
@@ -111,6 +128,8 @@ class AemetRadarProvider:
 
     def __init__(self, session):
         self._session, self._areas, self._last_name = session, (), None
+        self._hass = None
+        self._last_observations = []
         self.diagnostics = {}
         self.overlay = None
 
@@ -119,18 +138,39 @@ class AemetRadarProvider:
         ok = 33.0 - margin <= area.center_lat <= 46.5 + margin and -12.2 - margin <= area.center_lon <= 6.2 + margin
         return CoverageResult(ok, 1.0 if ok else 0.0, 0.98 if ok else 0.0, "AEMET Spanje" if ok else "buiten AEMET-dekking")
 
-    async def async_start(self, context): self._areas = tuple(context.config.get("areas", (context.area,)))
+    async def async_start(self, context):
+        self._hass = context.hass
+        self._areas = tuple(context.config.get("areas", (context.area,)))
     async def async_update_areas(self, areas): self._areas = tuple(areas)
     async def async_stop(self): self._areas = ()
 
     async def async_fetch(self):
-        async with self._session.get(DOWNLOAD_URL) as response:
+        if self._hass is not None:
+            try:
+                from ..worker_radar_client import async_fetch_worker_radar
+                observations, overlay, diagnostics, artifact = await async_fetch_worker_radar(
+                    self._hass, "aemet_radar_fetch",
+                    {"areas": [{"center_lat": area.center_lat, "center_lon": area.center_lon, "horizon_km": area.horizon_km} for area in self._areas]},
+                    provider=self.plugin_id, timeout=60,
+                    max_age_seconds=MAX_FRAME_AGE_SECONDS,
+                )
+                self.overlay = overlay
+                self.last_worker_artifact = artifact
+                self.diagnostics = diagnostics
+                self._last_observations = list(observations)
+                return observations
+            except Exception as err:
+                _LOGGER.warning("AEMET-workerfout; lokale verwerking blijft uit: %s", err)
+                return list(self._last_observations)
+        async with self._session.get(
+            DOWNLOAD_URL,
+            headers={"Accept-Encoding": "identity"},
+        ) as response:
             response.raise_for_status()
-            if response.content_length and response.content_length > MAX_ARCHIVE_BYTES:
-                raise ValueError("AEMET-bundel overschrijdt veiligheidslimiet")
-            payload = await response.read()
-        if len(payload) > MAX_ARCHIVE_BYTES:
-            raise ValueError("AEMET-bundel overschrijdt veiligheidslimiet")
+            payload = await _read_bounded_response(
+                response,
+                maximum_bytes=MAX_ARCHIVE_BYTES,
+            )
         frame, timestamp, name = await asyncio.to_thread(latest_frame_from_archive, payload)
         if name == self._last_name:
             return []

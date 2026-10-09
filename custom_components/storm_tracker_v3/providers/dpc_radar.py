@@ -4,11 +4,13 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import io
+import json
 import logging
 
 import numpy as np
 from pyproj import Transformer
 
+from ..engine.bounded_payload import iter_limited_async
 from ..engine.observation import Observation, ObservationType
 from .base import Capability, CoverageResult
 from .odim_hdf5 import rain_rate_to_intensity
@@ -18,8 +20,23 @@ _LOGGER = logging.getLogger(__name__)
 API_URL = "https://radar-api.protezionecivile.it"
 ORIGIN = "https://radar.protezionecivile.it"
 MAX_FILE_BYTES = 25 * 1024 * 1024
+MAX_METADATA_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_FRAME_AGE_SECONDS = 20 * 60
+_HTTP_CHUNK_BYTES = 64 * 1024
 DPC_CRS = "+proj=lcc +lat_0=42 +lon_0=12.5 +lat_1=42 +lat_2=42 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+
+
+async def _read_bounded_response(response, *, maximum_bytes: int) -> bytes:
+    """Lees één ongecomprimeerde HTTP-body onder een expliciet bytecontract."""
+    encoding = response.headers.get("Content-Encoding")
+    if encoding and encoding.lower() != "identity":
+        raise ValueError("DPC-response gebruikt onverwachte transportcompressie")
+    return await iter_limited_async(
+        response.content.iter_chunked(_HTTP_CHUNK_BYTES),
+        maximum_bytes=maximum_bytes,
+        declared_bytes=response.headers.get("Content-Length"),
+        require_declared_match=True,
+    )
 
 
 def _parse_sri_product(payload: bytes, areas: tuple, *, timestamp: float, now: float | None = None):
@@ -77,10 +94,12 @@ def _parse_sri_product(payload: bytes, areas: tuple, *, timestamp: float, now: f
             timestamp=timestamp, intensity=component.max_intensity,
             area_km2=area_km2, quality=0.99,
             footprint_points=component.boundary,
+            footprint_polygons=component.polygons,
             radar_cell_id=component_id,
             parent_system_id=component_id,
             parent_area_km2=area_km2,
             parent_footprint_points=component.boundary,
+            parent_footprint_polygons=component.polygons,
             source="dpc_radar",
         ))
     return observations, {
@@ -105,6 +124,8 @@ class DpcRadarProvider:
 
     def __init__(self, session):
         self._session, self._areas, self._last_timestamp = session, (), None
+        self._hass = None
+        self._last_observations = []
         self.diagnostics = {}
         self.overlay = None
 
@@ -113,15 +134,38 @@ class DpcRadarProvider:
         ok = 35.0 - margin <= area.center_lat <= 48.0 + margin and 4.5 - margin <= area.center_lon <= 20.5 + margin
         return CoverageResult(ok, 1.0 if ok else 0.0, 0.99 if ok else 0.0, "DPC SRI 1 km Italië" if ok else "buiten DPC-dekking")
 
-    async def async_start(self, context): self._areas = tuple(context.config.get("areas", (context.area,)))
+    async def async_start(self, context):
+        self._hass = context.hass
+        self._areas = tuple(context.config.get("areas", (context.area,)))
     async def async_update_areas(self, areas): self._areas = tuple(areas)
     async def async_stop(self): self._areas = ()
 
     async def async_fetch(self):
-        headers = {"Origin": ORIGIN}
+        if self._hass is not None:
+            try:
+                from ..worker_radar_client import async_fetch_worker_radar
+                observations, overlay, diagnostics, artifact = await async_fetch_worker_radar(
+                    self._hass, "dpc_radar_fetch",
+                    {"areas": [{"center_lat": area.center_lat, "center_lon": area.center_lon, "horizon_km": area.horizon_km} for area in self._areas]},
+                    provider=self.plugin_id, timeout=60,
+                    max_age_seconds=MAX_FRAME_AGE_SECONDS,
+                )
+                self.overlay = overlay
+                self.last_worker_artifact = artifact
+                self.diagnostics = diagnostics
+                self._last_observations = list(observations)
+                return observations
+            except Exception as err:
+                _LOGGER.warning("DPC-workerfout; lokale verwerking blijft uit: %s", err)
+                return list(self._last_observations)
+        headers = {"Accept-Encoding": "identity", "Origin": ORIGIN}
         async with self._session.get(f"{API_URL}/findLastProductByType", params={"type": "SRI"}, headers=headers) as response:
             response.raise_for_status()
-            catalog = await response.json()
+            raw = await _read_bounded_response(
+                response,
+                maximum_bytes=MAX_METADATA_RESPONSE_BYTES,
+            )
+            catalog = json.loads(raw.decode("utf-8"))
         products = catalog.get("lastProducts") or []
         if not products:
             raise ValueError("DPC API geeft geen SRI-product")
@@ -131,14 +175,20 @@ class DpcRadarProvider:
             return []
         async with self._session.post(f"{API_URL}/downloadProduct", json={"productType": "SRI", "productDate": timestamp_ms}, headers=headers) as response:
             response.raise_for_status()
-            download = await response.json()
-        async with self._session.get(download["url"]) as response:
+            raw = await _read_bounded_response(
+                response,
+                maximum_bytes=MAX_METADATA_RESPONSE_BYTES,
+            )
+            download = json.loads(raw.decode("utf-8"))
+        async with self._session.get(
+            download["url"],
+            headers={"Accept-Encoding": "identity"},
+        ) as response:
             response.raise_for_status()
-            if response.content_length and response.content_length > MAX_FILE_BYTES:
-                raise ValueError("DPC GeoTIFF overschrijdt veiligheidslimiet")
-            payload = await response.read()
-        if len(payload) > MAX_FILE_BYTES:
-            raise ValueError("DPC GeoTIFF overschrijdt veiligheidslimiet")
+            payload = await _read_bounded_response(
+                response,
+                maximum_bytes=MAX_FILE_BYTES,
+            )
         observations, overlay = await asyncio.to_thread(
             _parse_sri_product, payload, self._areas, timestamp=timestamp
         )

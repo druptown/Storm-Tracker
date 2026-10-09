@@ -4,10 +4,29 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 import json
 
+from ..engine.bounded_payload import iter_limited_async
 from .base import Capability, CoverageResult
 
 CATALOG_URL = "https://meteohub.agenziaitaliameteo.it/api/datasets/radar_sri_dpc/opendata"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+MAX_CATALOG_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_FORECAST_RESPONSE_BYTES = 4 * 1024 * 1024
+_HTTP_CHUNK_BYTES = 64 * 1024
+
+
+async def _read_bounded_response(response, *, maximum_bytes: int) -> bytes:
+    headers = response.headers
+    encoding = headers.get("Content-Encoding")
+    if encoding and encoding.lower() != "identity":
+        raise ValueError(
+            "ItaliaMeteo-response gebruikt onverwachte transportcompressie"
+        )
+    return await iter_limited_async(
+        response.content.iter_chunked(_HTTP_CHUNK_BYTES),
+        maximum_bytes=maximum_bytes,
+        declared_bytes=headers.get("Content-Length"),
+        require_declared_match=headers.get("Content-Length") is not None,
+    )
 
 
 def latest_bundle(items: list[dict]) -> dict | None:
@@ -45,9 +64,16 @@ class ItaliaMeteoRadarProvider:
     async def async_stop(self): self._areas = ()
 
     async def async_fetch(self):
-        async with self._session.get(CATALOG_URL) as response:
+        async with self._session.get(
+            CATALOG_URL,
+            headers={"Accept-Encoding": "identity"},
+        ) as response:
             response.raise_for_status()
-            items = await response.json()
+            raw = await _read_bounded_response(
+                response,
+                maximum_bytes=MAX_CATALOG_RESPONSE_BYTES,
+            )
+            items = json.loads(raw.decode("utf-8"))
         latest = latest_bundle(items if isinstance(items, list) else [])
         bundle_date = date.fromisoformat(latest["date"]) if latest else None
         age_days = (datetime.now(timezone.utc).date() - bundle_date).days if bundle_date else None
@@ -71,11 +97,14 @@ class ItaliaMeteoRadarProvider:
                         async with self._session.get(
                             FORECAST_URL,
                             params={**base_params, "hourly": variables},
+                            headers={"Accept-Encoding": "identity"},
                         ) as response:
                             response.raise_for_status()
-                            forecast = decode_json_response(
-                                await response.text()
+                            raw = await _read_bounded_response(
+                                response,
+                                maximum_bytes=MAX_FORECAST_RESPONSE_BYTES,
                             )
+                            forecast = decode_json_response(raw.decode("utf-8"))
                         break
                     except Exception as exc:
                         forecast_errors.append(type(exc).__name__)

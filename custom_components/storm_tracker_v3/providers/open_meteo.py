@@ -11,12 +11,15 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import json
 import logging
 import math
 import time
 from typing import Any, AsyncIterator, Mapping, Optional
 
 import aiohttp
+
+from ..engine.bounded_payload import iter_limited_async
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -28,6 +31,23 @@ MAX_BACKOFF_S = 6 * 60 * 60
 FORECAST_STEPS_15M = 13
 OPERATIONAL_STEPS_15M = 7
 FORECAST_HOURS = 6
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+_HTTP_CHUNK_BYTES = 64 * 1024
+
+
+async def _read_bounded_response(response, *, maximum_bytes: int) -> bytes:
+    headers = response.headers
+    encoding = headers.get("Content-Encoding")
+    if encoding and encoding.lower() != "identity":
+        raise ValueError(
+            "Open-Meteo-response gebruikt onverwachte transportcompressie"
+        )
+    return await iter_limited_async(
+        response.content.iter_chunked(_HTTP_CHUNK_BYTES),
+        maximum_bytes=maximum_bytes,
+        declared_bytes=headers.get("Content-Length"),
+        require_declared_match=headers.get("Content-Length") is not None,
+    )
 
 # Negentien velden blijft bij het huidige targetaantal ruim onder de gratis
 # Open-Meteo-limieten, ook wanneer bewegende targets de cache om de vijf
@@ -151,8 +171,9 @@ def _normalise_targets(
 class OpenMeteoProvider:
     """Eén gedeelde broker voor alle actuele targets."""
 
-    def __init__(self, session=None) -> None:
+    def __init__(self, session=None, hass=None) -> None:
         self._session = session
+        self._hass = hass
         self._last_result = self._initial_result()
         self._last_fetch_monotonic = 0.0
         self._last_signature: tuple[tuple[float, float], ...] = ()
@@ -242,6 +263,52 @@ class OpenMeteoProvider:
         if now_mono < self._backoff_until:
             return self._runtime_result()
 
+        if self._hass is not None:
+            self._last_attempt_ts = now_ts
+            try:
+                from ..worker_bridge import async_request_worker_job
+                result = await async_request_worker_job(
+                    self._hass,
+                    "open_meteo_fetch",
+                    {"targets": {
+                        target_id: {
+                            "latitude": latitude,
+                            "longitude": longitude,
+                        }
+                        for target_id, (_, latitude, longitude)
+                        in target_indices.items()
+                    }},
+                    timeout=35,
+                )
+                target_results = result.get("target_results")
+                if (
+                    result.get("provider_status") != "ok"
+                    or not isinstance(target_results, dict)
+                    or set(target_results) != set(target_indices)
+                ):
+                    raise ValueError("onvolledig Open-Meteo-workerresultaat")
+            except Exception as err:
+                self._record_failure(f"worker_{type(err).__name__}")
+                _LOGGER.warning(
+                    "Open-Meteo-workerfout; lokale download blijft uit: %s",
+                    err,
+                )
+                return self._runtime_result()
+            self._fetch_sequence += 1
+            self._last_success_ts = time.time()
+            self._last_fetch_monotonic = now_mono
+            self._last_signature = signature
+            self._backoff_until = 0.0
+            self._backoff_seconds = INITIAL_BACKOFF_S
+            self._consecutive_failures = 0
+            self._last_error = None
+            self._last_http_status = 200
+            self._last_result = {
+                **result,
+                "fetch_sequence": self._fetch_sequence,
+            }
+            return self._runtime_result()
+
         self._last_attempt_ts = now_ts
         params = {
             "latitude": ",".join(f"{lat:.5f}" for lat, _ in coordinates),
@@ -275,7 +342,11 @@ class OpenMeteoProvider:
                     self._record_failure(f"http_{response.status}")
                     _LOGGER.warning("OpenMeteoProvider: HTTP %d", response.status)
                     return self._runtime_result()
-                payload = await response.json(content_type=None)
+                raw = await _read_bounded_response(
+                    response,
+                    maximum_bytes=MAX_RESPONSE_BYTES,
+                )
+                payload = json.loads(raw.decode("utf-8"))
         except TimeoutError:
             self._record_failure("timeout")
             _LOGGER.warning(
@@ -393,12 +464,19 @@ class OpenMeteoProvider:
         timeout = aiohttp.ClientTimeout(total=TIMEOUT_S)
         if self._session is not None:
             async with self._session.get(
-                OPEN_METEO_URL, params=params, timeout=timeout
+                OPEN_METEO_URL,
+                params=params,
+                timeout=timeout,
+                headers={"Accept-Encoding": "identity"},
             ) as response:
                 yield response
             return
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(OPEN_METEO_URL, params=params) as response:
+            async with session.get(
+                OPEN_METEO_URL,
+                params=params,
+                headers={"Accept-Encoding": "identity"},
+            ) as response:
                 yield response
 
     def _record_failure(self, error: str) -> None:

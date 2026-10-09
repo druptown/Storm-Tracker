@@ -21,39 +21,166 @@ Versiegeschiedenis:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import json
 import logging
 import math
 import time
+from dataclasses import asdict
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 
 from homeassistant.core import HomeAssistant, callback, CoreState
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, EVENT_HOMEASSISTANT_STOP
 from homeassistant.helpers.typing import ConfigType
-from homeassistant.helpers.storage import Store
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
 
-from .const import DOMAIN
-from .providers.blitzortung import BlitzortungProvider
-from .engine.region_manager import StormManager
-from .engine.mcs_store import McsHistoryStore
-from .engine.pressure_trend import PressureTrendTracker
-from .engine.radar_frame import RadarFrameHistory, audit_storm_object_recovery
-from .engine.pysteps_preflight import evaluate_frames as evaluate_pysteps_frames
-from .engine.lightning_backpressure import LightningUpdateCoalescer
-from .engine.targets import build_target_specs, coordinates_from_state
-from .plogger.provider_logger import (
-    log_lightning_batch, log_kmi, log_rainviewer, log_knmi, log_netatmo,
-    log_open_meteo
+from .const import (
+    CONF_NOTIFY_SERVICE,
+    CONF_RUNTIME_MODE,
+    CONF_WARNING_NOTIFICATIONS_ENABLED,
+    DATA_ENTRY_RUNTIMES,
+    DOMAIN,
+    RUNTIME_MODE_LEGACY,
+    RUNTIME_MODE_WORKER_ONLY,
+    WARNING_SENT_EVENT,
 )
-from .http import StormTrackerGeoJsonView
-from .geometry.location_resolver import load_places_json, resolve_location
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _tracking_canonical(value) -> bytes:
+    """Exacte, platformonafhankelijke JSON-representatie voor protocolhashes."""
+    return json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def _tracking_digest(value) -> str:
+    return hashlib.sha256(_tracking_canonical(value)).hexdigest()
+
+
+def _normalized_tracking_state(snapshots: list[dict]) -> list[dict]:
+    return sorted(
+        snapshots,
+        key=lambda item: str(item.get("storm_id", "")),
+    )
+
+
+def _tracking_input_digest(observations: list[dict]) -> str:
+    return _tracking_digest({
+        "schema": "stv3-tracking-observations-v5",
+        "observations": observations,
+    })
+
+
+def _tracking_state_digest(snapshots: list[dict]) -> str:
+    return _tracking_digest({
+        "schema": "stv3-tracking-state-v5",
+        "snapshots": _normalized_tracking_state(snapshots),
+    })
+
+
+def _matching_sha256(actual, expected: str) -> bool:
+    return (
+        isinstance(actual, str)
+        and len(actual) == 64
+        and all(character in "0123456789abcdef" for character in actual)
+        and hmac.compare_digest(actual, expected)
+    )
+
+
+_TRACKING_V5_RADAR_PROVENANCE_KEYS = frozenset({
+    "timestamp",
+    "source",
+    "received_at",
+    "parser_version",
+    "artifact_id",
+    "raw_artifact_receipt_id",
+    "upstream_record_id",
+    "contribution_id",
+    "provenance_grade",
+    "provenance",
+})
+
+
+def _valid_tracking_v5_radar_record(value) -> bool:
+    """Weiger een als v5 vermomde snapshot die tijd/provenance laat vallen."""
+    if (
+        not isinstance(value, dict)
+        or not _TRACKING_V5_RADAR_PROVENANCE_KEYS.issubset(value)
+    ):
+        return False
+    timestamp = value.get("timestamp")
+    received_at = value.get("received_at")
+    if (
+        isinstance(timestamp, bool)
+        or not isinstance(timestamp, (int, float))
+        or not math.isfinite(float(timestamp))
+        or (
+            received_at is not None
+            and (
+                isinstance(received_at, bool)
+                or not isinstance(received_at, (int, float))
+                or not math.isfinite(float(received_at))
+            )
+        )
+    ):
+        return False
+    if any(
+        not isinstance(value.get(key), str) or not value[key]
+        for key in ("source", "parser_version", "provenance_grade")
+    ):
+        return False
+    if any(
+        value.get(key) is not None
+        and (
+            not isinstance(value[key], str)
+            or not value[key]
+        )
+        for key in (
+            "artifact_id",
+            "raw_artifact_receipt_id",
+            "upstream_record_id",
+            "contribution_id",
+        )
+    ):
+        return False
+    return value.get("provenance") is None or isinstance(
+        value["provenance"], dict
+    )
+
+
+def _valid_tracking_v5_snapshot(value) -> bool:
+    if not isinstance(value, dict):
+        return False
+    cells = value.get("radar_cells")
+    frames = value.get("frames")
+    return (
+        isinstance(cells, list)
+        and isinstance(frames, list)
+        and all(_valid_tracking_v5_radar_record(item) for item in cells)
+        and all(_valid_tracking_v5_radar_record(item) for item in frames)
+    )
+
 PLATFORMS = ["sensor"]
 HA_START_WAIT_TIMEOUT_S = 180.0
+SERVICE_RETRY_QUARANTINED_OBSERVATIONS = (
+    "retry_quarantined_observations"
+)
+RETRY_QUARANTINED_SERVICE_SCHEMA = vol.Schema({
+    vol.Optional("region_engine"): cv.string,
+})
+VIRTUAL_PROBE_WORKER_MAX_RESTORED_ACTIVE_PROBES = 64
+VIRTUAL_PROBE_WORKER_MAX_OBSERVATIONS = 2_000
+CALIBRATION_CORPUS_MAX_CAPTURES_PER_JOB = 128
 
 
 def _use_satellite_lightning(blitz_connected: bool, source_mode: str) -> bool:
@@ -74,6 +201,48 @@ def _distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     )
     return radius_km * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
+
+def _trim_virtual_probe_active_probes(
+    probes: list[dict],
+    observed_at: float,
+    max_probes: int,
+) -> list[dict]:
+    if len(probes) <= max_probes:
+        return probes
+
+    def _distance_to_now(probe: dict) -> float:
+        expected_at = probe.get("expected_at")
+        if not isinstance(expected_at, (int, float)):
+            return float("inf")
+        return abs(float(expected_at) - float(observed_at))
+
+    return sorted(probes, key=_distance_to_now)[:max_probes]
+
+
+def _trim_virtual_probe_observations(
+    observations_by_region: dict[str, list[dict]],
+    max_observations: int,
+) -> dict[str, list[dict]]:
+    total_observations = sum(len(items) for items in observations_by_region.values())
+    if total_observations <= max_observations:
+        return observations_by_region
+
+    ranked = []
+    for region_id, observations in observations_by_region.items():
+        for observation in observations:
+            observed_at = observation.get("timestamp")
+            if isinstance(observed_at, (int, float)):
+                timestamp = float(observed_at)
+            else:
+                timestamp = float("-inf")
+            ranked.append((timestamp, str(region_id), observation))
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    allowed: dict[str, list[dict]] = {}
+    for _, region_id, observation in ranked[:max_observations]:
+        allowed.setdefault(region_id, []).append(observation)
+    return allowed
+
 TARGET_SCHEMA = vol.Schema({
     vol.Required("id"): cv.string,
     vol.Optional("name"): cv.string,
@@ -83,65 +252,105 @@ TARGET_SCHEMA = vol.Schema({
 })
 
 
-CONFIG_SCHEMA = vol.Schema({
-    DOMAIN: vol.Schema({
-        vol.Required("home_lat"): cv.latitude,
-        vol.Required("home_lon"): cv.longitude,
-        vol.Optional("fictieve_tracker_entity"): cv.entity_id,
-        vol.Optional("targets", default=[]): [TARGET_SCHEMA],
-        vol.Optional("radar_radius_km", default=300): vol.Coerce(float),
-        vol.Optional("engine_sharing_distance_km", default=150): vol.Coerce(float),
-        vol.Optional("knmi_api_key"): cv.string,
-        vol.Optional("knmi_wms_api_key"): cv.string,
-        vol.Optional("netatmo_client_id"): cv.string,
-        vol.Optional("netatmo_client_secret"): cv.string,
-        vol.Optional("netatmo_refresh_token"): cv.string,
-        vol.Optional("netatmo_radius_km", default=20): vol.Coerce(float),
-        vol.Optional("eumetsat_consumer_key"): cv.string,
-        vol.Optional("eumetsat_consumer_secret"): cv.string,
-        vol.Optional("meteofrance_api_token"): cv.string,
-        vol.Optional("meteofrance_application_id"): cv.string,
-        vol.Optional("hsaf_username"): cv.string,
-        vol.Optional("hsaf_password"): cv.string,
-        vol.Optional("lightning_source_mode", default="auto"): vol.In({"auto", "satellite_test"}),
-        vol.Optional("open_meteo_enabled", default=False): cv.boolean,
-        vol.Optional("analysis_mode", default="full_send"): vol.In(
-            {"full_send", "thermal_throttle"}
-        ),
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+CONFIG_ENTRY_VERSION = 3
+_LIGHTNING_SOURCE_MODES = frozenset({"auto", "satellite_test"})
+_LEGACY_HTTP_REGISTRATION = f"{DOMAIN}_legacy_http_registered"
+_LEGACY_ENTRY_FIELDS = frozenset({
+    "analysis_mode",
+    "engine_sharing_distance_km",
+    "eumetsat_consumer_key",
+    "eumetsat_consumer_secret",
+    "hsaf_password",
+    "hsaf_username",
+    "knmi_api_key",
+    "knmi_wms_api_key",
+    "lightning_source_mode",
+    "meteofrance_api_token",
+    "meteofrance_application_id",
+    "netatmo_client_id",
+    "netatmo_client_secret",
+    "netatmo_radius_km",
+    "netatmo_refresh_token",
+    CONF_NOTIFY_SERVICE,
+    "open_meteo_enabled",
+    "persons",
+    "radar_radius_km",
+    "test_tracker_entity",
+    CONF_WARNING_NOTIFICATIONS_ENABLED,
+})
+
+
+class LegacyEntryRuntimeError(RuntimeError):
+    """Raised when an explicit legacy entry cannot own a complete runtime."""
+
+
+def _explicit_entry_mode(entry) -> str | None:
+    """Return only a consistent, explicitly persisted schema-v3 mode."""
+
+    data_mode = entry.data.get(CONF_RUNTIME_MODE)
+    options_mode = entry.options.get(CONF_RUNTIME_MODE)
+    if data_mode not in (RUNTIME_MODE_LEGACY, RUNTIME_MODE_WORKER_ONLY):
+        return None
+    if options_mode not in (None, data_mode):
+        return None
+    return data_mode
+
+
+def _legacy_entry_values(entry) -> dict:
+    """Merge only legacy-owned entry fields, with options taking precedence."""
+
+    values = {
+        key: entry.data[key]
+        for key in _LEGACY_ENTRY_FIELDS
+        if key in entry.data
+    }
+    values.update({
+        key: entry.options[key]
+        for key in _LEGACY_ENTRY_FIELDS
+        if key in entry.options
     })
-}, extra=vol.ALLOW_EXTRA)
+    return values
 
 
-async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Behoud YAML-installaties; nieuwe installaties gebruiken een config entry."""
-    conf = config.get(DOMAIN)
-    if conf is None:
-        return True
-    return await _async_setup_runtime(hass, conf, config)
+def _legacy_runtime_config(hass: HomeAssistant, entry) -> dict:
+    """Build the closed legacy runtime input from one explicit owner entry."""
 
-
-async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
-    """Start Storm Tracker vanuit de configuratie-UI."""
-    raw = {**entry.data, **entry.options}
+    raw = _legacy_entry_values(entry)
+    persons = raw.get("persons", [])
+    if not isinstance(persons, (list, tuple)):
+        persons = []
     targets = []
-    for entity_id in raw.get("persons", []):
+    for entity_id in persons:
+        if not isinstance(entity_id, str) or not entity_id:
+            continue
         state = hass.states.get(entity_id)
-        name = state.attributes.get("friendly_name") if state is not None else None
+        friendly_name = (
+            state.attributes.get("friendly_name")
+            if state is not None
+            else None
+        )
+        target_id = entity_id.split(".", 1)[-1]
         targets.append({
-            "id": entity_id.split(".", 1)[-1],
-            "name": name or entity_id.split(".", 1)[-1].replace("_", " ").title(),
+            "id": target_id,
+            "name": friendly_name or target_id.replace("_", " ").title(),
             "location_entity": entity_id,
         })
+
     conf = {
         "home_lat": hass.config.latitude,
         "home_lon": hass.config.longitude,
         "targets": targets,
         "radar_radius_km": raw.get("radar_radius_km", 300.0),
-        "engine_sharing_distance_km": raw.get("engine_sharing_distance_km", 150.0),
+        "engine_sharing_distance_km": raw.get(
+            "engine_sharing_distance_km", 150.0
+        ),
         "eumetsat_consumer_key": raw.get("eumetsat_consumer_key"),
         "eumetsat_consumer_secret": raw.get("eumetsat_consumer_secret"),
         "meteofrance_api_token": raw.get("meteofrance_api_token"),
-        "meteofrance_application_id": raw.get("meteofrance_application_id"),
+        "meteofrance_application_id": raw.get(
+            "meteofrance_application_id"
+        ),
         "knmi_api_key": raw.get("knmi_api_key"),
         "knmi_wms_api_key": raw.get("knmi_wms_api_key"),
         "hsaf_username": raw.get("hsaf_username"),
@@ -149,63 +358,432 @@ async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
         "netatmo_client_id": raw.get("netatmo_client_id"),
         "netatmo_client_secret": raw.get("netatmo_client_secret"),
         "netatmo_refresh_token": raw.get("netatmo_refresh_token"),
-        "netatmo_radius_km": min(
-            float(raw.get("netatmo_radius_km", 20.0)), 20.0
-        ),
+        "netatmo_radius_km": raw.get("netatmo_radius_km", 175.0),
         "lightning_source_mode": raw.get("lightning_source_mode", "auto"),
         "open_meteo_enabled": raw.get("open_meteo_enabled", False),
         "analysis_mode": raw.get("analysis_mode", "full_send"),
+        CONF_WARNING_NOTIFICATIONS_ENABLED: raw.get(
+            CONF_WARNING_NOTIFICATIONS_ENABLED, False
+        ),
+        CONF_NOTIFY_SERVICE: raw.get(CONF_NOTIFY_SERVICE),
     }
-    if raw.get("test_tracker_entity"):
-        conf["fictieve_tracker_entity"] = raw["test_tracker_entity"]
-    setup_ok = await _async_setup_runtime(hass, conf, {DOMAIN: conf})
-    if setup_ok:
-        async def _async_options_updated(hass: HomeAssistant, updated_entry) -> None:
-            """Pas provideropties live toe zonder Home Assistant te herstarten."""
-            updated_config = {
-                **updated_entry.data,
-                **updated_entry.options,
-            }
-            setter = hass.data.get(DOMAIN, {}).get("set_lightning_source_mode")
-            if setter is not None:
-                await setter(
-                    updated_config.get("lightning_source_mode", "auto")
-                )
-            analysis_setter = hass.data.get(DOMAIN, {}).get(
-                "set_analysis_mode"
-            )
-            if analysis_setter is not None:
-                analysis_setter(
-                    updated_config.get("analysis_mode", "full_send")
-                )
-            configured_open_meteo = bool(
-                updated_config.get("open_meteo_enabled", False)
-            )
-            if configured_open_meteo != bool(
-                hass.data.get(DOMAIN, {}).get(
-                    "open_meteo_enabled", False
-                )
-            ):
-                await hass.config_entries.async_reload(updated_entry.entry_id)
+    test_tracker = raw.get("test_tracker_entity")
+    if isinstance(test_tracker, str) and test_tracker:
+        conf["fictieve_tracker_entity"] = test_tracker
+    return conf
 
+
+async def _async_options_updated(hass: HomeAssistant, updated_entry) -> None:
+    """Pas een geldige bliksembronoptie toe op de reeds actieve runtime."""
+    record = (
+        hass.data.get(DOMAIN, {})
+        .get(DATA_ENTRY_RUNTIMES, {})
+        .get(updated_entry.entry_id)
+    )
+    active_mode = record.get("mode") if isinstance(record, dict) else None
+    selected_mode = _explicit_entry_mode(updated_entry)
+    if active_mode != selected_mode:
+        # A reconfigure update is observed by the currently active owner.  The
+        # listener performs the one reload; the 2026.6+ config-flow helper must
+        # therefore only update-and-abort, not schedule a second reload.
+        await hass.config_entries.async_reload(updated_entry.entry_id)
+        return
+    updated_config = {
+        **updated_entry.data,
+        **updated_entry.options,
+    }
+    source_mode = updated_config.get("lightning_source_mode", "auto")
+    if (
+        not isinstance(source_mode, str)
+        or source_mode not in _LIGHTNING_SOURCE_MODES
+    ):
+        _LOGGER.warning(
+            "Ongeldige bliksembronmodus uit Options Flow genegeerd: %r",
+            source_mode,
+        )
+        return
+    try:
+        setter = hass.data[DOMAIN]["set_lightning_source_mode"]
+    except (KeyError, TypeError):
+        _LOGGER.debug(
+            "Bliksembronoptie %s wacht op een actieve runtime-setter",
+            source_mode,
+        )
+        return
+    if not callable(setter):
+        _LOGGER.warning(
+            "Bliksembronoptie %s geweigerd: runtime-setter is niet callable",
+            source_mode,
+        )
+        return
+    await setter(source_mode)
+
+
+async def _async_reload_legacy_entry(
+    hass: HomeAssistant, updated_entry
+) -> None:
+    """Apply legacy options through one complete unload/setup transaction."""
+
+    await hass.config_entries.async_reload(updated_entry.entry_id)
+
+
+async def _async_partial_legacy_cleanup(hass: HomeAssistant) -> None:
+    """Best-effort rollback for a legacy setup that failed before shutdown."""
+
+    data = hass.data.get(DOMAIN, {})
+    first_error = None
+    unsubscribers = list(data.get("unsubscribers", ()))
+    data["unsubscribers"] = []
+    for unsubscribe in reversed(unsubscribers):
+        if not callable(unsubscribe):
+            continue
+        try:
+            unsubscribe()
+        except BaseException as err:
+            if first_error is None:
+                first_error = err
+
+    lifecycle = data.get("provider_lifecycle")
+    stop_all = getattr(lifecycle, "async_stop_all", None)
+    if callable(stop_all):
+        try:
+            await stop_all()
+        except BaseException as err:
+            if first_error is None:
+                first_error = err
+
+    radar_worker = data.get("radar_frame_worker")
+    close_worker = getattr(radar_worker, "close", None)
+    if callable(close_worker):
+        try:
+            close_worker()
+        except BaseException as err:
+            if first_error is None:
+                first_error = err
+
+    if hass.services.has_service(
+        DOMAIN, SERVICE_RETRY_QUARANTINED_OBSERVATIONS
+    ):
+        hass.services.async_remove(
+            DOMAIN, SERVICE_RETRY_QUARANTINED_OBSERVATIONS
+        )
+    if first_error is not None:
+        raise first_error
+
+
+class _LegacyEntryRuntime:
+    """Own one explicit in-process provider/OFE runtime transactionally."""
+
+    def __init__(self, hass: HomeAssistant, entry) -> None:
+        self.hass = hass
+        self.entry = entry
+        self._options_unsubscribe = None
+        self._platform_forward_attempted = False
+        self._runtime_started = False
+        self._shutdown_called = False
+        self._unloaded = False
+
+    def _record(self) -> dict:
+        return {
+            "mode": RUNTIME_MODE_LEGACY,
+            "runtime_mode": RUNTIME_MODE_LEGACY,
+            "entry_id": self.entry.entry_id,
+            "manager": self,
+            "state": "starting",
+        }
+
+    def _claim(self) -> None:
+        domain_data = self.hass.data.setdefault(DOMAIN, {})
+        if domain_data:
+            raise LegacyEntryRuntimeError(
+                "een andere Storm Tracker-runtime bezit de globale runtime"
+            )
+        record = self._record()
+        domain_data[DATA_ENTRY_RUNTIMES] = {
+            self.entry.entry_id: record,
+        }
+        domain_data["runtime_mode"] = RUNTIME_MODE_LEGACY
+        domain_data["runtime_diagnostics"] = {
+            "runtime_mode": RUNTIME_MODE_LEGACY,
+            "selection_source": "data",
+            "legacy_compute_enabled": True,
+            "owner_entry_id": self.entry.entry_id,
+            "state": "starting",
+        }
+
+    def _owned_record(self) -> dict | None:
+        record = (
+            self.hass.data.get(DOMAIN, {})
+            .get(DATA_ENTRY_RUNTIMES, {})
+            .get(self.entry.entry_id)
+        )
+        if (
+            not isinstance(record, dict)
+            or record.get("mode") != RUNTIME_MODE_LEGACY
+            or record.get("manager") is not self
+        ):
+            return None
+        return record
+
+    async def async_setup(self) -> bool:
+        self._claim()
+        try:
+            conf = _legacy_runtime_config(self.hass, self.entry)
+            runtime_config = {DOMAIN: dict(conf)}
+            self._runtime_started = await _async_setup_runtime(
+                self.hass, conf, runtime_config
+            )
+            if not self._runtime_started:
+                await self.async_unload()
+                return False
+
+            unsubscribe = self.entry.add_update_listener(
+                _async_reload_legacy_entry
+            )
+            if not callable(unsubscribe):
+                raise LegacyEntryRuntimeError(
+                    "legacy-optionslistener gaf geen cleanupcallback terug"
+                )
+            self._options_unsubscribe = unsubscribe
+            self._platform_forward_attempted = True
+            await self.hass.config_entries.async_forward_entry_setups(
+                self.entry, PLATFORMS
+            )
+            record = self._owned_record()
+            if record is None:
+                raise LegacyEntryRuntimeError(
+                    "legacy-runtime verloor zijn exacte owner-record"
+                )
+            record["state"] = "active"
+            diagnostics = self.hass.data[DOMAIN]["runtime_diagnostics"]
+            diagnostics["state"] = "active"
+            return True
+        except BaseException:
+            if self._platform_forward_attempted:
+                try:
+                    await self.hass.config_entries.async_unload_platforms(
+                        self.entry, PLATFORMS
+                    )
+                except BaseException as err:
+                    _LOGGER.error(
+                        "Legacy-platformrollback faalde (%s)",
+                        type(err).__name__,
+                    )
+            try:
+                await self.async_unload()
+            except BaseException as err:
+                _LOGGER.error(
+                    "Legacy-runtimerollback faalde (%s)",
+                    type(err).__name__,
+                )
+            raise
+
+    async def async_unload(self) -> None:
+        if self._unloaded:
+            return
+        if self._owned_record() is None:
+            return
+        self._unloaded = True
+        first_error = None
+        unsubscribe = self._options_unsubscribe
+        self._options_unsubscribe = None
+        if callable(unsubscribe):
+            try:
+                unsubscribe()
+            except BaseException as err:
+                first_error = err
+
+        domain_data = self.hass.data.get(DOMAIN, {})
+        remove_shutdown_job = domain_data.pop("remove_shutdown_job", None)
+        if callable(remove_shutdown_job):
+            try:
+                remove_shutdown_job()
+            except BaseException as err:
+                if first_error is None:
+                    first_error = err
+
+        shutdown = domain_data.get("async_shutdown_runtime")
+        if callable(shutdown) and not self._shutdown_called:
+            self._shutdown_called = True
+            try:
+                await shutdown()
+            except BaseException as err:
+                if first_error is None:
+                    first_error = err
+        else:
+            try:
+                await _async_partial_legacy_cleanup(self.hass)
+            except BaseException as err:
+                if first_error is None:
+                    first_error = err
+
+        record = self._owned_record()
+        if record is not None:
+            records = domain_data.get(DATA_ENTRY_RUNTIMES, {})
+            records.pop(self.entry.entry_id, None)
+            if not records and self.hass.data.get(DOMAIN) is domain_data:
+                self.hass.data.pop(DOMAIN, None)
+        if first_error is not None:
+            raise first_error
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Reject YAML unconditionally; the final runtime is config-entry-only."""
+    if DOMAIN not in config:
+        return True
+    _LOGGER.error(
+        "Storm Tracker YAML is niet meer ondersteund: kies expliciet "
+        "worker_only of legacy in een configuratie-entry"
+    )
+    return False
+
+
+async def _async_setup_legacy_entry(hass: HomeAssistant, entry) -> bool:
+    manager = _LegacyEntryRuntime(hass, entry)
+    return await manager.async_setup()
+
+
+async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
+    """Start exactly one explicitly selected config-entry runtime."""
+    if hass.data.get(DOMAIN):
+        _LOGGER.error(
+            "Storm Tracker-entry %s geweigerd: de globale runtime is bezet",
+            entry.entry_id,
+        )
+        return False
+    mode = _explicit_entry_mode(entry)
+    if getattr(entry, "version", CONFIG_ENTRY_VERSION) != CONFIG_ENTRY_VERSION:
+        mode = None
+    if mode is None:
+        _LOGGER.error(
+            "Storm Tracker-entry %s mist een consistente expliciete "
+            "schema-v%d runtime_mode; er wordt geen fallback gestart",
+            entry.entry_id,
+            CONFIG_ENTRY_VERSION,
+        )
+        return False
+    if mode == RUNTIME_MODE_LEGACY:
+        return await _async_setup_legacy_entry(hass, entry)
+    if mode == RUNTIME_MODE_WORKER_ONLY:
+        from .worker_only_entry import async_setup_worker_only_entry
+
+        started = await async_setup_worker_only_entry(hass, entry)
+        if not started:
+            return False
         entry.async_on_unload(entry.add_update_listener(_async_options_updated))
-    return setup_ok
+        return True
+    return False
+
+
+async def async_unload_entry(hass: HomeAssistant, entry) -> bool:
+    """Unload only the exact recorded owner; never infer from current options."""
+    runtime = hass.data.get(DOMAIN, {})
+    record = runtime.get(DATA_ENTRY_RUNTIMES, {}).get(entry.entry_id, {})
+    mode = record.get("mode") if isinstance(record, dict) else None
+    if mode == RUNTIME_MODE_WORKER_ONLY:
+        from .worker_only_entry import async_unload_worker_only_entry
+
+        return await async_unload_worker_only_entry(hass, entry)
+    if mode != RUNTIME_MODE_LEGACY:
+        return False
+    manager = record.get("manager")
+    if not isinstance(manager, _LegacyEntryRuntime):
+        return False
+    unloaded = await hass.config_entries.async_unload_platforms(
+        entry, PLATFORMS
+    )
+    if not unloaded:
+        return False
+    await manager.async_unload()
+    return True
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry) -> bool:
+    """Persist an explicit schema-v3 mode without inventing legacy."""
+    version = getattr(entry, "version", 1)
+    if version == CONFIG_ENTRY_VERSION:
+        return _explicit_entry_mode(entry) is not None
+    if version not in (1, 2):
+        return False
+
+    data_mode = entry.data.get(CONF_RUNTIME_MODE)
+    options_mode = entry.options.get(CONF_RUNTIME_MODE)
+    valid_modes = (RUNTIME_MODE_LEGACY, RUNTIME_MODE_WORKER_ONLY)
+    if data_mode not in (None, *valid_modes):
+        return False
+    if options_mode not in (None, *valid_modes):
+        return False
+    if data_mode is not None and options_mode not in (None, data_mode):
+        return False
+    selected_mode = data_mode or options_mode or RUNTIME_MODE_WORKER_ONLY
+    migrated_data = dict(entry.data)
+    migrated_options = dict(entry.options)
+    migrated_data[CONF_RUNTIME_MODE] = selected_mode
+    migrated_options.pop(CONF_RUNTIME_MODE, None)
+    hass.config_entries.async_update_entry(
+        entry,
+        data=migrated_data,
+        options=migrated_options,
+        version=CONFIG_ENTRY_VERSION,
+    )
+    _LOGGER.warning(
+        "Storm Tracker-entry %s gemigreerd van schema-v%d naar expliciete "
+        "runtime_mode=%s",
+        entry.entry_id,
+        version,
+        selected_mode,
+    )
+    return True
 
 
 async def _async_setup_runtime(
     hass: HomeAssistant, conf: dict, config: ConfigType
 ) -> bool:
-    """Gedeelde runtime voor YAML en config entries."""
+    """Start the in-process provider/OFE runtime for an explicit legacy entry."""
+
+    # All database, provider, engine, decoder and HTTP imports live strictly
+    # inside the legacy branch.  Importing the integration for worker-only mode
+    # therefore cannot initialize the expensive in-process architecture.
+    from homeassistant.helpers.storage import Store
+
+    from .engine.lightning_backpressure import LightningUpdateCoalescer
+    from .engine.mcs_store import McsHistoryStore
+    from .engine.pressure_trend import PressureTrendTracker
+    from .engine.radar_frame import (
+        RadarFrameHistory,
+        audit_storm_object_recovery,
+    )
+    from .engine.region_manager import StormManager, WorkerTrackingRequiredError
+    from .engine.targets import build_target_specs, coordinates_from_state
+    from .geometry.location_resolver import load_places_json, resolve_location
+    from .http import StormTrackerGeoJsonView
+    from .providers.blitzortung import BlitzortungProvider
+    from .warning_dispatcher import (
+        WarningDispatcher,
+        build_warning_evaluation,
+    )
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN].setdefault("unsubscribers", [])
+
+    async def _partial_shutdown_runtime() -> None:
+        await _async_partial_legacy_cleanup(hass)
+
+    hass.data[DOMAIN]["async_shutdown_runtime"] = (
+        _partial_shutdown_runtime
+    )
+    from .worker_bridge import async_setup_worker_bridge
+    await async_setup_worker_bridge(hass)
+    from .radar_frame_worker import RadarFrameWorker
+    hass.data[DOMAIN]["radar_frame_worker"] = RadarFrameWorker(hass)
     ha_started = asyncio.Event()
     if hass.state == CoreState.running:
         ha_started.set()
     hass.data[DOMAIN]["ha_started_barrier"] = ha_started
-    if not hass.data[DOMAIN].get("geojson_http_registered"):
+    if not hass.data.get(_LEGACY_HTTP_REGISTRATION):
         hass.http.register_view(StormTrackerGeoJsonView(hass))
-        hass.data[DOMAIN]["geojson_http_registered"] = True
+        hass.data[_LEGACY_HTTP_REGISTRATION] = True
+    hass.data[DOMAIN]["geojson_http_registered"] = True
 
     home_lat        = conf["home_lat"]
     home_lon        = conf["home_lon"]
@@ -223,8 +801,113 @@ async def _async_setup_runtime(
     lightning_source_mode = conf.get("lightning_source_mode", "auto")
     analysis_mode = conf.get("analysis_mode", "full_send")
     open_meteo_enabled = bool(conf.get("open_meteo_enabled", False))
+    warning_notifications_enabled = (
+        conf.get(CONF_WARNING_NOTIFICATIONS_ENABLED) is True
+    )
+    warning_notify_service = conf.get(CONF_NOTIFY_SERVICE)
     hsaf_username = conf.get("hsaf_username")
     hsaf_password = conf.get("hsaf_password")
+    hass.data[DOMAIN]["legacy_provider_configuration"] = {
+        "radar": {
+            "aemet": {"status": "configured", "scope": "coverage_gated"},
+            "dpc": {"status": "configured", "scope": "coverage_gated"},
+            "dwd": {"status": "configured", "scope": "coverage_gated"},
+            "geosphere": {
+                "status": "configured", "scope": "coverage_gated"
+            },
+            "italiameteo": {
+                "status": "configured", "scope": "coverage_gated"
+            },
+            "kmi": {"status": "configured", "scope": "coverage_gated"},
+            "knmi": {
+                "status": (
+                    "configured" if knmi_api_key else "credentials_missing"
+                ),
+                "scope": "coverage_gated",
+            },
+            "meteofrance": {
+                "status": (
+                    "configured"
+                    if conf.get("meteofrance_api_token")
+                    or conf.get("meteofrance_application_id")
+                    else "credentials_missing"
+                ),
+                "scope": "coverage_gated",
+            },
+            "meteolux": {
+                "status": "configured", "scope": "coverage_gated"
+            },
+            "met_office": {
+                "status": "configured", "scope": "coverage_gated"
+            },
+            "opera": {"status": "configured", "scope": "coverage_gated"},
+            "rainviewer": {
+                "status": "configured", "scope": "global_visual"
+            },
+        },
+        "satellite": {
+            "hsaf_h40b": {
+                "status": (
+                    "configured"
+                    if hsaf_username and hsaf_password
+                    else "credentials_missing"
+                ),
+                "scope": "coverage_gated",
+            },
+            "noaa_enterprise_rainrate": {
+                "status": "configured", "scope": "coverage_gated"
+            },
+            "noaa_goes_rrqpe": {
+                "status": "configured", "scope": "coverage_gated"
+            },
+        },
+        "lightning": {
+            "blitzortung": {"status": "configured", "scope": "global"},
+            "eumetsat_li": {
+                "status": (
+                    "configured"
+                    if conf.get("eumetsat_consumer_key")
+                    and conf.get("eumetsat_consumer_secret")
+                    else "credentials_missing"
+                ),
+                "scope": "coverage_gated",
+            },
+            "noaa_goes_glm": {
+                "status": "configured", "scope": "coverage_gated"
+            },
+        },
+        "ground": {
+            "metar": {"status": "configured", "scope": "regional"},
+            "netatmo": {
+                "status": (
+                    "configured"
+                    if conf.get("netatmo_client_id")
+                    and conf.get("netatmo_client_secret")
+                    and conf.get("netatmo_refresh_token")
+                    else "credentials_missing"
+                ),
+                "scope": "regional",
+            },
+            "synoptic": {"status": "configured", "scope": "regional"},
+        },
+        "model": {
+            "open_meteo": {
+                "status": "configured" if open_meteo_enabled else "disabled",
+                "scope": "target",
+            },
+        },
+        "notifications": {
+            "warning_dispatch": {
+                "status": (
+                    "initializing"
+                    if warning_notifications_enabled else "disabled"
+                ),
+                "enabled": warning_notifications_enabled,
+                "notify_service_configured": bool(warning_notify_service),
+                "official_warning": False,
+            },
+        },
+    }
     hass.data[DOMAIN]["lightning_source_mode"] = lightning_source_mode
     hass.data[DOMAIN]["analysis_mode"] = analysis_mode
     hass.data[DOMAIN]["open_meteo_enabled"] = open_meteo_enabled
@@ -277,8 +960,16 @@ async def _async_setup_runtime(
     )
     hass.data[DOMAIN]["netatmo_pressure_trends_by_engine"] = {}
     hass.data[DOMAIN]["netatmo_observations_by_engine"] = {}
+    hass.data[DOMAIN]["synoptic_observations_by_engine"] = {}
+    hass.data[DOMAIN]["ground_observations_by_engine"] = {}
+    hass.data[DOMAIN]["synoptic_diagnostics"] = {
+        "status": "wachten",
+        "station_count": 0,
+        "wet_station_count": 0,
+        "regions": {},
+    }
     from .providers.open_meteo import OpenMeteoProvider
-    open_meteo_provider = OpenMeteoProvider(session=http_session)
+    open_meteo_provider = OpenMeteoProvider(session=http_session, hass=hass)
     hass.data[DOMAIN]["open_meteo"] = open_meteo_provider
     hass.data[DOMAIN]["open_meteo_result"] = (
         open_meteo_provider.last_result
@@ -293,6 +984,23 @@ async def _async_setup_runtime(
     )
     hass.data[DOMAIN]["open_meteo_results_by_target"] = {}
     hass.data[DOMAIN]["open_meteo_processed_sequence"] = 0
+
+    warning_dispatcher = WarningDispatcher(
+        hass,
+        enabled=warning_notifications_enabled,
+        notify_service=warning_notify_service,
+        store=Store(hass, 1, f"{DOMAIN}_warning_dispatch"),
+    )
+    await warning_dispatcher.async_initialize()
+    hass.data[DOMAIN]["warning_dispatcher"] = warning_dispatcher
+    hass.data[DOMAIN]["warning_dispatch_diagnostics"] = (
+        warning_dispatcher.diagnostics
+    )
+    hass.data[DOMAIN].setdefault(
+        "legacy_provider_configuration", {}
+    ).setdefault("notifications", {})[
+        "warning_dispatch"
+    ] = warning_dispatcher.diagnostics
 
     # ── StormEngine + OFE aanmaken ────────────────────────────────────────
     mcs_store = McsHistoryStore(hass)
@@ -320,12 +1028,473 @@ async def _async_setup_runtime(
             {"targets": [], "removed_engine": region.engine_id},
         )
 
+    async def _run_independent_tracking_check(
+        region, observations, start_state, start_revision
+    ) -> bool:
+        """Selecteer exact lokale legacy- of duurzame workertracking."""
+        validation = hass.data[DOMAIN].setdefault(
+            "tracking_worker_validation", {}
+        ).setdefault(region.engine_id, {
+            "matching_batches": 2,
+            "mode": "operationeel",
+        })
+        validation["mode"] = "operationeel"
+        batch_id = getattr(observations, "batch_id", None)
+        durable_store = hass.data[DOMAIN].get(
+            "durable_processing_store"
+        )
+        durable_attempt_id: str | None = None
+
+        async def _durable_call(method, **kwargs):
+            return await hass.async_add_executor_job(
+                partial(method, **kwargs)
+            )
+
+        async def _install_durable_candidate(
+            snapshots: list[dict],
+            attempt_id: str,
+        ):
+            # Valideer volledig vóór de DB-commit; na COMMITTED is het journal
+            # de autoriteit en mag geen inhoudelijke parsefout meer volgen.
+            validator = type(region.storm_engine)()
+            validator.install_committed_tracking_state(
+                list(snapshots),
+                revision=start_revision + 1,
+                committed_batch_ids=[batch_id],
+                publish=False,
+            )
+            await _durable_call(
+                durable_store.stage_result,
+                region_id=region.storage_key,
+                batch_id=batch_id,
+                attempt_id=attempt_id,
+                snapshots=snapshots,
+            )
+            committed_head = await _durable_call(
+                durable_store.commit_staged,
+                region_id=region.storage_key,
+                batch_id=batch_id,
+            )
+            committed_ids = await hass.async_add_executor_job(
+                durable_store.recent_committed_batch_ids,
+                region.storage_key,
+            )
+            region.storm_engine.install_committed_tracking_state(
+                list(committed_head.snapshots),
+                revision=committed_head.revision,
+                committed_batch_ids=committed_ids,
+            )
+            return committed_head
+
+        if (
+            not isinstance(batch_id, str)
+            or len(batch_id) != 32
+            or any(
+                character not in "0123456789abcdef"
+                for character in batch_id
+            )
+            or isinstance(start_revision, bool)
+            or not isinstance(start_revision, int)
+            or start_revision < 0
+        ):
+            raise ValueError("ongeldig durable trackingbatchcontract")
+        if hass.data[DOMAIN].get("runtime_mode") == RUNTIME_MODE_LEGACY:
+            validation.update({
+                "state": "lokale_verwerking_geselecteerd",
+                "mode": "legacy_local",
+                "parity": False,
+                "batch_id": batch_id,
+                "start_revision": start_revision,
+                "worker_required": False,
+            })
+            hass.data[DOMAIN].setdefault("tracking_worker", {})[
+                region.engine_id
+            ] = dict(validation)
+            # De expliciete normale-HA-modus laat RegionManager dezelfde
+            # observationbatch lokaal en idempotent door StormEngine committen.
+            return False
+        worker_first = True
+        worker_applied = False
+        # Do this before observation serialization, hashing and SQLite batch
+        # preparation. Raw observations already have durable RECEIVED receipts
+        # at OFE admission, so an offline worker can safely leave the intact
+        # rootbatch queued without causing any HA compute storm.
+        from .worker_bridge import worker_is_available
+        if not worker_is_available(hass):
+            validation.update({
+                "state": "wacht_op_worker",
+                "mode": "worker_required",
+                "parity": False,
+                "batch_id": batch_id,
+            })
+            hass.data[DOMAIN].setdefault("tracking_worker", {})[
+                region.engine_id
+            ] = dict(validation)
+            raise WorkerTrackingRequiredError(
+                "trackingworkerheartbeat ontbreekt of is verouderd"
+            )
+        serialized = []
+        for observation in observations:
+            raw = asdict(observation)
+            raw["obs_type"] = observation.obs_type.value
+            serialized.append(raw)
+        start_state = _normalized_tracking_state(start_state)
+        input_digest = _tracking_input_digest(serialized)
+        start_state_digest = _tracking_state_digest(start_state)
+        if durable_store is not None:
+            durable_record = await _durable_call(
+                durable_store.prepare_batch,
+                region_id=region.storage_key,
+                batch_id=batch_id,
+                root_batch_id=getattr(
+                    observations, "root_batch_id", batch_id
+                ),
+                parent_batch_id=getattr(
+                    observations, "parent_batch_id", None
+                ),
+                observations=list(observations),
+                start_revision=start_revision,
+                start_state=start_state,
+            )
+            if durable_record.state == "COMMITTED":
+                committed_head = await hass.async_add_executor_job(
+                    durable_store.load_tracking_head,
+                    region.storage_key,
+                )
+                if committed_head is None:
+                    from .engine.durable_processing import (
+                        DurableStateConflict,
+                    )
+                    raise DurableStateConflict(
+                        "COMMITTED receipt zonder trackinghead"
+                    )
+                # Het wireprotocol gebruikt een v5-domein; het append-only
+                # durable schema behoudt zijn bestaande v1-digestdomein zodat
+                # reeds opgeslagen trackingheads verifieerbaar blijven.
+                from .engine.durable_processing import (
+                    tracking_state_digest as durable_tracking_state_digest,
+                )
+                current_digest = durable_tracking_state_digest(
+                    region.storm_engine.export_tracking_state()
+                )
+                if (
+                    region.storm_engine.revision
+                    != committed_head.revision
+                    or current_digest
+                    != committed_head.snapshot_digest
+                ):
+                    committed_ids = await hass.async_add_executor_job(
+                        durable_store.recent_committed_batch_ids,
+                        region.storage_key,
+                    )
+                    region.storm_engine.install_committed_tracking_state(
+                        list(committed_head.snapshots),
+                        revision=committed_head.revision,
+                        committed_batch_ids=committed_ids,
+                    )
+                acknowledge = getattr(
+                    observations, "acknowledge", None
+                )
+                if callable(acknowledge):
+                    acknowledge()
+                return True
+            if durable_record.state == "RESULT_STAGED":
+                committed_head = await _durable_call(
+                    durable_store.commit_staged,
+                    region_id=region.storage_key,
+                    batch_id=batch_id,
+                )
+                committed_ids = await hass.async_add_executor_job(
+                    durable_store.recent_committed_batch_ids,
+                    region.storage_key,
+                )
+                region.storm_engine.install_committed_tracking_state(
+                    list(committed_head.snapshots),
+                    revision=committed_head.revision,
+                    committed_batch_ids=committed_ids,
+                )
+                acknowledge = getattr(
+                    observations, "acknowledge", None
+                )
+                if callable(acknowledge):
+                    acknowledge()
+                return True
+        elif region.storm_engine.has_applied_batch(batch_id):
+            acknowledge = getattr(observations, "acknowledge", None)
+            if callable(acknowledge):
+                acknowledge()
+            return True
+        diagnostic = {
+            "state": "transportcontrole",
+            "mode": "transportcontrole",
+            "parity": False,
+            "batch_id": batch_id,
+            "start_revision": start_revision,
+            "input_digest": input_digest,
+            "start_state_digest": start_state_digest,
+            "input_observation_count": len(serialized),
+        }
+        tracking_worker_job_id: str | None = None
+        try:
+            from .worker_bridge import async_request_worker_job
+
+            if durable_store is not None:
+                tracking_worker_job_id = (
+                    f"tracking-{batch_id}-"
+                    f"{durable_record.attempt_count + 1}"
+                )
+                durable_attempt_id = await _durable_call(
+                    durable_store.begin_attempt,
+                    region_id=region.storage_key,
+                    batch_id=batch_id,
+                    executor="worker",
+                    lease_seconds=20.0,
+                    job_id=tracking_worker_job_id,
+                )
+            result = await async_request_worker_job(
+                hass,
+                "tracking_operational",
+                {
+                    "tracking_protocol_version": 5,
+                    "region_id": region.engine_id,
+                    "batch_id": batch_id,
+                    "start_revision": start_revision,
+                    "input_observation_count": len(serialized),
+                    "start_state_count": len(start_state),
+                    "observations": serialized,
+                    "start_state": start_state,
+                    "input_digest": input_digest,
+                    "start_state_digest": start_state_digest,
+                },
+                timeout=12,
+                job_id=tracking_worker_job_id,
+            )
+            if result.get("method") != "independent_tracking_batch_v5":
+                raise ValueError("ongeldig zelfstandig trackingresultaat")
+            snapshots = result.get("snapshots")
+            active_tracks = result.get("active_tracks")
+            if (
+                result.get("tracking_protocol_version") != 5
+                or result.get("region_id") != region.engine_id
+                or result.get("batch_id") != batch_id
+                or type(result.get("start_revision")) is not int
+                or result.get("start_revision") != start_revision
+                or type(result.get("result_revision")) is not int
+                or result.get("result_revision") != start_revision + 1
+                or type(result.get("input_observation_count")) is not int
+                or result.get("input_observation_count") != len(serialized)
+                or type(result.get("start_state_count")) is not int
+                or result.get("start_state_count") != len(start_state)
+                or not _matching_sha256(
+                    result.get("input_digest"), input_digest
+                )
+                or not _matching_sha256(
+                    result.get("start_state_digest"),
+                    start_state_digest,
+                )
+                or not isinstance(snapshots, list)
+                or len(snapshots) > 2048
+                or type(result.get("snapshot_count")) is not int
+                or result.get("snapshot_count") != len(snapshots)
+                or not isinstance(active_tracks, list)
+                or any(
+                    not isinstance(snapshot, dict)
+                    or not isinstance(snapshot.get("storm_id"), str)
+                    or not snapshot.get("storm_id")
+                    or not _valid_tracking_v5_snapshot(snapshot)
+                    for snapshot in snapshots
+                )
+            ):
+                raise ValueError("onvolledig zelfstandig trackingresultaat")
+            snapshot_ids = [snapshot["storm_id"] for snapshot in snapshots]
+            if len(set(snapshot_ids)) != len(snapshot_ids):
+                raise ValueError("dubbele storm-ID in workerresultaat")
+            snapshots = _normalized_tracking_state(snapshots)
+            snapshot_digest = _tracking_state_digest(snapshots)
+            if not _matching_sha256(
+                result.get("snapshot_digest"), snapshot_digest
+            ):
+                raise ValueError("snapshot_digest komt niet overeen")
+            if worker_first:
+                if durable_store is not None:
+                    await _install_durable_candidate(
+                        snapshots, durable_attempt_id
+                    )
+                else:
+                    region.storm_engine.replace_tracking_state(
+                        snapshots,
+                        expected_revision=start_revision,
+                        batch_id=batch_id,
+                    )
+                parity = True
+                local_digest = snapshot_digest
+                worker_applied = True
+                acknowledge = getattr(observations, "acknowledge", None)
+                if callable(acknowledge):
+                    acknowledge()
+            diagnostic.update({
+                "state": "operationeel",
+                "mode": "worker_first",
+                "parity": parity,
+                "worker_digest": result.get("snapshot_digest"),
+                "local_digest": local_digest,
+                "batch_id": batch_id,
+                "start_revision": start_revision,
+                "result_revision": result.get("result_revision"),
+                "input_digest": input_digest,
+                "track_count": len(result.get("active_tracks", [])),
+                "split_count": int(result.get("split_count", 0)),
+                "merge_count": int(result.get("merge_count", 0)),
+                "lineage_events": list(
+                    result.get("lineage_events", [])
+                )[:20],
+                "start_state_digest": start_state_digest,
+                "matching_batches": validation["matching_batches"],
+            })
+        except asyncio.CancelledError:
+            if durable_store is not None and durable_attempt_id:
+                try:
+                    await _durable_call(
+                        durable_store.fail_attempt,
+                        region_id=region.storage_key,
+                        batch_id=batch_id,
+                        attempt_id=durable_attempt_id,
+                        error_category="CancelledError",
+                        error_detail="trackingcallback werd geannuleerd",
+                    )
+                except Exception:
+                    _LOGGER.exception(
+                        "Geannuleerde durable attempt kon niet veilig "
+                        "naar PREPARED worden teruggezet"
+                    )
+            raise
+        except (
+            asyncio.TimeoutError,
+            KeyError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as err:
+            durable_committed = False
+            if durable_store is not None:
+                durable_after_error = await _durable_call(
+                    durable_store.load_batch,
+                    region_id=region.storage_key,
+                    batch_id=batch_id,
+                )
+                durable_committed = bool(
+                    durable_after_error is not None
+                    and durable_after_error.state == "COMMITTED"
+                )
+            if (
+                region.storm_engine.has_applied_batch(batch_id)
+                or durable_committed
+            ):
+                if (
+                    durable_committed
+                    and not region.storm_engine.has_applied_batch(batch_id)
+                ):
+                    committed_head = await hass.async_add_executor_job(
+                        durable_store.load_tracking_head,
+                        region.storage_key,
+                    )
+                    committed_ids = await hass.async_add_executor_job(
+                        durable_store.recent_committed_batch_ids,
+                        region.storage_key,
+                    )
+                    region.storm_engine.install_committed_tracking_state(
+                        list(committed_head.snapshots),
+                        revision=committed_head.revision,
+                        committed_batch_ids=committed_ids,
+                    )
+                worker_applied = True
+                acknowledge = getattr(observations, "acknowledge", None)
+                if callable(acknowledge):
+                    acknowledge()
+                diagnostic.update({
+                    "state": "operationeel",
+                    "mode": "worker_first",
+                    "parity": True,
+                    "batch_id": batch_id,
+                    "start_revision": start_revision,
+                    "result_revision": region.storm_engine.revision,
+                    "post_commit_warning": type(err).__name__,
+                })
+            elif durable_store is not None:
+                from .engine.durable_processing import (
+                    DurableProcessingError,
+                )
+                if durable_attempt_id:
+                    await _durable_call(
+                        durable_store.fail_attempt,
+                        region_id=region.storage_key,
+                        batch_id=batch_id,
+                        attempt_id=durable_attempt_id,
+                        error_category=type(err).__name__,
+                        error_detail=str(err),
+                    )
+                raise DurableProcessingError(
+                    "trackingworker niet beschikbaar; batch blijft duurzaam "
+                    "wachten zonder lokale CPU-fallback"
+                ) from err
+            else:
+                from .engine.durable_processing import DurableProcessingError
+                raise DurableProcessingError(
+                    "trackingworker niet beschikbaar en geen duurzaam journal"
+                ) from err
+        hass.data[DOMAIN].setdefault("tracking_worker", {})[
+            region.engine_id
+        ] = diagnostic
+        hass.data[DOMAIN].setdefault(
+            "verification_samples_pending", []
+        ).append({
+            "sample_key": (
+                f"worker_tracking:{region.engine_id}:"
+                f"{int(time.time() // 60)}"
+            ),
+            "sample_type": "worker_tracking",
+            "target_id": region.engine_id,
+            "nominal_minute": int(time.time() // 60),
+            "observed_at": time.time(),
+            "latitude": region.center_lat,
+            "longitude": region.center_lon,
+            "own_status": diagnostic["state"],
+            "own_forecast_available": bool(diagnostic.get("parity")),
+            "snapshot": {
+                "mode": diagnostic["mode"],
+                "parity": diagnostic.get("parity", False),
+                "batch_id": diagnostic.get("batch_id"),
+                "start_revision": diagnostic.get("start_revision"),
+                "result_revision": diagnostic.get("result_revision"),
+                "input_digest": diagnostic.get("input_digest"),
+                "worker_digest": diagnostic.get("worker_digest"),
+                "local_digest": diagnostic.get("local_digest"),
+                "start_state_digest": diagnostic.get(
+                    "start_state_digest"
+                ),
+                "input_observation_count": len(serialized),
+                "matching_batches": diagnostic.get("matching_batches", 0),
+                "split_count": diagnostic.get("split_count", 0),
+                "merge_count": diagnostic.get("merge_count", 0),
+                "lineage_events": diagnostic.get("lineage_events", []),
+            },
+        })
+        hass.bus.async_fire(f"{DOMAIN}_worker_status_update")
+        # Alleen een volledig gevalideerde workersnapshot bevestigt de batch.
+        # Er bestaat bewust geen lokale CPU-fallback.
+        return worker_applied
+
     storm_manager = StormManager(
         hass,
         sharing_distance_km=sharing_distance,
         observation_radius_km=radar_radius,
         on_engine_removed=_on_region_removed,
+        on_observation_batch=_run_independent_tracking_check,
+        allow_local_processing=True,
     )
+    # Fail closed vanaf het eerste moment dat de manager kan worden gedeeld.
+    # Geen directe caller mag de korte setupfase vóór journalherstel benutten.
+    storm_manager.begin_durable_recovery()
     active_region = storm_manager.assign_target(fictieve_entity, home_lat, home_lon)
     hass.data[DOMAIN]["targets"]["home"]["region_engine_id"] = active_region.engine_id
     storm_engine = active_region.storm_engine
@@ -336,8 +1505,17 @@ async def _async_setup_runtime(
         """Koppel opslag en publicatie eenmaal aan een runtime-regio."""
         if region.engine_id in prepared_regions:
             return 0
+        durable_configurator = hass.data[DOMAIN].get(
+            "configure_durable_region"
+        )
+        if durable_configurator is not None:
+            durable_configurator(region)
         region_storm_engine = region.storm_engine
         restored = mcs_store.restore_engine(region.storage_key, region_storm_engine)
+        # Targetbinding bestond al vóór restore; herbouw daarom nu ook het
+        # lossless computeplan tegen de werkelijk herstelde trackingstate.
+        # Sensorreads tonen alleen deze snapshot en starten geen berekening.
+        region.refresh_compute_schedule()
 
         def _publish(storms) -> None:
             if region is active_region:
@@ -422,6 +1600,66 @@ async def _async_setup_runtime(
 
     _activate_region(active_region)
 
+    async def _retry_quarantined_observations(call) -> None:
+        """Heractiveer expliciet bewaarde poisonbatches per regio of globaal."""
+        requested_engine = call.data.get("region_engine")
+        regions = list(storm_manager.get_all_engines())
+        if requested_engine:
+            regions = [
+                region
+                for region in regions
+                if region.engine_id == requested_engine
+            ]
+            if not regions:
+                _LOGGER.warning(
+                    "Quarantaine-retry geweigerd: onbekende RegionEngine %s",
+                    requested_engine,
+                )
+                return
+
+        retried_batches = 0
+        for region in regions:
+            durable_store = hass.data[DOMAIN].get(
+                "durable_processing_store"
+            )
+            durable_records = ()
+            if durable_store is not None:
+                durable_records = await hass.async_add_executor_job(
+                    partial(
+                        durable_store.retry_quarantined,
+                        region_id=region.storage_key,
+                    )
+                )
+            retried_batches += await (
+                region.ofe.async_retry_quarantined()
+            )
+            retried_batches += await region.ofe.async_restore_batches(
+                durable_records
+            )
+        hass.bus.async_fire(
+            f"{DOMAIN}_storms_updated",
+            {
+                "reason": "quarantine_retry",
+                "region_engine": requested_engine,
+                "retried_batches": retried_batches,
+            },
+        )
+        _LOGGER.info(
+            "OFE-quarantaine opnieuw aangeboden: %d batches (%s)",
+            retried_batches,
+            requested_engine or "alle RegionEngines",
+        )
+
+    if not hass.services.has_service(
+        DOMAIN, SERVICE_RETRY_QUARANTINED_OBSERVATIONS
+    ):
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_RETRY_QUARANTINED_OBSERVATIONS,
+            _retry_quarantined_observations,
+            schema=RETRY_QUARANTINED_SERVICE_SCHEMA,
+        )
+
     def _pressure_tracker_for_region(region) -> PressureTrendTracker:
         """Geef iedere RegionEngine een strikt gescheiden drukhistoriek."""
         tracker = pressure_trackers_by_engine.get(region.engine_id)
@@ -455,9 +1693,13 @@ async def _async_setup_runtime(
         token_manager = NetatmoTokenManager(client_id, client_secret, refresh_token)
         hass.data[DOMAIN]["netatmo_token"] = token_manager
     hass.data[DOMAIN]["netatmo_providers_by_engine"] = {}
+    hass.data[DOMAIN]["netatmo_roaming_provider"] = None
+    hass.data[DOMAIN]["netatmo_roaming_center"] = None
+    hass.data[DOMAIN]["netatmo_roaming_last_query"] = 0.0
+    hass.data[DOMAIN]["netatmo_roaming_observations"] = []
 
     # ── Blitzortung (wereldwijd, locatie-onafhankelijk) ───────────────────
-    def _record_lightning(observation) -> None:
+    def _record_lightning(observation) -> list[str]:
         """Bewaar een compacte kaartbuffer, los van regenpolygonen."""
         cutoff = time.time() - 15 * 60
         recent = [
@@ -477,6 +1719,7 @@ async def _async_setup_runtime(
             "engine_ids": engine_ids,
         })
         hass.data[DOMAIN]["recent_lightning"] = recent[-1000:]
+        return engine_ids
 
     lightning_updates = LightningUpdateCoalescer(
         hass.loop.call_later,
@@ -486,29 +1729,34 @@ async def _async_setup_runtime(
         lambda payload: hass.bus.async_fire(
             f"{DOMAIN}_lightning_map_update", payload
         ),
-        lambda rows: log_lightning_batch(hass, rows),
+        lambda rows: hass.data[DOMAIN]["lightning_aggregates_pending"].extend(
+            rows
+        ),
     )
     hass.data[DOMAIN]["lightning_update_coalescer"] = lightning_updates
 
-    def _queue_lightning_update(observation, *, log: bool = False) -> None:
+    def _queue_lightning_update(
+        observation, *, log: bool = False, engine_ids: list[str] | None = None
+    ) -> None:
         lightning_updates.submit({
             "lat": observation.lat,
             "lon": observation.lon,
             "timestamp": observation.timestamp,
             "source": observation.source,
+            "engine_ids": engine_ids or [],
         }, log=log)
 
-    def _on_blitz(obs):
+    async def _on_blitz(obs):
         if hass.data[DOMAIN].get("lightning_source_mode") == "satellite_test":
             return
-        if storm_manager.route_observation(obs) == 0:
+        if await storm_manager.async_route_observation(obs) == 0:
             return
         hass.data[DOMAIN]["lightning_source"] = "blitzortung"
         hass.data[DOMAIN]["last_lightning"] = obs
         hass.data[DOMAIN].setdefault("lightning_count", 0)
         hass.data[DOMAIN]["lightning_count"] += 1
-        _record_lightning(obs)
-        _queue_lightning_update(obs, log=True)
+        engine_ids = _record_lightning(obs)
+        _queue_lightning_update(obs, log=True, engine_ids=engine_ids)
 
     def _blitz_regions():
         return [
@@ -526,6 +1774,7 @@ async def _async_setup_runtime(
             http_session,
             conf["eumetsat_consumer_key"],
             conf["eumetsat_consumer_secret"],
+            hass=hass,
         )
         hass.data[DOMAIN]["eumetsat_li_provider"] = eumetsat
         hass.data[DOMAIN]["eumetsat_li_status"] = "standby"
@@ -536,7 +1785,7 @@ async def _async_setup_runtime(
         preferred_source_for_longitude,
         satellites_for_regions,
     )
-    goes_glm = NoaaGoesGlmProvider(http_session)
+    goes_glm = NoaaGoesGlmProvider(http_session, hass=hass)
     hass.data[DOMAIN]["goes_glm_provider"] = goes_glm
     hass.data[DOMAIN]["goes18_glm_status"] = "standby"
     hass.data[DOMAIN]["goes19_glm_status"] = "standby"
@@ -552,7 +1801,13 @@ async def _async_setup_runtime(
     from .providers.aemet_radar import AemetRadarProvider
     from .providers.lifecycle import ProviderLifecycleController
 
-    provider_lifecycle = ProviderLifecycleController(cooldown_seconds=300)
+    provider_lifecycle = ProviderLifecycleController(
+        cooldown_seconds=300,
+        # Worker-first national providers own deadlines up to 70 seconds.
+        # This controller must never cancel their HA waiter while the accepted
+        # workerjob continues orphaned in the isolated queue.
+        fetch_timeout_seconds=90,
+    )
     def _national_context(plugin, areas):
         return ProviderContext(
             hass=hass,
@@ -595,12 +1850,24 @@ async def _async_setup_runtime(
         NoaaGoesRrqpeProvider,
         satellite_for_longitude as goes_rrqpe_satellite_for_longitude,
     )
-    hass.data[DOMAIN]["noaa_goes_rrqpe_provider"] = NoaaGoesRrqpeProvider(http_session)
+    hass.data[DOMAIN]["noaa_goes_rrqpe_provider"] = NoaaGoesRrqpeProvider(
+        http_session, hass=hass
+    )
     _LOGGER.info("NOAA GOES-18/19 RRQPE geconfigureerd als slapende Amerika-fallback")
+    from .providers.noaa_enterprise_rainrate import (
+        NoaaEnterpriseRainRateProvider,
+    )
+    hass.data[DOMAIN][
+        "noaa_enterprise_rainrate_provider"
+    ] = NoaaEnterpriseRainRateProvider(hass)
+    _LOGGER.info(
+        "NOAA Enterprise Rain Rate geconfigureerd als worker-first "
+        "wereldwijde satellietfallback"
+    )
     if hsaf_username and hsaf_password:
         from .providers.hsaf_h40b import HsafH40bProvider
         hass.data[DOMAIN]["hsaf_h40b_provider"] = HsafH40bProvider(
-            hsaf_username, hsaf_password
+            hsaf_username, hsaf_password, hass=hass
         )
         _LOGGER.info("H SAF H40B geconfigureerd als slapende satellietfallback")
     else:
@@ -696,6 +1963,35 @@ async def _async_setup_runtime(
             ),
             last_success=float(goes_success) if goes_success is not None else None,
         )
+        enterprise = hass.data[DOMAIN].get(
+            "noaa_enterprise_rainrate_provider"
+        )
+        enterprise_success = (
+            getattr(enterprise, "_last_success_ts", None)
+            if enterprise else None
+        )
+        enterprise_supported = bool(
+            region is not None
+            and enterprise is not None
+            and enterprise.supports(CoverageArea(
+                region.center_lat,
+                region.center_lon,
+                region.observation_radius_km,
+            )).supported
+        )
+        states["noaa_enterprise_rainrate"] = SourceState(
+            configured=enterprise_supported,
+            healthy=bool(
+                enterprise_supported
+                and enterprise.healthy
+                and enterprise_success is not None
+                and now_ts - float(enterprise_success) <= 45 * 60
+            ),
+            last_success=(
+                float(enterprise_success)
+                if enterprise_success is not None else None
+            ),
+        )
         return states
 
     def _refresh_engine_radar_decisions():
@@ -732,6 +2028,12 @@ async def _async_setup_runtime(
                 .get(region.engine_id, 0),
                 goes_observations=hass.data[DOMAIN]
                 .get("noaa_goes_rrqpe_observation_counts_by_engine", {})
+                .get(region.engine_id, 0),
+                enterprise_observations=hass.data[DOMAIN]
+                .get(
+                    "noaa_enterprise_rainrate_observation_counts_by_engine",
+                    {},
+                )
                 .get(region.engine_id, 0),
                 opera_coverage_complete=bool(
                     hass.data[DOMAIN]
@@ -798,6 +2100,23 @@ async def _async_setup_runtime(
                 "rainviewer_observations": hass.data[DOMAIN]
                 .get("rainviewer_observation_counts_by_engine", {})
                 .get(region.engine_id, 0),
+                "enterprise_rainrate": {
+                    "supported": states["noaa_enterprise_rainrate"].configured,
+                    "status": (
+                        hass.data[DOMAIN]
+                        .get("noaa_enterprise_rainrate_diagnostics", {})
+                        .get("status", "standby")
+                    ),
+                    "observations": hass.data[DOMAIN]
+                    .get(
+                        "noaa_enterprise_rainrate_observation_counts_by_engine",
+                        {},
+                    )
+                    .get(region.engine_id, 0),
+                    "mode": hass.data[DOMAIN]
+                    .get("noaa_enterprise_rainrate_diagnostics", {})
+                    .get("mode", "worker_first"),
+                },
                 "goes_rrqpe": {
                     "supported": states["noaa_goes_rrqpe"].configured,
                     "status": (
@@ -822,23 +2141,84 @@ async def _async_setup_runtime(
         )
         return decisions
 
-    def _route_selected_radar(observations, source: str) -> int:
+    async def _route_selected_radar(
+        observations, source: str
+    ) -> int:
         decisions = hass.data[DOMAIN].get("radar_sources_by_engine", {})
         routed = 0
         for region in storm_manager.get_all_engines():
-            if (decisions.get(region.engine_id) or {}).get("source") != source:
+            region_decision = decisions.get(region.engine_id) or {}
+            if region_decision.get("fusion", {}).get("active") and source in set(
+                region_decision.get("fusion", {}).get("sources", ())
+            ):
                 continue
-            for observation in observations:
-                routed += int(storm_manager.route_observation_to_engine(
-                    region.engine_id, observation
-                ))
+            if region_decision.get("source") != source:
+                continue
+            routed += (
+                await storm_manager.async_route_observations_to_engine(
+                    region.engine_id, observations
+                )
+            )
+        return routed
+
+    async def _route_american_radar_fusion(
+        rainviewer_observations,
+        enterprise_observations,
+        goes_observations,
+    ) -> int:
+        from .providers.radar_fusion import (
+            fuse_radar_observations,
+            is_american_region,
+        )
+
+        decisions = hass.data[DOMAIN].get("radar_sources_by_engine", {})
+        routed = 0
+        now_ts = time.time()
+        for region in storm_manager.get_all_engines():
+            decision = decisions.get(region.engine_id) or {}
+            if (
+                decision.get("source") != "rainviewer"
+                or not is_american_region(decision.get("country_codes", ()))
+            ):
+                continue
+            selected_primary = [
+                item for item in rainviewer_observations
+                if region.accepts_observation(item.lat, item.lon)
+            ]
+            selected_enterprise = [
+                item for item in enterprise_observations
+                if region.accepts_observation(item.lat, item.lon)
+            ]
+            selected_goes = [
+                item for item in goes_observations
+                if region.accepts_observation(item.lat, item.lon)
+            ]
+            fused, diagnostic = fuse_radar_observations(
+                selected_primary,
+                (selected_enterprise, selected_goes),
+                now=now_ts,
+            )
+            decision["fusion"] = diagnostic
+            if not diagnostic["active"]:
+                continue
+            decision["reason"] = (
+                f"{decision['reason']}; RainViewer aangevuld met NOAA "
+                "waar de primaire radar geen echo bevat"
+            )
+            routed += (
+                await storm_manager.async_route_observations_to_engine(
+                    region.engine_id, fused
+                )
+            )
         return routed
     from .engine.radar_calibration import RadarCalibrationObserver
     from .engine.calibration_store import CalibrationDataStore
     from .engine.provider_bias import build_profile_index
+    from .engine.virtual_probe import VirtualProbeManager
     hass.data[DOMAIN]["radar_calibration_observer"] = RadarCalibrationObserver(
         evaluation_center=(home_lat, home_lon),
         evaluation_radius_km=radar_radius,
+        compare_locally=False,
     )
     calibration_store = CalibrationDataStore(
         hass.config.path(".storage", "storm_tracker_v3_calibration.sqlite3")
@@ -846,10 +2226,182 @@ async def _async_setup_runtime(
     calibration_stats = await hass.async_add_executor_job(
         calibration_store.initialize
     )
-    bias_profiles = await hass.async_add_executor_job(
-        calibration_store.load_bias_profiles
+    # The HA-side database is retained for rollback and lightweight telemetry,
+    # but its legacy radar profiles are no longer operational input. Start
+    # conservatively empty until the worker corpus snapshot arrives.
+    bias_profiles = []
+    restored_virtual_probes = await hass.async_add_executor_job(
+        calibration_store.load_pending_virtual_probes
+    )
+    restored_virtual_probe_history = await hass.async_add_executor_job(
+        calibration_store.load_virtual_probe_history
     )
     hass.data[DOMAIN]["radar_calibration_store"] = calibration_store
+    from .engine.durable_processing import (
+        DurableProcessingStore,
+        STATE_PREPARED,
+        STATE_RESULT_STAGED,
+    )
+    durable_processing_store = DurableProcessingStore(
+        calibration_store.path,
+        build_id="integration-1.14.37-worker-1.17.38",
+    )
+    durable_processing_stats = await hass.async_add_executor_job(
+        durable_processing_store.initialize
+    )
+    hass.data[DOMAIN][
+        "durable_processing_store"
+    ] = durable_processing_store
+
+    def _configure_durable_region(region) -> None:
+        async def _persist_region_observations(
+            observations, *, deduplicated=None
+        ):
+            return await hass.async_add_executor_job(
+                partial(
+                    durable_processing_store.receive_observations,
+                    region_id=region.storage_key,
+                    observations=list(observations),
+                    deduplicated=deduplicated,
+                )
+            )
+
+        async def _persist_region_quarantine(batches, error):
+            for batch in batches:
+                lineage = batch._receipt.lineage
+                await hass.async_add_executor_job(
+                    partial(
+                        durable_processing_store.quarantine_batch,
+                        region_id=region.storage_key,
+                        batch_id=batch.batch_id,
+                        reason=(
+                            f"{type(error).__name__}: {str(error)[:240]}"
+                        ),
+                        lineage={
+                            "root_batch_id": batch.root_batch_id,
+                            "failures": lineage.failures,
+                            "failures_since_success": (
+                                lineage.failures_since_success
+                            ),
+                            "successes": lineage.successes,
+                            "epoch": lineage.epochs,
+                        },
+                    )
+                )
+
+        region.ofe.configure_durable_ingest(
+            _persist_region_observations,
+            classified_deduplication=True,
+        )
+        region.ofe.configure_durable_quarantine(
+            _persist_region_quarantine
+        )
+
+    hass.data[DOMAIN][
+        "configure_durable_region"
+    ] = _configure_durable_region
+    hass.data[DOMAIN][
+        "durable_processing"
+    ] = {
+        "status": "recovering",
+        **durable_processing_stats,
+    }
+    durable_recovered_engines: set[str] = set()
+
+    async def _recover_durable_region(region) -> tuple[int, int]:
+        if region.engine_id in durable_recovered_engines:
+            return 0, 0
+        region.durable_region_id = await hass.async_add_executor_job(
+            partial(
+                durable_processing_store.resolve_region_id,
+                center_lat=region.center_lat,
+                center_lon=region.center_lon,
+                observation_radius_km=region.observation_radius_km,
+                sharing_distance_km=storm_manager.sharing_distance_km,
+                target_ids=sorted(region.projection_targets),
+            )
+        )
+        _configure_durable_region(region)
+        recovery_backlog = await hass.async_add_executor_job(
+            partial(
+                durable_processing_store.recover_after_restart,
+                region_id=region.storage_key,
+            )
+        )
+        for record in recovery_backlog:
+            if record.state != STATE_RESULT_STAGED:
+                continue
+            await hass.async_add_executor_job(
+                partial(
+                    durable_processing_store.commit_staged,
+                    region_id=region.storage_key,
+                    batch_id=record.batch_id,
+                )
+            )
+        durable_head = await hass.async_add_executor_job(
+            durable_processing_store.load_tracking_head,
+            region.storage_key,
+        )
+        if durable_head is not None:
+            committed_ids = await hass.async_add_executor_job(
+                durable_processing_store.recent_committed_batch_ids,
+                region.storage_key,
+            )
+            region.storm_engine.install_committed_tracking_state(
+                list(durable_head.snapshots),
+                revision=durable_head.revision,
+                committed_batch_ids=committed_ids,
+            )
+        prepared_backlog = [
+            record
+            for record in recovery_backlog
+            if record.state == STATE_PREPARED
+        ]
+        restored_batches = await region.ofe.async_restore_batches(
+            prepared_backlog
+        )
+        received_backlog = await hass.async_add_executor_job(
+            partial(
+                durable_processing_store
+                .recover_received_observations,
+                region_id=region.storage_key,
+            )
+        )
+        restored_observations = (
+            await region.ofe.async_restore_observations(
+                received_backlog
+            )
+        )
+        if prepared_backlog or received_backlog:
+            await region.ofe.async_flush_pending()
+        region.recovery_ready = True
+        durable_recovered_engines.add(region.engine_id)
+        return restored_batches, restored_observations
+
+    hass.data[DOMAIN][
+        "recover_durable_region"
+    ] = _recover_durable_region
+    recovered_batch_count = 0
+    recovered_observation_count = 0
+    for region in storm_manager.get_all_engines():
+        restored_batches, restored_observations = (
+            await _recover_durable_region(region)
+        )
+        recovered_batch_count += restored_batches
+        recovered_observation_count += restored_observations
+    durable_integrity = await hass.async_add_executor_job(
+        durable_processing_store.integrity_check
+    )
+    storm_manager.verify_durable_integrity(
+        integrity_healthy=bool(durable_integrity.get("healthy"))
+    )
+    hass.data[DOMAIN]["durable_processing"].update({
+        "status": "integrity_verified",
+        "admission_ready": False,
+        "recovered_batches": recovered_batch_count,
+        "recovered_observations": recovered_observation_count,
+        **durable_integrity,
+    })
     hass.data[DOMAIN]["radar_bias_profiles"] = bias_profiles
     hass.data[DOMAIN]["radar_bias_profile_index"] = build_profile_index(
         bias_profiles
@@ -859,11 +2411,52 @@ async def _async_setup_runtime(
         "comparisons_written": 0, "verification_samples_written": 0,
         "pysteps_preflight_samples_written": 0,
         "system_performance_samples_written": 0,
+        "lightning_aggregate_cells_written": 0,
+        "provider_cycle_samples_written": 0,
+        "ground_observations_written": 0,
+        "ground_quality_assessments_written": 0,
+        "ground_confirmation_decisions_written": 0,
         **calibration_stats,
     }
     hass.data[DOMAIN]["verification_samples_pending"] = []
     hass.data[DOMAIN]["pysteps_preflight_samples_pending"] = []
     hass.data[DOMAIN]["system_performance_samples_pending"] = []
+    hass.data[DOMAIN]["lightning_aggregates_pending"] = []
+    hass.data[DOMAIN]["provider_cycle_samples_pending"] = []
+    hass.data[DOMAIN]["ground_observations_pending"] = []
+    hass.data[DOMAIN]["ground_quality_assessments_pending"] = []
+    hass.data[DOMAIN]["ground_confirmation_decisions_pending"] = []
+
+    def _queue_provider_cycle_sample(
+        provider: str,
+        scope_key: str,
+        latitude: float,
+        longitude: float,
+        metrics: dict,
+        *,
+        observed_at: float | None = None,
+    ) -> None:
+        timestamp = float(observed_at or time.time())
+        nominal_minute = int(timestamp // 60)
+        hass.data[DOMAIN]["provider_cycle_samples_pending"].append({
+            "sample_key": (
+                f"{provider}:{scope_key}:{nominal_minute}"
+            ),
+            "provider": provider,
+            "scope_key": scope_key,
+            "nominal_minute": nominal_minute,
+            "observed_at": timestamp,
+            "latitude": float(latitude),
+            "longitude": float(longitude),
+            "metrics": metrics,
+        })
+    hass.data[DOMAIN]["virtual_probe_manager"] = VirtualProbeManager(
+        restored_virtual_probes,
+        restored_virtual_probe_history,
+    )
+    hass.data[DOMAIN]["virtual_probe_diagnostics"] = hass.data[DOMAIN][
+        "virtual_probe_manager"
+    ].diagnostics()
     initial_diagnostics = (
         hass.data[DOMAIN]["radar_calibration_observer"].diagnostics()
     )
@@ -1015,30 +2608,74 @@ async def _async_setup_runtime(
         *,
         engine_id: str | None = None,
     ) -> int:
-        """Registreer een providerframe uitsluitend binnen zijn RegionEngine(s)."""
-        observations = list(observations)
-        if timestamp is None and observations:
-            timestamp = float(observations[0].timestamp)
+        """Queue only a small worker-artifact capture descriptor.
+
+        ``observations`` is deliberately not iterated: rasterisation,
+        footprint walking, comparison and original-overlay compression belong
+        to the worker and may never stall Home Assistant's event loop.
+        """
         if timestamp is None:
             return 0
+        per_engine_providers = {
+            "rainviewer": hass.data[DOMAIN].get(
+                "rainviewer_providers_by_engine", {}
+            ),
+            "opera": hass.data[DOMAIN].get(
+                "opera_providers_by_engine", {}
+            ),
+        }.get(source, {})
+        if per_engine_providers:
+            providers = (
+                {engine_id: per_engine_providers.get(engine_id)}
+                if engine_id is not None
+                else per_engine_providers
+            )
+        else:
+            shared_key = {
+                "kmi": "kmi_provider",
+                "knmi": "knmi_provider",
+                "hsaf_h40b": "hsaf_h40b_provider",
+                "noaa_goes_rrqpe": "noaa_goes_rrqpe_provider",
+                "noaa_enterprise_rainrate":
+                    "noaa_enterprise_rainrate_provider",
+            }.get(source)
+            shared_provider = (
+                hass.data[DOMAIN].get(shared_key) if shared_key else None
+            )
+            providers = {engine_id or "shared": shared_provider}
+        provider = next(
+            (value for value in providers.values() if value is not None),
+            None,
+        )
+        artifact = (
+            getattr(provider, "last_worker_artifact", None)
+            if provider is not None else None
+        )
+        if artifact is None:
+            artifact = provider_lifecycle.artifact(source)
+        required_artifact_keys = {
+            "artifact_path", "artifact_sha256", "artifact_bytes",
+            "content_type", "frame_timestamp",
+        }
         if (
-            hass.data[DOMAIN].get("analysis_mode") == "thermal_throttle"
-            and int(float(timestamp) // 60) % 15 != 0
+            not isinstance(artifact, dict)
+            or not required_artifact_keys.issubset(artifact)
         ):
-            return 0
-        temperature = _system_performance_snapshot().get("temperature_c")
-        if (
-            hass.data[DOMAIN].get("analysis_mode") == "thermal_throttle"
-            and temperature is not None
-            and temperature >= 75.0
-        ):
-            hass.data[DOMAIN]["calibration_thermal_throttled"] = {
-                "temperature_c": temperature,
+            skipped = hass.data[DOMAIN].setdefault(
+                "calibration_capture_skipped", {}
+            )
+            skipped[str(source)] = {
+                "reason": "validated_worker_artifact_missing",
                 "timestamp": time.time(),
             }
             return 0
-        observer = hass.data[DOMAIN]["radar_calibration_observer"]
-        matched = 0
+        immutable_artifact = {
+            key: artifact[key] for key in sorted(required_artifact_keys)
+        }
+        pending = hass.data[DOMAIN].setdefault(
+            "calibration_captures_pending", {}
+        )
+        queued = 0
         for region in storm_manager.get_all_engines():
             if engine_id is not None and region.engine_id != engine_id:
                 continue
@@ -1053,42 +2690,49 @@ async def _async_setup_runtime(
                 < minimum_calibration_coverage_fraction
             ):
                 continue
-            regional = [
-                item for item in observations
-                if region.accepts_observation(item.lat, item.lon)
-            ]
-            # Voor gedeelde producten zonder expliciete engine vermijden we
-            # dat een regio buiten de productdekking als kunstmatig droog telt.
-            if engine_id is None and not regional:
-                continue
-            matched += observer.record_frame(
-                regional,
-                source=source,
-                timestamp=float(timestamp),
-                region_id=f"{region.engine_id}@{region.storage_key}",
-                evaluation_center=(region.center_lat, region.center_lon),
-                evaluation_radius_km=region.observation_radius_km,
-                coverage_bbox=coverage_bbox,
-            )
-        diagnostics = observer.diagnostics()
-        diagnostics["storage"] = hass.data[DOMAIN].get(
-            "radar_calibration_storage", {}
-        )
-        profiles = hass.data[DOMAIN].get("radar_bias_profiles", [])
-        diagnostics["bias_profiles"] = {
-            "total": len(profiles),
-            "operational": sum(
-                1 for profile in profiles
-                if profile.get("confidence") != "insufficient"
-            ),
-            "profiles": profiles[:20],
+            descriptor = {
+                "contract": "stv3-calibration-capture-v2",
+                # Calibration evidence must remain comparable across HA
+                # restarts. ``engine_id`` is a volatile runtime alias;
+                # ``storage_key`` is the stable geographic identity.
+                "region_key": str(region.storage_key),
+                "region_id": str(region.engine_id),
+                "source": str(source),
+                "product_timestamp": float(timestamp),
+                "grid_deg": 0.1,
+                "minimum_intensity": 1,
+                "evaluation": {
+                    "center_lat": float(region.center_lat),
+                    "center_lon": float(region.center_lon),
+                    "radius_km": float(region.observation_radius_km),
+                },
+                "coverage_bbox": [
+                    float(value) for value in coverage_bbox
+                ],
+                "coverage_fraction": float(coverage_fraction),
+                "fetch_state": "success",
+                "artifact": immutable_artifact,
+            }
+            canonical = json.dumps(
+                descriptor,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            capture_id = hashlib.sha256(canonical).hexdigest()
+            descriptor["capture_id"] = capture_id
+            if capture_id not in pending:
+                pending[capture_id] = descriptor
+                queued += 1
+        # Capture admission stays intentionally silent and constant-size on
+        # the HA event loop.  Diagnostics are refreshed once after the worker
+        # stage has been merged, not once per provider and region.
+        hass.data[DOMAIN]["calibration_capture_queue"] = {
+            "mode": "worker_artifact_descriptors_v2",
+            "pending": len(pending),
         }
-        hass.data[DOMAIN]["radar_calibration"] = diagnostics
-        hass.bus.async_fire(
-            f"{DOMAIN}_calibration_update",
-            {"samples": hass.data[DOMAIN]["radar_calibration"]["samples"]},
-        )
-        return matched
+        return queued
 
     # ── Locatie-afhankelijke providers initialiseren ──────────────────────
     async def _init_location_providers(lat: float, lon: float) -> None:
@@ -1157,7 +2801,7 @@ async def _async_setup_runtime(
         ), None)
         if kmi_region is not None and hass.data[DOMAIN].get("kmi_provider") is None:
             hass.data[DOMAIN]["kmi_provider"] = KmiProvider(
-                kmi_region.center_lat, kmi_region.center_lon
+                kmi_region.center_lat, kmi_region.center_lon, hass=hass
             )
             _LOGGER.info("KMI: geactiveerd voor %s", kmi_region.engine_id)
         elif kmi_region is None:
@@ -1175,6 +2819,7 @@ async def _async_setup_runtime(
                 knmi_region.center_lon,
                 knmi_api_key,
                 knmi_wms_key,
+                hass=hass,
             )
             _LOGGER.info("KNMI: geactiveerd voor %s", knmi_region.engine_id)
         elif knmi_region is None:
@@ -1191,7 +2836,7 @@ async def _async_setup_runtime(
         for engine_id, region in regions.items():
             if engine_id not in rainviewer_providers:
                 rainviewer_providers[engine_id] = RainViewerProvider(
-                    region.center_lat, region.center_lon
+                    region.center_lat, region.center_lon, hass=hass
                 )
             if (
                 engine_id not in opera_providers
@@ -1232,22 +2877,27 @@ async def _async_setup_runtime(
         hass.data[DOMAIN]["kmi_frame_timestamp"] = p.last_frame_timestamp
         hass.data[DOMAIN]["kmi_count"] = len(obs)
         from .providers.kmi import KmiProviderFactory
-        calibration_obs = [
-            observation for observation in obs
-            if (observation.intensity or 0) >= 2
-        ]
         for region in storm_manager.get_all_engines():
             if KmiProviderFactory.supports(
                 region.center_lat, region.center_lon, region.observation_radius_km
             ):
                 _record_calibration_frame(
-                    "kmi", calibration_obs, p.last_frame_timestamp,
+                    "kmi", obs, p.last_frame_timestamp,
                     engine_id=region.engine_id,
                 )
         hass.bus.async_fire(f"{DOMAIN}_radar_update", {"source": "kmi", "count": len(obs)})
         lat = hass.data[DOMAIN].get("fictieve_lat", home_lat)
         lon = hass.data[DOMAIN].get("fictieve_lon", home_lon)
-        log_kmi(hass, obs, lat, lon)
+        intensities = [
+            float(item.intensity) for item in obs if item.intensity is not None
+        ]
+        _queue_provider_cycle_sample("kmi", "belgium", lat, lon, {
+            "observations": len(obs),
+            "max_intensity": max(intensities) if intensities else 0,
+            "mean_intensity": (
+                sum(intensities) / len(intensities) if intensities else 0
+            ),
+        })
         # De router beslist per engine of KMI operationeel of vergelijking is.
 
     async def _poll_rv(now=None, operational: bool = False):
@@ -1260,31 +2910,58 @@ async def _async_setup_runtime(
             region.engine_id: region for region in storm_manager.get_all_engines()
         }
         engine_ids = tuple(providers)
-        fetched = await asyncio.gather(*(
-            asyncio.wait_for(
-                providers[engine_id].fetch_observations(), timeout=20
+        try:
+            from .worker_radar_client import async_fetch_worker_radar
+            obs, overlay, worker_diagnostics, artifact = await async_fetch_worker_radar(
+                hass,
+                "rainviewer_fetch",
+                {"regions": [
+                    {
+                        "center_lat": region.center_lat,
+                        "center_lon": region.center_lon,
+                        "horizon_km": region.observation_radius_km,
+                    }
+                    for region in regions_by_id.values()
+                ]},
+                provider="rainviewer",
+                timeout=90,
+                max_age_seconds=20 * 60,
             )
-            for engine_id in engine_ids
-        ), return_exceptions=True)
-        for engine_id, result in zip(engine_ids, fetched):
+            for provider in providers.values():
+                provider.overlay = overlay
+                provider.last_worker_artifact = artifact
+                provider._last_frame_ts = float(overlay["timestamp"])
+                provider._mark_healthy(time.time())
+        except Exception as err:
+            _LOGGER.warning(
+                "Gedeelde RainViewer-workerfout; laatst geldige data blijft actief: %s",
+                err,
+            )
+            worker_diagnostics = {"error": type(err).__name__}
+            cached = {
+                str(item.radar_cell_id): item
+                for provider in providers.values()
+                for item in provider._last_observations
+            }
+            obs = list(cached.values())
+            for provider in providers.values():
+                provider._mark_unhealthy(f"workerfout: {type(err).__name__}")
+        for engine_id in engine_ids:
             provider = providers[engine_id]
-            if isinstance(result, Exception):
-                provider._mark_unhealthy(
-                    "regionale fetch-timeout" if isinstance(result, asyncio.TimeoutError)
-                    else type(result).__name__
-                )
-                _LOGGER.warning("RainViewer %s mislukt: %s", engine_id, result)
-                engine_obs = []
-            else:
-                engine_obs = result
-            obs.extend(engine_obs)
             region = regions_by_id.get(engine_id)
+            engine_obs = [
+                item for item in obs
+                if region is not None
+                and region.accepts_observation(item.lat, item.lon)
+            ]
+            provider._last_observations = list(engine_obs)
             observation_counts[engine_id] = sum(
                 1 for item in engine_obs
                 if region is not None and region.accepts_observation(item.lat, item.lon)
             )
             diagnostics[engine_id] = {
                 **provider.diagnostics,
+                **worker_diagnostics,
                 "observations": len(engine_obs),
             }
             _record_calibration_frame(
@@ -1299,10 +2976,19 @@ async def _async_setup_runtime(
         hass.bus.async_fire(f"{DOMAIN}_radar_update", {"source": "rainviewer", "count": len(obs)})
         lat = hass.data[DOMAIN].get("fictieve_lat", home_lat)
         lon = hass.data[DOMAIN].get("fictieve_lon", home_lon)
-        log_rainviewer(hass, obs, lat, lon)
+        intensities = [
+            float(item.intensity) for item in obs if item.intensity is not None
+        ]
+        _queue_provider_cycle_sample("rainviewer", "all_regions", lat, lon, {
+            "observations": len(obs),
+            "observations_by_engine": observation_counts,
+            "max_intensity": max(intensities) if intensities else 0,
+            "mean_intensity": (
+                sum(intensities) / len(intensities) if intensities else 0
+            ),
+        })
         if operational:
-            for o in obs:
-                storm_manager.route_observation(o)
+            await storm_manager.async_route_observations(obs)
         return obs
 
     async def _poll_knmi(now=None):
@@ -1316,12 +3002,14 @@ async def _async_setup_runtime(
         hass.data[DOMAIN]["knmi_forecast"]      = forecast
         hass.data[DOMAIN]["knmi_intensity_now"] = current[0].intensity if current else 0
         def _intens(m):
+            if m > 90:
+                return None
             t = _time.time() + m * 60
             c = min(forecast, key=lambda o: abs(o.timestamp - t), default=None)
             return c.intensity if c else 0
         hass.data[DOMAIN]["knmi_intensity_30min"]  = _intens(30)
         hass.data[DOMAIN]["knmi_intensity_60min"]  = _intens(60)
-        hass.data[DOMAIN]["knmi_intensity_120min"] = _intens(120)
+        hass.data[DOMAIN]["knmi_intensity_90min"] = _intens(90)
         from .providers.knmi import KnmiProviderFactory
         for region in storm_manager.get_all_engines():
             if KnmiProviderFactory.supports(
@@ -1338,12 +3026,14 @@ async def _async_setup_runtime(
         })
         lat = hass.data[DOMAIN].get("fictieve_lat", home_lat)
         lon = hass.data[DOMAIN].get("fictieve_lon", home_lon)
-        log_knmi(hass, current, forecast,
-                 hass.data[DOMAIN]["knmi_intensity_now"],
-                 hass.data[DOMAIN]["knmi_intensity_30min"],
-                 hass.data[DOMAIN]["knmi_intensity_60min"],
-                 hass.data[DOMAIN]["knmi_intensity_120min"],
-                 lat, lon)
+        _queue_provider_cycle_sample("knmi", "netherlands", lat, lon, {
+            "current_pixels": len(current),
+            "forecast_pixels": len(forecast),
+            "intensity_now": hass.data[DOMAIN]["knmi_intensity_now"],
+            "intensity_30min": hass.data[DOMAIN]["knmi_intensity_30min"],
+            "intensity_60min": hass.data[DOMAIN]["knmi_intensity_60min"],
+            "intensity_90min": hass.data[DOMAIN]["knmi_intensity_90min"],
+        })
         # Alleen actuele KNMI-observaties kunnen operationeel worden gerouteerd.
 
     async def _poll_opera(now=None):
@@ -1407,6 +3097,11 @@ async def _async_setup_runtime(
         raw_references.extend(hass.data[DOMAIN].get("meteolux_observations", []))
         raw_references.extend(hass.data[DOMAIN].get("dpc_radar_observations", []))
         raw_references.extend(hass.data[DOMAIN].get("aemet_radar_observations", []))
+        raw_references.extend(
+            hass.data[DOMAIN].get(
+                "noaa_enterprise_rainrate_observations", []
+            )
+        )
         raw_references.extend(hass.data[DOMAIN].get("hsaf_h40b_observations", []))
         raw_references.extend(hass.data[DOMAIN].get("noaa_goes_rrqpe_observations", []))
         references = usable_corroborating_observations(raw_references)
@@ -1536,6 +3231,59 @@ async def _async_setup_runtime(
         rainviewer_obs = await _poll_rv(operational=False)
         opera_obs = await _poll_opera()
         decisions = _refresh_engine_radar_decisions()
+        enterprise_regions = [
+            region for region in storm_manager.get_all_engines()
+            if (decisions.get(region.engine_id) or {}).get("source")
+            in {
+                None,
+                "rainviewer",
+                "noaa_enterprise_rainrate",
+                "hsaf_h40b",
+                "noaa_goes_rrqpe",
+            }
+        ]
+        enterprise_obs = []
+        enterprise = hass.data[DOMAIN].get(
+            "noaa_enterprise_rainrate_provider"
+        )
+        if enterprise is not None and enterprise_regions:
+            enterprise_obs = await enterprise.async_fetch(tuple(
+                CoverageArea(
+                    region.center_lat,
+                    region.center_lon,
+                    region.observation_radius_km,
+                )
+                for region in enterprise_regions
+            ))
+            hass.data[DOMAIN][
+                "noaa_enterprise_rainrate_observations"
+            ] = enterprise_obs
+            hass.data[DOMAIN][
+                "noaa_enterprise_rainrate_observation_counts_by_engine"
+            ] = {
+                region.engine_id: sum(
+                    1 for item in enterprise_obs
+                    if region.accepts_observation(item.lat, item.lon)
+                )
+                for region in enterprise_regions
+            }
+            hass.data[DOMAIN][
+                "noaa_enterprise_rainrate_diagnostics"
+            ] = enterprise.diagnostics
+            if enterprise.healthy and enterprise.overlay:
+                for region in enterprise_regions:
+                    _record_calibration_frame(
+                        "noaa_enterprise_rainrate",
+                        enterprise_obs,
+                        float(enterprise.overlay["timestamp"]),
+                        engine_id=region.engine_id,
+                    )
+            decisions = _refresh_engine_radar_decisions()
+        elif enterprise is not None:
+            enterprise.sleep()
+            hass.data[DOMAIN][
+                "noaa_enterprise_rainrate_diagnostics"
+            ] = enterprise.diagnostics
         fallback_regions = [
             region for region in storm_manager.get_all_engines()
             if (decisions.get(region.engine_id) or {}).get("source")
@@ -1618,12 +3366,25 @@ async def _async_setup_runtime(
         elif goes_rrqpe is not None:
             goes_rrqpe.sleep()
             hass.data[DOMAIN]["noaa_goes_rrqpe_diagnostics"] = goes_rrqpe.diagnostics
-        _route_selected_radar(opera_obs, "opera")
-        _route_selected_radar(rainviewer_obs, "rainviewer")
-        _route_selected_radar(hsaf_obs, "hsaf_h40b")
-        _route_selected_radar(goes_obs, "noaa_goes_rrqpe")
-        _route_selected_radar(hass.data[DOMAIN].get("last_kmi_observations", []), "kmi")
-        _route_selected_radar(hass.data[DOMAIN].get("knmi_current", []), "knmi")
+        await _route_american_radar_fusion(
+            rainviewer_obs, enterprise_obs, goes_obs
+        )
+        await _route_selected_radar(opera_obs, "opera")
+        await _route_selected_radar(rainviewer_obs, "rainviewer")
+        await _route_selected_radar(
+            enterprise_obs,
+            "noaa_enterprise_rainrate",
+        )
+        await _route_selected_radar(hsaf_obs, "hsaf_h40b")
+        await _route_selected_radar(goes_obs, "noaa_goes_rrqpe")
+        await _route_selected_radar(
+            hass.data[DOMAIN].get("last_kmi_observations", []),
+            "kmi",
+        )
+        await _route_selected_radar(
+            hass.data[DOMAIN].get("knmi_current", []),
+            "knmi",
+        )
         await _refresh_radar_overlays(decisions)
 
         hass.bus.async_fire(f"{DOMAIN}_radar_source_update", {
@@ -1665,27 +3426,48 @@ async def _async_setup_runtime(
             hass.data[DOMAIN]["dpc_radar_observations"] = results["dpc_radar"]
         if "aemet_radar" in results:
             hass.data[DOMAIN]["aemet_radar_observations"] = results["aemet_radar"]
+        # Bewaar iedere rasterbron die via de provider-lifecycle binnenkomt.
+        # Geen whitelist: nieuw geregistreerde radarproviders worden hierdoor
+        # automatisch op hun oorspronkelijke gedecodeerde resolutie bewaard.
+        # Punt-nowcasts zonder overlay zijn geen radarframe en worden niet als
+        # kunstmatig raster in de kalibratiedatabase geschreven.
         for provider_id, observations in results.items():
-            if provider_id in {
-                "dwd_radolan", "met_office_radar", "meteofrance_radar",
-                "dpc_radar", "aemet_radar",
-            }:
-                _record_calibration_frame(provider_id, observations)
+            overlay = provider_lifecycle.overlay(provider_id)
+            if not overlay:
+                continue
+            overlay_timestamp = overlay.get("timestamp")
+            if overlay_timestamp is None:
+                continue
+            _record_calibration_frame(
+                provider_id,
+                observations,
+                float(overlay_timestamp),
+            )
         decisions = _refresh_engine_radar_decisions()
         for provider_id in ("dwd_radolan", "met_office_radar", "meteofrance_radar", "meteolux", "dpc_radar", "aemet_radar"):
             if provider_id in results:
-                _route_selected_radar(results[provider_id], provider_id)
+                await _route_selected_radar(
+                    results[provider_id], provider_id
+                )
         hass.data[DOMAIN]["provider_lifecycle_diagnostics"] = (
             provider_lifecycle.diagnostics()
         )
 
     async def _refresh_radar_overlays(decisions):
-        """Publiceer bronpixels voor de per-engine gekozen rasterprovider."""
+        """Laat de worker gekozen bronpixels begrenzen en normaliseren."""
         overlays = {}
+        artifact_selections = {}
+        changed_frames = {}
+        provider_artifacts = hass.data[DOMAIN].get(
+            "provider_worker_artifacts", {}
+        )
         shared = {
             "kmi": hass.data[DOMAIN].get("kmi_provider"),
             "knmi": hass.data[DOMAIN].get("knmi_provider"),
             "hsaf_h40b": hass.data[DOMAIN].get("hsaf_h40b_provider"),
+            "noaa_enterprise_rainrate": hass.data[DOMAIN].get(
+                "noaa_enterprise_rainrate_provider"
+            ),
             "noaa_goes_rrqpe": hass.data[DOMAIN].get("noaa_goes_rrqpe_provider"),
         }
         per_engine = {
@@ -1702,30 +3484,69 @@ async def _async_setup_runtime(
                 overlay = provider_lifecycle.overlay(source)
             if overlay:
                 overlays[region.engine_id] = overlay
-                started_at = time.time()
-                before = _system_performance_snapshot()
-                outcome = "ok"
-                try:
-                    hass.data[DOMAIN]["pysteps_frame_history"].add_overlay(
-                        region.engine_id, overlay, _region_bounds(region)
-                    )
-                except Exception:
-                    outcome = "error"
-                    raise
-                finally:
-                    finished_at = time.time()
-                    _queue_system_performance_sample(
-                        hass.data[DOMAIN].get(
-                            "current_provider_cycle_id", "outside_cycle"
-                        ),
-                        f"raster_normalization:{region.engine_id}",
-                        started_at,
-                        finished_at,
-                        outcome,
-                        before,
-                        _system_performance_snapshot(),
-                    )
-        hass.data[DOMAIN]["radar_overlays_by_engine"] = overlays
+                artifact = provider_artifacts.get(source)
+                if isinstance(artifact, dict) and artifact.get("artifact_path"):
+                    artifact_selections[region.engine_id] = {
+                        "provider": source,
+                        "artifact": artifact,
+                        "bounds": list(_region_bounds(region)),
+                    }
+        started_at = time.time()
+        before = _system_performance_snapshot()
+        outcome = "ok"
+        try:
+            if overlays and len(artifact_selections) == len(overlays):
+                frames, bounded_overlays = await hass.data[DOMAIN][
+                    "radar_frame_worker"
+                ].async_process_provider_artifacts(artifact_selections)
+                transport_mode = "worker_artifact_chain"
+            else:
+                regions = {
+                    region.engine_id: list(_region_bounds(region))
+                    for region in storm_manager.get_all_engines()
+                    if region.engine_id in overlays
+                }
+                frames, bounded_overlays = await hass.data[DOMAIN][
+                    "radar_frame_worker"
+                ].async_process(overlays, regions)
+                transport_mode = "legacy_overlay_artifact"
+            for engine_id, frame in frames.items():
+                hass.data[DOMAIN]["pysteps_frame_history"].add_frame(
+                    engine_id, frame
+                )
+                changed_frames.setdefault(engine_id, []).append(frame)
+            hass.data[DOMAIN]["radar_overlays_by_engine"] = bounded_overlays
+            hass.data[DOMAIN]["radar_frame_worker_diagnostics"] = {
+                "status": "operationeel",
+                "mode": "worker_first",
+                "transport": transport_mode,
+                "fallback_active": False,
+                "regions": len(frames),
+            }
+        except Exception as err:
+            outcome = "error"
+            # Geen lokale CPU-fallback: behoud de laatst gevalideerde laag en
+            # laat de volgende cyclus opnieuw proberen.
+            hass.data[DOMAIN]["radar_frame_worker_diagnostics"] = {
+                "status": "transportfout",
+                "mode": "worker_first",
+                "fallback_active": True,
+                "error": f"{type(err).__name__}: {err}",
+            }
+            _LOGGER.warning("Regionale radarworker niet beschikbaar: %s", err)
+        finally:
+            finished_at = time.time()
+            _queue_system_performance_sample(
+                hass.data[DOMAIN].get(
+                    "current_provider_cycle_id", "outside_cycle"
+                ),
+                "raster_normalization:worker",
+                started_at,
+                finished_at,
+                outcome,
+                before,
+                _system_performance_snapshot(),
+            )
         frame_history = hass.data[DOMAIN]["pysteps_frame_history"]
         pysteps_input = frame_history.diagnostics()
         preflight = {}
@@ -1737,12 +3558,10 @@ async def _async_setup_runtime(
             before = _system_performance_snapshot()
             outcome = "ok"
             try:
-                temperature = before.get("temperature_c")
                 if (
                     hass.data[DOMAIN].get("analysis_mode")
                     == "thermal_throttle"
-                    and temperature is not None
-                    and temperature >= 75.0
+                    and _system_reports_hardware_throttling()
                 ):
                     outcome = "thermal_throttled"
                     result = {
@@ -1760,13 +3579,127 @@ async def _async_setup_runtime(
                         "wet_cell_ratio": None,
                         "centroid_translation_km_per_hour": None,
                         "centroid_heading_deg": None,
-                        "reason": "cpu_temperature_above_75c",
+                        "reason": "hardware_or_os_reported_throttling",
                     }
                 else:
                     async with analysis_limit:
-                        result = await hass.async_add_executor_job(
-                            evaluate_pysteps_frames, frames
-                        )
+                        worker_diagnostic = {
+                            "state": "error",
+                            "mode": "worker_first",
+                            "source": "worker",
+                            "fallback_active": False,
+                        }
+                        try:
+                            from .worker_bridge import async_request_worker_job
+
+                            tasks = hass.data[DOMAIN].setdefault(
+                                "motion_worker_tasks", {}
+                            )
+                            results = hass.data[DOMAIN].setdefault(
+                                "motion_worker_results", {}
+                            )
+                            task = tasks.get(region.engine_id)
+                            if task is not None and task.done():
+                                try:
+                                    results[region.engine_id] = (
+                                        task.result().get("result")
+                                    )
+                                finally:
+                                    tasks.pop(region.engine_id, None)
+                                task = None
+                            if task is None:
+                                tasks[region.engine_id] = (
+                                    hass.async_create_background_task(
+                                        async_request_worker_job(
+                                            hass,
+                                            "motion_preflight",
+                                            {
+                                                "region_id": region.engine_id,
+                                                "frames": [
+                                                    frame.to_dict()
+                                                    for frame in frames[-4:]
+                                                ],
+                                                "targets": [
+                                                    {
+                                                        "target_id": target_id,
+                                                        "latitude": target[
+                                                            "latitude"
+                                                        ],
+                                                        "longitude": target[
+                                                            "longitude"
+                                                        ],
+                                                    }
+                                                    for target_id, target in
+                                                    hass.data[DOMAIN].get(
+                                                        "targets", {}
+                                                    ).items()
+                                                    if target.get("available")
+                                                    and target.get(
+                                                        "latitude"
+                                                    ) is not None
+                                                    and target.get(
+                                                        "longitude"
+                                                    ) is not None
+                                                ],
+                                            },
+                                            timeout=20,
+                                        ),
+                                        (
+                                            f"{DOMAIN}_motion_worker_"
+                                            f"{region.engine_id}"
+                                        ),
+                                    )
+                                )
+                            result = results.get(region.engine_id)
+                            if (
+                                not isinstance(result, dict)
+                                or result.get("method")
+                                != "bounded_grid_match_v1"
+                                or int(result.get("frames_used", -1))
+                                != min(3, len(frames))
+                                or not isinstance(result.get("status"), str)
+                            ):
+                                raise ValueError(
+                                    "nog geen geldig resultaat bewegingsworker"
+                                )
+                            worker_diagnostic["state"] = "active"
+                        except (
+                            asyncio.TimeoutError,
+                            KeyError,
+                            RuntimeError,
+                            TypeError,
+                            ValueError,
+                        ) as err:
+                            outcome = "worker_unavailable"
+                            worker_diagnostic.update({
+                                "state": "worker_onbeschikbaar",
+                                "source": "bewaard_workerresultaat",
+                                "fallback_active": False,
+                                "error": type(err).__name__,
+                            })
+                            result = results.get(region.engine_id)
+                            if not isinstance(result, dict):
+                                result = {
+                                    "status": "worker_unavailable",
+                                    "experimental": True,
+                                    "feeds_detection": False,
+                                    "frames_used": len(frames),
+                                    "method": "worker_required_v1",
+                                    "confidence": "insufficient",
+                                    "translation_km_per_hour": None,
+                                    "heading_deg": None,
+                                    "verification_iou": None,
+                                    "motion_match_iou": None,
+                                    "vector_consistency_deg": None,
+                                    "wet_cell_ratio": None,
+                                    "centroid_translation_km_per_hour": None,
+                                    "centroid_heading_deg": None,
+                                    "reason": "worker_unavailable",
+                                }
+                        result = {
+                            **result,
+                            "worker": worker_diagnostic,
+                        }
             except Exception:
                 outcome = "error"
                 raise
@@ -1813,61 +3746,751 @@ async def _async_setup_runtime(
                     },
                 })
         pysteps_input["preflight"] = preflight
+
+        tracking_results = dict(
+            hass.data[DOMAIN].get("tracking_worker", {})
+        )
+        pysteps_input["tracking_worker"] = dict(tracking_results)
+        hass.data[DOMAIN]["tracking_worker"] = dict(tracking_results)
         hass.data[DOMAIN]["pysteps_input"] = pysteps_input
-        await hass.async_add_executor_job(
-            hass.data[DOMAIN][
-                "radar_calibration_store"
-            ].save_pysteps_frames,
-            frame_history.serialized(),
+        calibration_store = hass.data[DOMAIN]["radar_calibration_store"]
+
+        def _serialize_and_save_frame_history():
+            """Bewaar uitsluitend nieuwe frames, niet telkens de hele cache."""
+            if not changed_frames:
+                return 0
+            return calibration_store.save_pysteps_frames(
+                {
+                    region_id: [frame.to_dict() for frame in frames]
+                    for region_id, frames in changed_frames.items()
+                }
+            )
+
+        await hass.data[DOMAIN]["radar_frame_worker"].async_run_io(
+            _serialize_and_save_frame_history
         )
         hass.bus.async_fire(f"{DOMAIN}_provider_lifecycle_update")
         hass.bus.async_fire(f"{DOMAIN}_radar_source_update", {"engines": decisions})
 
     async def _poll_netatmo(now=None):
-        _sync_region_netatmo_providers()
-        providers = hass.data[DOMAIN].get("netatmo_providers_by_engine", {})
-        if not providers:
-            return
-        engine_ids = tuple(providers)
-        fetched = await asyncio.gather(
-            *(providers[engine_id].fetch_observations() for engine_id in engine_ids),
-            return_exceptions=True,
+        from .providers.netatmo import NetatmoProvider
+        from .engine.observation import (
+            Observation,
+            ObservationType,
+            observation_is_wet,
         )
+
+        def _ground_observations(result, default_source):
+            def optional_float(value):
+                return float(value) if value is not None else None
+
+            observations = []
+            for raw in result.get("observations", []):
+                try:
+                    observations.append(Observation(
+                        obs_type=ObservationType.RAIN,
+                        lat=float(raw["lat"]),
+                        lon=float(raw["lon"]),
+                        timestamp=float(raw["timestamp"]),
+                        received_at=(
+                            float(raw["received_at"])
+                            if raw.get("received_at") is not None else None
+                        ),
+                        rain_mm=optional_float(raw.get("rain_mm")),
+                        rain_5min=optional_float(raw.get("rain_5min")),
+                        rain_60min=optional_float(raw.get("rain_60min")),
+                        station_id=str(raw.get("station_id", "")),
+                        rain_capable=bool(raw.get("rain_capable", False)),
+                        precipitation_present=raw.get(
+                            "precipitation_present"
+                        ),
+                        quantitative_precipitation=bool(
+                            raw.get("quantitative_precipitation", True)
+                        ),
+                        wind_speed=raw.get("wind_speed"),
+                        wind_angle=raw.get("wind_angle"),
+                        gust_speed=raw.get("gust_speed"),
+                        pressure=raw.get("pressure"),
+                        temperature=raw.get("temperature"),
+                        humidity=raw.get("humidity"),
+                        source=str(raw.get("source") or default_source),
+                        raw_text=raw.get("raw_text"),
+                        raw_payload=raw.get("raw_payload"),
+                        measurement_kind=raw.get("measurement_kind"),
+                        measurement_unit=raw.get("measurement_unit"),
+                        interval_minutes=raw.get("interval_minutes"),
+                        parser_version=raw.get("parser_version"),
+                        interpretation_reason=raw.get(
+                            "interpretation_reason"
+                        ),
+                        quality_flags=tuple(raw.get("quality_flags") or ()),
+                    ))
+                except (KeyError, TypeError, ValueError):
+                    continue
+            return observations
+
+        def _synoptic_applicable(latitude, longitude):
+            """Synoptic heeft zijn bruikbare publieke dekking in Noord-Amerika."""
+            return (
+                15.0 <= float(latitude) <= 75.0
+                and -170.0 <= float(longitude) <= -50.0
+            )
+
+        def _cached_worker_netatmo(
+            query_key, latitude, longitude, query_kind
+        ):
+            """Start workerwerk los van de providerfase en geef cache direct terug."""
+            cache = hass.data[DOMAIN].setdefault(
+                "netatmo_worker_cache", {}
+            )
+            tasks = hass.data[DOMAIN].setdefault(
+                "netatmo_worker_tasks", {}
+            )
+            current = cache.get(query_key)
+            cache_age = (
+                time.time() - float(current["received_at"])
+                if current else None
+            )
+            if (
+                query_key not in tasks
+                and (cache_age is None or cache_age >= 5 * 60)
+            ):
+                async def _refresh():
+                    try:
+                        from .worker_bridge import async_request_worker_job
+
+                        result = await async_request_worker_job(
+                            hass,
+                            "netatmo_fetch",
+                            {
+                                "query_key": query_key,
+                                "query_kind": query_kind,
+                                "latitude": float(latitude),
+                                "longitude": float(longitude),
+                                # Secrets belong to the add-on environment and
+                                # never travel through MQTT job payloads.
+                                "credential_ref": "worker_environment",
+                            },
+                            timeout=20,
+                        )
+                        if result.get("method") != "netatmo_worker_20km_v1":
+                            raise ValueError("ongeldig Netatmo-workerresultaat")
+                        cache[query_key] = {
+                            "received_at": time.time(),
+                            "result": result,
+                        }
+                    except (
+                        asyncio.TimeoutError,
+                        RuntimeError,
+                        TypeError,
+                        ValueError,
+                    ) as err:
+                        hass.data[DOMAIN]["netatmo_worker_error"] = {
+                            "query_key": query_key,
+                            "error": type(err).__name__,
+                            "timestamp": time.time(),
+                        }
+                    finally:
+                        tasks.pop(query_key, None)
+
+                tasks[query_key] = hass.async_create_background_task(
+                    _refresh(),
+                    f"{DOMAIN}_netatmo_worker_{query_key}",
+                )
+            if (
+                current
+                and time.time() - float(current["received_at"])
+                <= 15 * 60
+            ):
+                return _ground_observations(current["result"], "netatmo")
+            return None
+
+        def _cached_worker_synoptic(
+            query_key, latitude, longitude, query_kind, radius_km
+        ):
+            """Start een begrensde Synoptic-query zonder de HA-cyclus te blokkeren."""
+            cache = hass.data[DOMAIN].setdefault(
+                "synoptic_worker_cache", {}
+            )
+            tasks = hass.data[DOMAIN].setdefault(
+                "synoptic_worker_tasks", {}
+            )
+            current = cache.get(query_key)
+            cache_age = (
+                time.time() - float(current["received_at"])
+                if current else None
+            )
+            if (
+                query_key not in tasks
+                and (cache_age is None or cache_age >= 5 * 60)
+            ):
+                async def _refresh():
+                    try:
+                        from .worker_bridge import async_request_worker_job
+
+                        result = await async_request_worker_job(
+                            hass,
+                            "synoptic_fetch",
+                            {
+                                "query_key": query_key,
+                                "query_kind": query_kind,
+                                "latitude": float(latitude),
+                                "longitude": float(longitude),
+                                "radius_km": float(radius_km),
+                            },
+                            timeout=20,
+                        )
+                        if result.get("method") != "synoptic_worker_v1":
+                            raise ValueError("ongeldig Synoptic-workerresultaat")
+                        cache[query_key] = {
+                            "received_at": time.time(),
+                            "result": result,
+                        }
+                    except (
+                        asyncio.TimeoutError,
+                        RuntimeError,
+                        TypeError,
+                        ValueError,
+                    ) as err:
+                        hass.data[DOMAIN]["synoptic_worker_error"] = {
+                            "query_key": query_key,
+                            "error": type(err).__name__,
+                            "timestamp": time.time(),
+                        }
+                    finally:
+                        tasks.pop(query_key, None)
+
+                tasks[query_key] = hass.async_create_background_task(
+                    _refresh(),
+                    f"{DOMAIN}_synoptic_worker_{query_key}",
+                )
+            if (
+                current
+                and time.time() - float(current["received_at"])
+                <= 15 * 60
+            ):
+                return (
+                    _ground_observations(current["result"], "synoptic"),
+                    dict(current["result"]),
+                )
+            return None, None
+
+        def _cached_worker_metar(
+            query_key, latitude, longitude, query_kind, radius_km
+        ):
+            """Start een operationele METAR-query en gebruik de laatste goede cache."""
+            cache = hass.data[DOMAIN].setdefault("metar_worker_cache", {})
+            tasks = hass.data[DOMAIN].setdefault("metar_worker_tasks", {})
+            current = cache.get(query_key)
+            cache_age = (
+                time.time() - float(current["received_at"])
+                if current else None
+            )
+            if (
+                query_key not in tasks
+                and (cache_age is None or cache_age >= 60)
+            ):
+                async def _refresh():
+                    try:
+                        from .worker_bridge import async_request_worker_job
+
+                        result = await async_request_worker_job(
+                            hass,
+                            "metar_fetch",
+                            {
+                                "query_key": query_key,
+                                "query_kind": query_kind,
+                                "latitude": float(latitude),
+                                "longitude": float(longitude),
+                                "radius_km": float(radius_km),
+                            },
+                            timeout=35,
+                        )
+                        if result.get("method") != "metar_worker_v1":
+                            raise ValueError("ongeldig METAR-workerresultaat")
+                        cache[query_key] = {
+                            "received_at": time.time(),
+                            "result": result,
+                        }
+                        hass.data[DOMAIN].pop("metar_worker_error", None)
+                    except (
+                        asyncio.TimeoutError, RuntimeError, TypeError, ValueError
+                    ) as err:
+                        hass.data[DOMAIN]["metar_worker_error"] = {
+                            "query_key": query_key,
+                            "error": type(err).__name__,
+                            "timestamp": time.time(),
+                        }
+                    finally:
+                        tasks.pop(query_key, None)
+
+                tasks[query_key] = hass.async_create_background_task(
+                    _refresh(), f"{DOMAIN}_metar_worker_{query_key}"
+                )
+            if (
+                current
+                and time.time() - float(current["received_at"]) <= 15 * 60
+            ):
+                return (
+                    _ground_observations(current["result"], "metar"),
+                    dict(current["result"]),
+                )
+            return None, None
+
+        # Houd de legacy HA-providerobjecten alleen voor backwards-compatible
+        # drukstate bij. Zij mogen de worker-owned Netatmo-ingest niet poorten:
+        # OAuth-secrets wonen voortaan uitsluitend in de workeromgeving, zodat
+        # ``netatmo_providers_by_engine`` in HA terecht leeg kan zijn.
+        _sync_region_netatmo_providers()
+        regions = {
+            region.engine_id: region
+            for region in storm_manager.get_all_engines()
+        }
+        if not regions:
+            return
+        engine_ids = tuple(regions)
+        fetched = []
+        synoptic_fetched = {}
+        synoptic_results = {}
+        metar_fetched = {}
+        metar_results = {}
+        for engine_id in engine_ids:
+            region = regions[engine_id]
+            worker_observations = _cached_worker_netatmo(
+                f"local:{region.storage_key}",
+                region.center_lat,
+                region.center_lon,
+                "local",
+            )
+            if worker_observations is None:
+                # The worker is the sole OAuth owner. Starting the legacy HA
+                # provider here could refresh the same rotating token at the
+                # same time and invalidate one of both requests. Preserve the
+                # previous ground observations during the bounded worker
+                # refresh window instead.
+                previous = hass.data[DOMAIN].get(
+                    "netatmo_observations_by_engine", {}
+                ).get(engine_id, [])
+                fetched.append([
+                    item for item in previous
+                    if time.time() - float(item.timestamp) <= 15 * 60
+                ])
+            else:
+                fetched.append(worker_observations or [])
+            if _synoptic_applicable(region.center_lat, region.center_lon):
+                synoptic_obs, synoptic_result = _cached_worker_synoptic(
+                    f"local:{region.storage_key}:50",
+                    region.center_lat,
+                    region.center_lon,
+                    "local",
+                    50.0,
+                )
+                if synoptic_obs is None:
+                    synoptic_obs = [
+                        item for item in hass.data[DOMAIN].get(
+                            "synoptic_observations_by_engine", {}
+                        ).get(engine_id, [])
+                        if time.time() - float(item.timestamp) <= 15 * 60
+                    ]
+                synoptic_fetched[engine_id] = synoptic_obs
+                if synoptic_result is not None:
+                    synoptic_results[engine_id] = synoptic_result
+            else:
+                synoptic_fetched[engine_id] = []
+            metar_obs, metar_result = _cached_worker_metar(
+                f"local:{region.storage_key}:50",
+                region.center_lat,
+                region.center_lon,
+                "local",
+                50.0,
+            )
+            if metar_obs is None:
+                metar_obs = [
+                    item for item in hass.data[DOMAIN].get(
+                        "metar_observations_by_engine", {}
+                    ).get(engine_id, [])
+                    if time.time() - float(item.timestamp) <= 2 * 60 * 60
+                ]
+            metar_fetched[engine_id] = metar_obs
+            if metar_result is not None:
+                metar_results[engine_id] = metar_result
         observations_by_engine = {}
+        netatmo_observations_by_engine = {}
         trends_by_engine = {}
         all_observations = {}
         all_raining = {}
-        regions = {region.engine_id: region for region in storm_manager.get_all_engines()}
         for engine_id, result in zip(engine_ids, fetched):
             if isinstance(result, Exception):
                 _LOGGER.error(
                     "Netatmo-poll voor %s mislukt: %s", engine_id, result
                 )
                 result = []
-            obs = list(result)
+            netatmo_obs = list(result)
+            synoptic_obs = list(synoptic_fetched.get(engine_id, []))
+            metar_obs = list(metar_fetched.get(engine_id, []))
+            obs = netatmo_obs + synoptic_obs + metar_obs
+            netatmo_observations_by_engine[engine_id] = netatmo_obs
             observations_by_engine[engine_id] = obs
             tracker = _pressure_tracker_for_region(regions[engine_id])
             trends_by_engine[engine_id] = tracker.update(obs)
             for item in obs:
-                key = str(item.station_id or f"{item.lat:.5f},{item.lon:.5f}")
+                key = (
+                    f"{item.source}:"
+                    f"{item.station_id or f'{item.lat:.5f},{item.lon:.5f}'}"
+                )
                 all_observations[key] = item
-                if (item.rain_mm or 0) >= 0.1:
+                if observation_is_wet(item):
                     all_raining[key] = item
             region = regions[engine_id]
-            log_netatmo(
-                hass, obs, region.center_lat, region.center_lon,
+            raining_values = [
+                float(item.rain_mm or 0.0) for item in obs
+                if observation_is_wet(item)
+            ]
+            netatmo_raining_values = [
+                float(item.rain_mm or 0.0) for item in netatmo_obs
+                if observation_is_wet(item)
+            ]
+            _queue_provider_cycle_sample(
+                "netatmo", engine_id, region.center_lat, region.center_lon, {
+                    "stations": len(netatmo_obs),
+                    "raining_stations": len(netatmo_raining_values),
+                    "max_rain_mm_h": (
+                        max(netatmo_raining_values)
+                        if netatmo_raining_values else 0
+                    ),
+                    "mean_rain_mm_h": (
+                        sum(netatmo_raining_values)
+                        / len(netatmo_raining_values)
+                        if netatmo_raining_values else 0
+                    ),
+                    "station_ids": sorted(
+                        str(item.station_id) for item in netatmo_obs
+                        if item.station_id
+                    ),
+                },
             )
+            if synoptic_obs:
+                synoptic_raining = [
+                    float(item.rain_mm) for item in synoptic_obs
+                    if observation_is_wet(item) and item.rain_mm is not None
+                ]
+                _queue_provider_cycle_sample(
+                    "synoptic",
+                    engine_id,
+                    region.center_lat,
+                    region.center_lon,
+                    {
+                        "query_kind": "local",
+                        "radius_km": 50.0,
+                        "stations": len(synoptic_obs),
+                        "raining_stations": len(synoptic_raining),
+                        "max_rain_mm_h": (
+                            max(synoptic_raining) if synoptic_raining else 0
+                        ),
+                        "cache": (
+                            synoptic_results.get(engine_id, {}).get("cache")
+                        ),
+                    },
+                )
+            if metar_obs:
+                _queue_provider_cycle_sample(
+                    "metar",
+                    engine_id,
+                    region.center_lat,
+                    region.center_lon,
+                    {
+                        "query_kind": "local",
+                        "radius_km": 50.0,
+                        "stations": len(metar_obs),
+                        "raining_stations": sum(
+                            observation_is_wet(item) for item in metar_obs
+                        ),
+                        "station_ids": sorted(
+                            str(item.station_id) for item in metar_obs
+                            if item.station_id
+                        ),
+                        "observation_age_seconds": sorted(
+                            round(max(0.0, time.time() - item.timestamp), 1)
+                            for item in metar_obs
+                        ),
+                        "cache": metar_results.get(engine_id, {}).get("cache"),
+                    },
+                )
+            for item in obs:
+                observed_minute = int(float(item.timestamp) // 60)
+                station_id = str(
+                    item.station_id or f"{item.lat:.5f},{item.lon:.5f}"
+                )
+                hass.data[DOMAIN]["ground_observations_pending"].append({
+                    "record_key": (
+                        f"{item.source}:{engine_id}:{station_id}:"
+                        f"{observed_minute}"
+                    ),
+                    "provider": str(item.source),
+                    "region_key": engine_id,
+                    "station_id": station_id,
+                    "observed_at": float(item.timestamp),
+                    "received_at": item.received_at,
+                    "latitude": float(item.lat),
+                    "longitude": float(item.lon),
+                    "precipitation_present": item.precipitation_present,
+                    "quantitative_precipitation": (
+                        item.quantitative_precipitation
+                    ),
+                    "rain_mm": item.rain_mm,
+                    "rain_5min": item.rain_5min,
+                    "rain_60min": item.rain_60min,
+                    "measurement_kind": item.measurement_kind,
+                    "measurement_unit": item.measurement_unit,
+                    "interval_minutes": item.interval_minutes,
+                    "parser_version": item.parser_version,
+                    "interpretation_reason": item.interpretation_reason,
+                    "quality_flags": item.quality_flags,
+                    "raw_text": item.raw_text,
+                    "raw_payload": item.raw_payload,
+                })
         obs = list(all_observations.values())
         raining = list(all_raining.values())
-        hass.data[DOMAIN]["netatmo_observations_by_engine"] = observations_by_engine
+        hass.data[DOMAIN][
+            "netatmo_observations_by_engine"
+        ] = netatmo_observations_by_engine
+        hass.data[DOMAIN]["ground_observations_by_engine"] = observations_by_engine
+        hass.data[DOMAIN]["synoptic_observations_by_engine"] = synoptic_fetched
+        hass.data[DOMAIN]["metar_observations_by_engine"] = metar_fetched
         hass.data[DOMAIN]["netatmo_pressure_trends_by_engine"] = trends_by_engine
-        hass.data[DOMAIN]["last_netatmo_observations"] = obs
-        hass.data[DOMAIN]["netatmo_rain_count"] = len(raining)
-        hass.data[DOMAIN]["netatmo_station_count"] = len(obs)
+        all_netatmo = {
+            str(item.station_id or f"{item.lat:.5f},{item.lon:.5f}"): item
+            for items in netatmo_observations_by_engine.values()
+            for item in items
+        }
+        netatmo_obs = list(all_netatmo.values())
+        netatmo_raining = [
+            item for item in netatmo_obs
+            if observation_is_wet(item)
+        ]
+        hass.data[DOMAIN]["last_netatmo_observations"] = netatmo_obs
+        hass.data[DOMAIN]["netatmo_rain_count"] = len(netatmo_raining)
+        hass.data[DOMAIN]["netatmo_station_count"] = len(netatmo_obs)
+        synoptic_all = [
+            item
+            for items in synoptic_fetched.values()
+            for item in items
+        ]
+        synoptic_wet = [
+            item for item in synoptic_all
+            if observation_is_wet(item)
+        ]
+        hass.data[DOMAIN]["synoptic_diagnostics"] = {
+            "status": (
+                next(iter(synoptic_results.values())).get("status", "operationeel")
+                if synoptic_results
+                else "fout"
+                if hass.data[DOMAIN].get("synoptic_worker_error")
+                else "wacht_op_eerste_meting"
+            ),
+            "station_count": len(synoptic_all),
+            "fresh_station_count": len(synoptic_all),
+            "wet_station_count": len(synoptic_wet),
+            "local_radius_km": 50.0,
+            "roaming_radius_km": 50.0,
+            "regions": {
+                engine_id: {
+                    "stations": len(synoptic_fetched.get(engine_id, [])),
+                    "wet_stations": sum(
+                        observation_is_wet(item)
+                        for item in synoptic_fetched.get(engine_id, [])
+                    ),
+                    "cache": synoptic_results.get(engine_id, {}).get("cache"),
+                    "queried_at": synoptic_results.get(engine_id, {}).get(
+                        "queried_at"
+                    ),
+                }
+                for engine_id in engine_ids
+                if _synoptic_applicable(
+                    regions[engine_id].center_lat,
+                    regions[engine_id].center_lon,
+                )
+            },
+        }
+        metar_all = [
+            item for items in metar_fetched.values() for item in items
+        ]
+        hass.data[DOMAIN]["metar_diagnostics"] = {
+            "status": (
+                "operationeel"
+                if metar_results
+                else "fout"
+                if hass.data[DOMAIN].get("metar_worker_error")
+                else "wacht_op_eerste_meting"
+            ),
+            "station_count": len(metar_all),
+            "wet_station_count": sum(
+                observation_is_wet(item) for item in metar_all
+            ),
+            "regions": {
+                engine_id: {
+                    "stations": len(metar_fetched.get(engine_id, [])),
+                    "wet_stations": sum(
+                        observation_is_wet(item)
+                        for item in metar_fetched.get(engine_id, [])
+                    ),
+                    "cache": metar_results.get(engine_id, {}).get("cache"),
+                    "queried_at": metar_results.get(engine_id, {}).get("queried_at"),
+                }
+                for engine_id in engine_ids
+            },
+        }
         home_region = storm_manager.get_engine_for_target("zone.home")
         hass.data[DOMAIN]["netatmo_pressure_trend"] = (
             trends_by_engine.get(home_region.engine_id, {}) if home_region else {}
         )
+        storms_by_engine = {
+            engine_id: regions[engine_id].storm_engine.get_active_storms()
+            for engine_id in engine_ids
+            if engine_id in regions
+        }
+        probe_manager = hass.data[DOMAIN]["virtual_probe_manager"]
+        roaming_target = probe_manager.choose_roaming_target(
+            storms_by_engine=storms_by_engine,
+            observations_by_engine=observations_by_engine,
+        )
+        roaming_observations = list(
+            hass.data[DOMAIN].get("netatmo_roaming_observations", [])
+        )
+        synoptic_roaming_observations = list(
+            hass.data[DOMAIN].get("synoptic_roaming_observations", [])
+        )
+        roaming_status = {
+            "enabled": roaming_target is not None,
+            "queried": False,
+            "target": roaming_target,
+            "station_count": (
+                len(roaming_observations)
+                + len(synoptic_roaming_observations)
+            ),
+            "query_interval_minutes": 10,
+            "providers": {},
+        }
+        now_ts = time.time()
+        if (
+            roaming_target is not None
+            and now_ts - float(
+                hass.data[DOMAIN].get("netatmo_roaming_last_query", 0.0)
+            ) >= 10 * 60
+        ):
+            center = (
+                float(roaming_target["latitude"]),
+                float(roaming_target["longitude"]),
+            )
+            roaming_key = f"roaming:{center[0]:.2f},{center[1]:.2f}"
+            if (
+                hass.data[DOMAIN].get("netatmo_roaming_query_key")
+                != roaming_key
+            ):
+                roaming_observations = []
+                hass.data[DOMAIN]["netatmo_roaming_observations"] = []
+                hass.data[DOMAIN]["netatmo_roaming_query_key"] = roaming_key
+            try:
+                worker_roaming = _cached_worker_netatmo(
+                    roaming_key,
+                    center[0],
+                    center[1],
+                    "roaming",
+                )
+                if worker_roaming is not None:
+                    roaming_observations = list(worker_roaming)
+                hass.data[DOMAIN][
+                    "netatmo_roaming_observations"
+                ] = roaming_observations
+                roaming_status["queried"] = worker_roaming is not None
+                roaming_status["providers"]["netatmo"] = {
+                    "queried": worker_roaming is not None,
+                    "stations": len(roaming_observations),
+                    "radius_km": 20.0,
+                }
+                if _synoptic_applicable(center[0], center[1]):
+                    synoptic_key = (
+                        f"roaming:{center[0]:.2f},{center[1]:.2f}:50"
+                    )
+                    synoptic_roaming, synoptic_roaming_result = (
+                        _cached_worker_synoptic(
+                            synoptic_key,
+                            center[0],
+                            center[1],
+                            "roaming",
+                            50.0,
+                        )
+                    )
+                    if synoptic_roaming is not None:
+                        synoptic_roaming_observations = list(
+                            synoptic_roaming
+                        )
+                        hass.data[DOMAIN][
+                            "synoptic_roaming_observations"
+                        ] = synoptic_roaming_observations
+                    roaming_status["providers"]["synoptic"] = {
+                        "queried": synoptic_roaming is not None,
+                        "stations": len(synoptic_roaming_observations),
+                        "wet_stations": sum(
+                            observation_is_wet(item)
+                            for item in synoptic_roaming_observations
+                        ),
+                        "radius_km": 50.0,
+                        "cache": (
+                            synoptic_roaming_result.get("cache")
+                            if synoptic_roaming_result else None
+                        ),
+                    }
+                    roaming_status["queried"] = (
+                        roaming_status["queried"]
+                        or synoptic_roaming is not None
+                    )
+                    if synoptic_roaming_result is not None:
+                        _queue_provider_cycle_sample(
+                            "synoptic",
+                            f"roaming:{roaming_target['region_id']}",
+                            center[0],
+                            center[1],
+                            {
+                                "query_kind": "roaming",
+                                "radius_km": 50.0,
+                                "stations": len(
+                                    synoptic_roaming_observations
+                                ),
+                                "raining_stations": sum(
+                                    observation_is_wet(item)
+                                    for item in synoptic_roaming_observations
+                                ),
+                                "cache": synoptic_roaming_result.get("cache"),
+                                "storm_id": roaming_target.get("storm_id"),
+                            },
+                        )
+                roaming_status["station_count"] = (
+                    len(roaming_observations)
+                    + len(synoptic_roaming_observations)
+                )
+            except Exception as err:
+                roaming_status["error"] = str(err)
+                _LOGGER.warning("Reizende Netatmo-verkenner mislukt: %s", err)
+            finally:
+                if roaming_status["queried"]:
+                    hass.data[DOMAIN]["netatmo_roaming_last_query"] = now_ts
+
+        # De evaluatie gebeurt in een eigen providerfase na deze poll. Zo kan
+        # een trage Netatmo- of Open-Meteo-call de geplande controle niet
+        # annuleren. Bewaar hier alleen de laatste roamingdiagnostiek.
+        hass.data[DOMAIN]["virtual_probe_roaming_status"] = roaming_status
+        synoptic_diagnostics = hass.data[DOMAIN].get(
+            "synoptic_diagnostics", {}
+        )
+        synoptic_diagnostics["roaming"] = roaming_status.get(
+            "providers", {}
+        ).get("synoptic", {
+            "queried": False,
+            "stations": len(synoptic_roaming_observations),
+            "radius_km": 50.0,
+        })
+        hass.data[DOMAIN]["synoptic_diagnostics"] = synoptic_diagnostics
         await pressure_store.async_save({
             "engines": {
                 region.storage_key: pressure_trackers_by_engine[
@@ -1885,9 +4508,214 @@ async def _async_setup_runtime(
                 for engine_id, items in observations_by_engine.items()
             },
         })
+        hass.bus.async_fire(
+            f"{DOMAIN}_synoptic_update",
+            hass.data[DOMAIN]["synoptic_diagnostics"],
+        )
+        hass.bus.async_fire(
+            f"{DOMAIN}_metar_update",
+            hass.data[DOMAIN]["metar_diagnostics"],
+        )
         # Alleen natte stations naar OFE
-        for o in raining:
-            storm_manager.route_observation(o)
+        await storm_manager.async_route_observations(raining)
+
+    async def _update_virtual_probes_from_cache(now=None):
+        """Evalueer verkenners onafhankelijk van provider-netwerktijd."""
+        probe_manager = hass.data[DOMAIN]["virtual_probe_manager"]
+        observed_at = time.time()
+        storms_by_engine = {
+            region.engine_id: region.storm_engine.get_active_storms()
+            for region in storm_manager.get_all_engines()
+        }
+        probe_observations = {
+            engine_id: list(items)
+            for engine_id, items in hass.data[DOMAIN].get(
+                "ground_observations_by_engine", {}
+            ).items()
+        }
+        roaming_status = dict(hass.data[DOMAIN].get(
+            "virtual_probe_roaming_status", {}
+        ))
+        roaming_target = roaming_status.get("target")
+        if roaming_target is not None:
+            probe_observations.setdefault(
+                str(roaming_target["region_id"]), []
+            ).extend(
+                hass.data[DOMAIN].get("netatmo_roaming_observations", [])
+            )
+            probe_observations[str(roaming_target["region_id"])].extend(
+                hass.data[DOMAIN].get(
+                    "synoptic_roaming_observations", []
+                )
+            )
+        active_probes = [
+            {
+                key: probe[key]
+                for key in (
+                    "probe_id", "storm_id", "region_id", "station_id",
+                    "latitude", "longitude", "created_at", "expected_at",
+                    "eta_minutes", "passage", "pass_distance_km",
+                    "motion_confidence", "radar_source",
+                )
+            }
+            for probe in probe_manager.diagnostics(observed_at).get("probes", [])
+        ]
+        active_probes = _trim_virtual_probe_active_probes(
+            active_probes,
+            observed_at=observed_at,
+            max_probes=VIRTUAL_PROBE_WORKER_MAX_RESTORED_ACTIVE_PROBES,
+        )
+        diagnostics_before = probe_manager.diagnostics(observed_at)
+        history = {
+            "completed": diagnostics_before.get("completed_count", 0),
+            "hits": diagnostics_before.get("confirmed_count", 0),
+            "misses": diagnostics_before.get("dry_count", 0),
+            "unverifiable": diagnostics_before.get(
+                "unverifiable_count", 0
+            ),
+            "cancelled": diagnostics_before.get("cancelled_count", 0),
+            "recent_outcomes": diagnostics_before.get(
+                "recent_outcomes", []
+            ),
+        }
+        payload = {
+            "observed_at": observed_at,
+            "active_probes": active_probes,
+            "allow_trimmed_payload": True,
+            "history": history,
+            "states_by_region": {
+                region.engine_id:
+                    region.storm_engine.export_tracking_state()
+                for region in storm_manager.get_all_engines()
+            },
+            "observations_by_region": _trim_virtual_probe_observations({
+                str(engine_id): [
+                    {
+                        **asdict(item),
+                        "obs_type": item.obs_type.value,
+                    }
+                    for item in items
+                ]
+                for engine_id, items in probe_observations.items()
+            }, VIRTUAL_PROBE_WORKER_MAX_OBSERVATIONS),
+            "radar_sources_by_region": hass.data[DOMAIN].get(
+                "radar_sources_by_engine", {}
+            ),
+        }
+
+        if not hass.data[DOMAIN].get("virtual_probe_worker_task"):
+            async def _refresh_virtual_probes():
+                try:
+                    from .worker_bridge import async_request_worker_job
+
+                    result = await async_request_worker_job(
+                        hass,
+                        "virtual_probe_operational",
+                        payload,
+                        timeout=12,
+                    )
+                    if result.get("method") != "virtual_probe_operational_v1":
+                        raise ValueError("ongeldig verkennerresultaat")
+                    hass.data[DOMAIN][
+                        "virtual_probe_worker_result"
+                    ] = result
+                    hass.data[DOMAIN][
+                        "virtual_probe_worker_last_success"
+                    ] = time.time()
+                    hass.data[DOMAIN].pop(
+                        "virtual_probe_worker_error", None
+                    )
+                except (
+                    asyncio.TimeoutError,
+                    RuntimeError,
+                    TypeError,
+                    ValueError,
+                ) as err:
+                    hass.data[DOMAIN]["virtual_probe_worker_error"] = {
+                        "error": type(err).__name__,
+                        "timestamp": time.time(),
+                    }
+                finally:
+                    hass.data[DOMAIN]["virtual_probe_worker_task"] = None
+
+            hass.data[DOMAIN][
+                "virtual_probe_worker_task"
+            ] = hass.async_create_background_task(
+                _refresh_virtual_probes(),
+                f"{DOMAIN}_virtual_probe_worker",
+            )
+
+        worker_result = hass.data[DOMAIN].pop(
+            "virtual_probe_worker_result", None
+        )
+        if worker_result is not None:
+            probe_samples = list(worker_result.get("samples", []))
+            probe_diagnostics = dict(
+                worker_result.get("diagnostics", {})
+            )
+            restored = [
+                {
+                    key: probe[key]
+                    for key in (
+                        "probe_id", "storm_id", "region_id", "station_id",
+                        "latitude", "longitude", "created_at", "expected_at",
+                        "eta_minutes", "passage", "pass_distance_km",
+                        "motion_confidence", "radar_source",
+                    )
+                }
+                for probe in probe_diagnostics.get("probes", [])
+            ]
+            restored_history = {
+                "completed": probe_diagnostics.get("completed_count", 0),
+                "hits": probe_diagnostics.get("confirmed_count", 0),
+                "misses": probe_diagnostics.get("dry_count", 0),
+                "unverifiable": probe_diagnostics.get(
+                    "unverifiable_count", 0
+                ),
+                "cancelled": probe_diagnostics.get("cancelled_count", 0),
+                "recent_outcomes": probe_diagnostics.get(
+                    "recent_outcomes", []
+                ),
+            }
+            probe_manager = VirtualProbeManager(
+                restored, restored_history
+            )
+            hass.data[DOMAIN]["virtual_probe_manager"] = probe_manager
+            operation = {
+                "state": "operationeel",
+                "mode": "operationeel",
+                "fallback": False,
+            }
+        else:
+            probe_samples = []
+            probe_diagnostics = diagnostics_before
+            last_success = float(hass.data[DOMAIN].get(
+                "virtual_probe_worker_last_success", 0.0
+            ) or 0.0)
+            if time.time() - last_success <= 15 * 60:
+                operation = {
+                    "state": "operationeel",
+                    "mode": "operationeel",
+                    "fallback": False,
+                    "source": "laatste_geldige_workerresultaat",
+                    "age_seconds": round(time.time() - last_success, 1),
+                }
+            else:
+                operation = {
+                    "state": "worker_onbeschikbaar",
+                    "mode": "worker_first",
+                    "fallback": False,
+                    "source": "bewaarde_workerstatus",
+                }
+        probe_diagnostics["worker_operation"] = operation
+        probe_diagnostics["roaming_query"] = roaming_status
+        hass.data[DOMAIN]["verification_samples_pending"].extend(
+            probe_samples
+        )
+        hass.data[DOMAIN]["virtual_probe_diagnostics"] = probe_diagnostics
+        hass.bus.async_fire(
+            f"{DOMAIN}_virtual_probe_update", probe_diagnostics
+        )
 
     async def _poll_open_meteo(now=None):
         if not hass.data[DOMAIN].get("open_meteo_enabled", False):
@@ -1929,17 +4757,34 @@ async def _async_setup_runtime(
                 target = target_runtime.get(target_id, {})
                 lat = float(target_result.get("requested_latitude"))
                 lon = float(target_result.get("requested_longitude"))
-                log_open_meteo(
-                    hass,
-                    {
-                        **target_result,
+                _queue_provider_cycle_sample(
+                    "open_meteo", target_id, lat, lon, {
                         "provider_status": result.get("provider_status"),
                         "fetch_sequence": sequence,
                         "last_success_at": result.get("last_success_at"),
+                        "current_precipitation_mm": target_result.get(
+                            "current_precipitation_mm"
+                        ),
+                        "forecast_90m_max_mm": target_result.get(
+                            "forecast_90m_max_mm"
+                        ),
+                        "forecast_90m_total_mm": target_result.get(
+                            "forecast_90m_total_mm"
+                        ),
+                        "forecast_90m_first_wet_minutes": target_result.get(
+                            "forecast_90m_first_wet_minutes"
+                        ),
+                        "forecast_3h_max_mm": target_result.get(
+                            "forecast_3h_max_mm"
+                        ),
+                        "cape_max_3h_jkg": target_result.get(
+                            "cape_max_3h_jkg"
+                        ),
+                        "lightning_potential_max_3h": target_result.get(
+                            "lightning_potential_max_3h"
+                        ),
                     },
-                    lat,
-                    lon,
-                    target_id=target_id,
+                    observed_at=observed_at,
                 )
                 hass.data[DOMAIN]["verification_samples_pending"].append({
                     "sample_key": (
@@ -1987,7 +4832,7 @@ async def _async_setup_runtime(
             return
         try:
             observations = await asyncio.wait_for(
-                eumetsat.fetch_observations(), timeout=30
+                eumetsat.fetch_observations(), timeout=65
             )
         except Exception:
             _LOGGER.exception("EUMETSAT LI fallback ophalen mislukt")
@@ -2004,14 +4849,17 @@ async def _async_setup_runtime(
         for observation in observations:
             if preferred_source_for_longitude(observation.lon) != observation.source:
                 continue
-            if storm_manager.route_observation(observation) == 0:
+            if (
+                await storm_manager.async_route_observation(observation)
+                == 0
+            ):
                 continue
             accepted += 1
             hass.data[DOMAIN]["last_lightning"] = observation
             hass.data[DOMAIN].setdefault("lightning_count", 0)
             hass.data[DOMAIN]["lightning_count"] += 1
-            _record_lightning(observation)
-            _queue_lightning_update(observation)
+            engine_ids = _record_lightning(observation)
+            _queue_lightning_update(observation, engine_ids=engine_ids)
         if observations:
             _LOGGER.info(
                 "EUMETSAT LI fallback: %d/%d flashes binnen actieve regio's",
@@ -2035,7 +4883,7 @@ async def _async_setup_runtime(
                 goes_glm.fetch_observations(
                     satellites_for_regions(_blitz_regions())
                 ),
-                timeout=30,
+                timeout=65,
             )
         except Exception as exc:
             _LOGGER.error("NOAA GOES GLM fallback ophalen mislukt: %s", exc)
@@ -2054,15 +4902,18 @@ async def _async_setup_runtime(
         for observation in observations:
             if preferred_source_for_longitude(observation.lon) != observation.source:
                 continue
-            if storm_manager.route_observation(observation) == 0:
+            if (
+                await storm_manager.async_route_observation(observation)
+                == 0
+            ):
                 continue
             accepted += 1
             hass.data[DOMAIN]["lightning_source"] = observation.source
             hass.data[DOMAIN]["last_lightning"] = observation
             hass.data[DOMAIN].setdefault("lightning_count", 0)
             hass.data[DOMAIN]["lightning_count"] += 1
-            _record_lightning(observation)
-            _queue_lightning_update(observation)
+            engine_ids = _record_lightning(observation)
+            _queue_lightning_update(observation, engine_ids=engine_ids)
         if observations:
             _LOGGER.info(
                 "NOAA GOES GLM fallback: %d/%d flashes binnen actieve regio's",
@@ -2085,9 +4936,14 @@ async def _async_setup_runtime(
             return
         previous_mode = hass.data[DOMAIN].get("lightning_source_mode", "auto")
         hass.data[DOMAIN]["lightning_source_mode"] = source_mode
-        if not ha_started.is_set() or hass.state != CoreState.running:
+        if (
+            not ha_started.is_set()
+            or hass.state != CoreState.running
+            or not storm_manager.admission_ready
+        ):
             _LOGGER.info(
-                "Bliksembronmodus %s opgeslagen; activering wacht op HA-start",
+                "Bliksembronmodus %s opgeslagen; activering wacht op "
+                "HA-start en duurzaam herstel",
                 source_mode,
             )
             return
@@ -2125,6 +4981,28 @@ async def _async_setup_runtime(
         )
 
     hass.data[DOMAIN]["set_analysis_mode"] = _set_analysis_mode
+
+    def _system_reports_hardware_throttling() -> bool:
+        """Use only an explicit CPU/OS throttling signal, never a degree threshold."""
+
+        for entity_id in (
+            "binary_sensor.cpu_throttling",
+            "binary_sensor.thermal_throttling",
+            "sensor.cpu_throttling",
+            "sensor.thermal_throttling",
+        ):
+            state = hass.states.get(entity_id)
+            if state is None:
+                continue
+            if str(state.state).strip().lower() in {
+                "on",
+                "true",
+                "active",
+                "throttled",
+                "throttling",
+            }:
+                return True
+        return False
 
     def _system_performance_snapshot() -> dict:
         """Lees goedkope, reeds beschikbare HA-systeemmetingen."""
@@ -2221,10 +5099,69 @@ async def _async_setup_runtime(
                 _system_performance_snapshot(),
             )
 
-    async def _flush_calibration_data() -> None:
+    async def _flush_calibration_data_impl_legacy() -> None:
         """Schrijf de verzamelde kalibratiedata buiten de HA-eventloop weg."""
         observer = hass.data[DOMAIN]["radar_calibration_observer"]
         batch = observer.drain_collection_batch()
+        calibration_operation = {
+            "state": "operationeel",
+            "mode": "worker_first",
+            "source": "worker",
+            "fallback_active": False,
+        }
+        if batch.get("frames"):
+            try:
+                from .worker_bridge import async_request_worker_job
+
+                serialized_frames = [
+                    list(frame) for frame in batch["frames"]
+                ]
+                received = cached = 0
+                collected_comparisons = []
+                # Maximaal drie 0,1°-rasters per bericht houdt het MQTT-
+                # contract ook bij veel natte cellen ruim onder 1 MiB.
+                for offset in range(0, len(serialized_frames), 3):
+                    response = await async_request_worker_job(
+                        hass,
+                        "calibration_operational",
+                        {"frames": serialized_frames[offset:offset + 3]},
+                        timeout=20,
+                    )
+                    if (
+                        response.get("method")
+                        != "worker_radar_calibration_v1"
+                    ):
+                        raise ValueError("ongeldig workerkalibratieresultaat")
+                    received += int(response.get("frames_received", 0))
+                    cached = int(response.get("cached_frames", cached))
+                    collected_comparisons.extend(
+                        response.get("comparisons", [])
+                    )
+                comparisons = tuple(
+                    tuple(value) for value in collected_comparisons
+                )
+                batch["comparisons"] = comparisons
+                observer.ingest_worker_comparisons(comparisons)
+                calibration_operation.update({
+                    "frames_received": received,
+                    "comparisons_received": len(comparisons),
+                    "cached_frames": cached,
+                })
+            except (
+                asyncio.TimeoutError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ) as err:
+                batch["comparisons"] = ()
+                calibration_operation.update({
+                    "state": "worker_onbeschikbaar",
+                    "mode": "worker_first",
+                    "source": "bewaarde_frames",
+                    "fallback_active": False,
+                    "error": type(err).__name__,
+                })
+        hass.data[DOMAIN]["calibration_worker"] = calibration_operation
         pending = hass.data[DOMAIN].get("verification_samples_pending", [])
         hass.data[DOMAIN]["verification_samples_pending"] = []
         batch["verification_samples"] = tuple(pending)
@@ -2238,18 +5175,61 @@ async def _async_setup_runtime(
         )
         hass.data[DOMAIN]["system_performance_samples_pending"] = []
         batch["system_performance_samples"] = tuple(system_pending)
+        lightning_pending = hass.data[DOMAIN].get(
+            "lightning_aggregates_pending", []
+        )
+        hass.data[DOMAIN]["lightning_aggregates_pending"] = []
+        batch["lightning_aggregates"] = tuple(lightning_pending)
+        provider_pending = hass.data[DOMAIN].get(
+            "provider_cycle_samples_pending", []
+        )
+        hass.data[DOMAIN]["provider_cycle_samples_pending"] = []
+        batch["provider_cycle_samples"] = tuple(provider_pending)
+        ground_pending = hass.data[DOMAIN].get(
+            "ground_observations_pending", []
+        )
+        hass.data[DOMAIN]["ground_observations_pending"] = []
+        batch["ground_observations"] = tuple(ground_pending)
+        ground_quality_pending = hass.data[DOMAIN].get(
+            "ground_quality_assessments_pending", []
+        )
+        hass.data[DOMAIN]["ground_quality_assessments_pending"] = []
+        batch["ground_quality_assessments"] = tuple(ground_quality_pending)
+        ground_decisions_pending = hass.data[DOMAIN].get(
+            "ground_confirmation_decisions_pending", []
+        )
+        hass.data[DOMAIN]["ground_confirmation_decisions_pending"] = []
+        batch["ground_confirmation_decisions"] = tuple(
+            ground_decisions_pending
+        )
+        original_pending = hass.data[DOMAIN].get(
+            "original_radar_frames_pending", []
+        )
+        hass.data[DOMAIN]["original_radar_frames_pending"] = []
+        batch["original_radar_frames"] = tuple(original_pending)
         if (
             not batch["frames"]
             and not batch["comparisons"]
             and not batch["verification_samples"]
             and not batch["pysteps_preflight_samples"]
             and not batch["system_performance_samples"]
+            and not batch["lightning_aggregates"]
+            and not batch["provider_cycle_samples"]
+            and not batch["ground_observations"]
+            and not batch["ground_quality_assessments"]
+            and not batch["ground_confirmation_decisions"]
+            and not batch["original_radar_frames"]
         ):
             return
         try:
             result = await hass.async_add_executor_job(
                 calibration_store.write_batch, batch
             )
+            if batch["original_radar_frames"]:
+                await hass.async_add_executor_job(
+                    calibration_store.save_original_radar_frames,
+                    list(batch["original_radar_frames"]),
+                )
         except Exception as exc:
             observer.restore_collection_batch(batch)
             hass.data[DOMAIN]["verification_samples_pending"][:0] = list(
@@ -2260,6 +5240,24 @@ async def _async_setup_runtime(
             )
             hass.data[DOMAIN]["system_performance_samples_pending"][:0] = list(
                 batch.get("system_performance_samples", ())
+            )
+            hass.data[DOMAIN]["lightning_aggregates_pending"][:0] = list(
+                batch.get("lightning_aggregates", ())
+            )
+            hass.data[DOMAIN]["provider_cycle_samples_pending"][:0] = list(
+                batch.get("provider_cycle_samples", ())
+            )
+            hass.data[DOMAIN]["ground_observations_pending"][:0] = list(
+                batch.get("ground_observations", ())
+            )
+            hass.data[DOMAIN]["ground_quality_assessments_pending"][:0] = list(
+                batch.get("ground_quality_assessments", ())
+            )
+            hass.data[DOMAIN][
+                "ground_confirmation_decisions_pending"
+            ][:0] = list(batch.get("ground_confirmation_decisions", ()))
+            hass.data[DOMAIN]["original_radar_frames_pending"][:0] = list(
+                batch.get("original_radar_frames", ())
             )
             hass.data[DOMAIN]["radar_calibration_storage"] = {
                 "status": "error", "error": type(exc).__name__,
@@ -2276,6 +5274,9 @@ async def _async_setup_runtime(
             "status": "ready", **result,
         }
         diagnostics = observer.diagnostics()
+        diagnostics["worker_operation"] = dict(
+            hass.data[DOMAIN].get("calibration_worker", {})
+        )
         diagnostics["storage"] = hass.data[DOMAIN]["radar_calibration_storage"]
         diagnostics["bias_profiles"] = {
             "total": len(profiles),
@@ -2289,6 +5290,359 @@ async def _async_setup_runtime(
         hass.bus.async_fire(
             f"{DOMAIN}_calibration_update",
             {"samples": diagnostics["samples"]},
+        )
+
+    def _validated_worker_calibration_summary(
+        response: object,
+        *,
+        expected_method: str,
+    ) -> tuple[dict, dict, list[dict]]:
+        """Validate the bounded worker read model before exposing it in HA."""
+        if (
+            not isinstance(response, dict)
+            or response.get("method") != expected_method
+            or not isinstance(response.get("statistics"), dict)
+        ):
+            raise ValueError("ongeldig worker-kalibratiecorpusresultaat")
+        raw_profiles = response.get("profiles")
+        if not isinstance(raw_profiles, list) or len(raw_profiles) > 128:
+            raise ValueError("ongeldige worker-kalibratieprofiellijst")
+        profiles = []
+        numeric_fields = (
+            "mean_detection_ratio", "mean_extra_fraction",
+            "mean_wet_area_ratio", "mean_f1_score",
+            "mean_intensity_bias", "mean_shift_lat_cells",
+            "mean_shift_lon_cells", "mean_latency_seconds", "updated_at",
+        )
+        for raw_profile in raw_profiles:
+            if not isinstance(raw_profile, dict) or not {
+                "scope_key", "from_source", "to_source", "sample_count",
+                "confidence",
+            }.issubset(raw_profile):
+                raise ValueError("worker-kalibratieprofiel mist velden")
+            if any(
+                not isinstance(raw_profile[key], str) or not raw_profile[key]
+                for key in ("scope_key", "from_source", "to_source")
+            ):
+                raise ValueError("worker-kalibratieprofiel heeft ongeldige bron")
+            sample_count = raw_profile["sample_count"]
+            confidence = raw_profile["confidence"]
+            if (
+                isinstance(sample_count, bool)
+                or not isinstance(sample_count, int)
+                or sample_count < 0
+                or not isinstance(confidence, str)
+                or confidence not in {
+                    "insufficient", "low", "medium", "high"
+                }
+            ):
+                raise ValueError("worker-kalibratieprofiel heeft ongeldige telling")
+            for key in numeric_fields:
+                value = raw_profile.get(key)
+                if value is not None and (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                ):
+                    raise ValueError(
+                        "worker-kalibratieprofiel heeft ongeldige metriek"
+                    )
+            profiles.append(dict(raw_profile))
+        profiles_total = response.get("profiles_total")
+        if (
+            isinstance(profiles_total, bool)
+            or not isinstance(profiles_total, int)
+            or profiles_total < len(profiles)
+            or type(response.get("profiles_truncated")) is not bool
+        ):
+            raise ValueError("worker-kalibratieprofielsamenvatting is ongeldig")
+        return dict(response), dict(response["statistics"]), profiles
+
+    async def _flush_calibration_data_impl() -> None:
+        """Persist radar evidence in the worker and only tiny telemetry in HA."""
+        observer = hass.data[DOMAIN]["radar_calibration_observer"]
+        batch = {"frames": (), "comparisons": ()}
+        pending_fields = (
+            ("verification_samples_pending", "verification_samples"),
+            ("pysteps_preflight_samples_pending", "pysteps_preflight_samples"),
+            ("system_performance_samples_pending", "system_performance_samples"),
+            ("lightning_aggregates_pending", "lightning_aggregates"),
+            ("provider_cycle_samples_pending", "provider_cycle_samples"),
+            ("ground_observations_pending", "ground_observations"),
+            ("ground_quality_assessments_pending", "ground_quality_assessments"),
+            (
+                "ground_confirmation_decisions_pending",
+                "ground_confirmation_decisions",
+            ),
+        )
+        for runtime_key, batch_key in pending_fields:
+            values = hass.data[DOMAIN].get(runtime_key, [])
+            hass.data[DOMAIN][runtime_key] = []
+            batch[batch_key] = tuple(values)
+        all_captures_by_id = hass.data[DOMAIN].get(
+            "calibration_captures_pending", {}
+        )
+        capture_ids = sorted(all_captures_by_id)[
+            :CALIBRATION_CORPUS_MAX_CAPTURES_PER_JOB
+        ]
+        captures_by_id = {
+            capture_id: all_captures_by_id[capture_id]
+            for capture_id in capture_ids
+        }
+        hass.data[DOMAIN]["calibration_captures_pending"] = {
+            capture_id: descriptor
+            for capture_id, descriptor in all_captures_by_id.items()
+            if capture_id not in captures_by_id
+        }
+        captures = [
+            captures_by_id[key] for key in sorted(captures_by_id)
+        ]
+        if (
+            not captures
+            and not any(batch.get(batch_key) for _, batch_key in pending_fields)
+        ):
+            return
+
+        def _restore_pending() -> None:
+            for runtime_key, batch_key in pending_fields:
+                hass.data[DOMAIN][runtime_key][:0] = list(
+                    batch.get(batch_key, ())
+                )
+            current_captures = hass.data[DOMAIN].setdefault(
+                "calibration_captures_pending", {}
+            )
+            for capture_id, descriptor in captures_by_id.items():
+                current_captures.setdefault(capture_id, descriptor)
+
+        calibration_operation = {
+            "state": "operationeel",
+            "mode": "worker_calibration_corpus_v1",
+            "source": "worker",
+            "fallback_active": False,
+        }
+        corpus_result = {}
+        corpus_profiles = []
+        try:
+            if captures:
+                from .worker_bridge import async_request_worker_job
+
+                capture_digest = hashlib.sha256(
+                    "\n".join(sorted(captures_by_id)).encode("ascii")
+                ).hexdigest()
+                response = await async_request_worker_job(
+                    hass,
+                    "calibration_corpus_ingest",
+                    {"captures": captures},
+                    timeout=90,
+                    job_id=f"calcorpus-{capture_digest[:32]}",
+                )
+                corpus_result, statistics, corpus_profiles = (
+                    _validated_worker_calibration_summary(
+                        response,
+                        expected_method="worker_calibration_corpus_v1",
+                    )
+                )
+                receipt = dict(corpus_result.get("receipt") or {})
+                calibration_operation.update({
+                    "captures_received": int(
+                        receipt.get("captures_received", 0)
+                    ),
+                    "captures_inserted": int(
+                        receipt.get("captures_inserted", 0)
+                    ),
+                    "artifacts_inserted": int(
+                        receipt.get("artifacts_inserted", 0)
+                    ),
+                    "groups_recomputed": int(
+                        receipt.get("groups_recomputed", 0)
+                    ),
+                    "comparisons_recomputed": int(
+                        receipt.get("comparisons_recomputed", 0)
+                    ),
+                    "already_applied": bool(
+                        corpus_result.get("already_applied", False)
+                    ),
+                    "corpus": statistics,
+                })
+
+            # write_batch receives no radar grids or overlays. It persists
+            # only small ground/verification/performance records.
+            telemetry_result = await hass.async_add_executor_job(
+                calibration_store.write_batch, batch
+            )
+            result = dict(telemetry_result)
+        except asyncio.CancelledError:
+            _restore_pending()
+            raise
+        except Exception as exc:
+            _restore_pending()
+            calibration_operation.update({
+                "state": "worker_onbeschikbaar",
+                "error": type(exc).__name__,
+            })
+            hass.data[DOMAIN]["calibration_worker"] = calibration_operation
+            hass.data[DOMAIN]["radar_calibration_storage"] = {
+                "status": "error", "error": type(exc).__name__,
+                "path": str(calibration_store.path),
+            }
+            _LOGGER.exception("Worker-owned kalibratiecorpus verwerken mislukt")
+            return
+
+        hass.data[DOMAIN]["calibration_worker"] = calibration_operation
+        local_profiles = result.pop("_bias_profiles", [])
+        if corpus_result:
+            profiles = corpus_profiles
+            result["worker_corpus"] = dict(
+                corpus_result.get("statistics") or {}
+            )
+            result["worker_corpus_profiles_total"] = int(
+                corpus_result.get("profiles_total", len(profiles))
+            )
+            result["worker_corpus_profiles_truncated"] = bool(
+                corpus_result.get("profiles_truncated", False)
+            )
+        else:
+            profiles = list(
+                hass.data[DOMAIN].get("radar_bias_profiles", local_profiles)
+            )
+        hass.data[DOMAIN]["radar_bias_profiles"] = profiles
+        hass.data[DOMAIN]["radar_bias_profile_index"] = build_profile_index(
+            profiles
+        )
+        hass.data[DOMAIN]["radar_calibration_storage"] = {
+            "status": "ready", **result,
+        }
+        diagnostics = observer.diagnostics()
+        diagnostics["worker_operation"] = calibration_operation
+        diagnostics["storage"] = hass.data[DOMAIN]["radar_calibration_storage"]
+        diagnostics["pending_captures"] = len(
+            hass.data[DOMAIN].get("calibration_captures_pending", {})
+        )
+        diagnostics["bias_profiles"] = {
+            "total": len(profiles),
+            "operational": sum(
+                1 for profile in profiles
+                if profile.get("confidence") != "insufficient"
+            ),
+            "profiles": profiles[:20],
+        }
+        hass.data[DOMAIN]["radar_calibration"] = diagnostics
+        hass.bus.async_fire(
+            f"{DOMAIN}_calibration_update",
+            {"samples": diagnostics["samples"]},
+        )
+
+    async def _refresh_worker_calibration_snapshot() -> bool:
+        """Load the compact worker-owned corpus view without legacy DB scans."""
+        from .worker_bridge import (
+            async_request_worker_job,
+            worker_is_available,
+        )
+
+        if not worker_is_available(hass):
+            hass.data[DOMAIN]["calibration_worker"] = {
+                "state": "wacht_op_worker",
+                "mode": "worker_calibration_corpus_v1",
+                "source": "worker",
+                "fallback_active": False,
+            }
+            return False
+        try:
+            response = await async_request_worker_job(
+                hass,
+                "calibration_corpus_snapshot",
+                {},
+                timeout=20,
+                job_id=(
+                    "calibration-corpus-snapshot-"
+                    f"{int(time.time() // 300)}"
+                ),
+            )
+            corpus_result, statistics, profiles = (
+                _validated_worker_calibration_summary(
+                    response,
+                    expected_method=(
+                        "worker_calibration_corpus_snapshot_v1"
+                    ),
+                )
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            hass.data[DOMAIN]["calibration_worker"] = {
+                "state": "worker_onbeschikbaar",
+                "mode": "worker_calibration_corpus_v1",
+                "source": "worker",
+                "fallback_active": False,
+                "error": type(exc).__name__,
+            }
+            _LOGGER.warning(
+                "Worker-kalibratiecorpussnapshot niet beschikbaar: %s",
+                type(exc).__name__,
+            )
+            return False
+
+        hass.data[DOMAIN]["radar_bias_profiles"] = profiles
+        hass.data[DOMAIN]["radar_bias_profile_index"] = build_profile_index(
+            profiles
+        )
+        storage = dict(hass.data[DOMAIN].get("radar_calibration_storage", {}))
+        storage.update({
+            "status": "ready",
+            "worker_corpus": statistics,
+            "worker_corpus_profiles_total": int(
+                corpus_result["profiles_total"]
+            ),
+            "worker_corpus_profiles_truncated": bool(
+                corpus_result["profiles_truncated"]
+            ),
+        })
+        hass.data[DOMAIN]["radar_calibration_storage"] = storage
+        hass.data[DOMAIN]["calibration_worker"] = {
+            "state": "operationeel",
+            "mode": "worker_calibration_corpus_v1",
+            "source": "worker",
+            "fallback_active": False,
+            "corpus": statistics,
+        }
+        diagnostics = hass.data[DOMAIN][
+            "radar_calibration_observer"
+        ].diagnostics()
+        diagnostics["worker_operation"] = dict(
+            hass.data[DOMAIN]["calibration_worker"]
+        )
+        diagnostics["storage"] = storage
+        diagnostics["bias_profiles"] = {
+            "total": len(profiles),
+            "operational": sum(
+                profile.get("confidence") != "insufficient"
+                for profile in profiles
+            ),
+            "profiles": profiles[:20],
+        }
+        hass.data[DOMAIN]["radar_calibration"] = diagnostics
+        hass.bus.async_fire(
+            f"{DOMAIN}_calibration_update",
+            {"samples": diagnostics["samples"]},
+        )
+        return True
+
+    async def _flush_calibration_data() -> None:
+        """Plan opslag/workerwerk zonder een providerfase erop te laten wachten."""
+        task = hass.data[DOMAIN].get("calibration_flush_task")
+        if task is not None and not task.done():
+            return
+
+        async def _run() -> None:
+            try:
+                await _flush_calibration_data_impl()
+            finally:
+                hass.data[DOMAIN]["calibration_flush_task"] = None
+
+        hass.data[DOMAIN]["calibration_flush_task"] = (
+            hass.async_create_background_task(
+                _run(), f"{DOMAIN}_calibration_flush"
+            )
         )
 
     def _numeric_state(entity_state):
@@ -2309,11 +5663,12 @@ async def _async_setup_runtime(
             return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
 
-    def _queue_target_verification_samples() -> None:
-        """Leg de gelijktijdige STV3-status van elk actueel target vast."""
+    def _queue_target_verification_samples() -> tuple:
+        """Leg targetstatus vast en bouw immutable warning-evaluaties."""
         from .engine.nowcast import build_precipitation_status
 
         observed_at = time.time()
+        warning_evaluations = []
         nominal_minute = int(observed_at // 60)
         average = hass.states.get("sensor.neerslagverwachting_gemiddeld")
         total = hass.states.get("sensor.neerslagverwachting_totaal")
@@ -2341,11 +5696,12 @@ async def _async_setup_runtime(
                 else target.get("region_engine_id")
             )
             source_decision = radar_sources.get(engine_id, {})
+            active_storms = (
+                region.storm_engine.get_active_storms()
+                if region else []
+            )
             own_attrs = build_precipitation_status(
-                (
-                    region.storm_engine.get_active_storms()
-                    if region else []
-                ),
+                active_storms,
                 float(lat),
                 float(lon),
                 radar_source=source_decision.get("source"),
@@ -2356,16 +5712,52 @@ async def _async_setup_runtime(
             )
             if not target.get("radar_covered", False):
                 own_attrs["status"] = "onvoldoende_data"
+            data_age_seconds = source_decision.get("age_seconds")
+            selected_storm_id = (
+                own_attrs.get("storm_id")
+                or own_attrs.get("tracked_system_storm_id")
+            )
+            selected_storm = next((
+                storm for storm in active_storms
+                if storm.storm_id == selected_storm_id
+            ), None)
+            if selected_storm is not None:
+                timestamps = [
+                    float(cell.timestamp)
+                    for cell in selected_storm.radar_cells.values()
+                    if isinstance(getattr(cell, "timestamp", None), (int, float))
+                    and not isinstance(cell.timestamp, bool)
+                    and math.isfinite(float(cell.timestamp))
+                ]
+                if timestamps:
+                    data_age_seconds = max(
+                        0.0, observed_at - max(timestamps)
+                    )
+            warning_evaluations.append(build_warning_evaluation(
+                own_attrs,
+                target_id=str(target_id),
+                target_label=str(target.get("name") or target_id),
+                latitude=float(lat),
+                longitude=float(lon),
+                observed_at=observed_at,
+                data_age_seconds=data_age_seconds,
+                # Dit is uitsluitend de lokale runtime-admission. De
+                # expliciete notification-opt-in is dispatch-authority; een
+                # worker/raw admissionflag mag legacy nooit stil blokkeren.
+                runtime_admitted=storm_manager.admission_ready,
+                target_available=target.get("available") is True,
+                radar_covered=target.get("radar_covered") is True,
+            ))
             eta = own_attrs.get("eta_minutes")
             warning_candidate = None
             if (
-                own_attrs.get("warning_eligible")
+                own_attrs.get("warning_eligible") is True
                 and eta is not None
             ):
                 eta_value = float(eta)
                 warning_candidate = (
                     "imminent" if eta_value <= 15
-                    else "dichtbij" if eta_value <= 45
+                    else "nabij" if eta_value <= 45
                     else "vroeg" if eta_value <= 90
                     else None
                 )
@@ -2435,6 +5827,7 @@ async def _async_setup_runtime(
                     "warning_candidate": warning_candidate,
                 },
             })
+        return tuple(warning_evaluations)
 
     @callback
     def _record_warning_snapshot(event) -> None:
@@ -2469,13 +5862,13 @@ async def _async_setup_runtime(
 
     hass.data[DOMAIN]["unsubscribers"].append(
         hass.bus.async_listen(
-            f"{DOMAIN}_warning_sent", _record_warning_snapshot
+            WARNING_SENT_EVENT, _record_warning_snapshot
         )
     )
 
     async def _flush_region_observation_batches() -> int:
         """Maak alle geplande OFE-adds zichtbaar vóór verificatie/opslag."""
-        await asyncio.sleep(0)
+        await storm_manager.async_drain_ingest()
         delivered = await asyncio.gather(*(
             region.ofe.async_flush_pending()
             for region in storm_manager.get_all_engines()
@@ -2484,9 +5877,13 @@ async def _async_setup_runtime(
 
     async def _poll_all(now=None):
         """Voer een volledige providercyclus in vaste, racevrije volgorde uit."""
-        if not ha_started.is_set() or hass.state != CoreState.running:
+        if (
+            not ha_started.is_set()
+            or hass.state != CoreState.running
+            or not storm_manager.admission_ready
+        ):
             _LOGGER.debug(
-                "Providercyclus uitgesteld: Home Assistant is nog niet gestart"
+                "Providercyclus uitgesteld: startup-admission is nog gesloten"
             )
             return
         lock = hass.data[DOMAIN].setdefault("provider_cycle_lock", asyncio.Lock())
@@ -2499,21 +5896,43 @@ async def _async_setup_runtime(
             )
             _sync_region_radar_providers()
             await _bounded_provider_stage(
-                "national", _poll_national_providers(), 25
+                "national", _poll_national_providers(), 100
             )
             await _bounded_provider_stage(
-                "radar_comparison", _poll_radar_comparison(), 60
+                "radar_comparison", _poll_radar_comparison(), 125
             )
             await _bounded_provider_stage("radar", _poll_radar(), 120)
+            # Start grondmeting en modelcontext gelijktijdig, maar begrens ze
+            # afzonderlijk. Een trage modelcall mag Netatmo en de daarop
+            # volgende verkennerevaluatie nooit meer mee annuleren.
+            netatmo_task = asyncio.create_task(_poll_netatmo())
+            open_meteo_task = asyncio.create_task(_poll_open_meteo())
+            await _bounded_provider_stage("netatmo", netatmo_task, 30)
             await _bounded_provider_stage(
-                "ground_and_model_guidance",
-                asyncio.gather(_poll_netatmo(), _poll_open_meteo()),
-                30,
+                "open_meteo", open_meteo_task, 30
+            )
+            await _bounded_provider_stage(
+                "virtual_probe_evaluation",
+                _update_virtual_probes_from_cache(),
+                5,
             )
             await _bounded_provider_stage(
                 "observation_flush", _flush_region_observation_batches(), 15
             )
-            _queue_target_verification_samples()
+            warning_evaluations = _queue_target_verification_samples()
+            await _bounded_provider_stage(
+                "warning_dispatch",
+                warning_dispatcher.async_process(warning_evaluations),
+                15,
+            )
+            hass.data[DOMAIN]["warning_dispatch_diagnostics"] = (
+                warning_dispatcher.diagnostics
+            )
+            hass.data[DOMAIN].setdefault(
+                "legacy_provider_configuration", {}
+            ).setdefault("notifications", {})[
+                "warning_dispatch"
+            ] = warning_dispatcher.diagnostics
             await _bounded_provider_stage(
                 "calibration_storage", _flush_calibration_data(), 15
             )
@@ -2528,6 +5947,12 @@ async def _async_setup_runtime(
             return
         hass.data[DOMAIN]["unsubscribers"].extend([
             async_track_time_interval(hass, _poll_all, timedelta(minutes=5)),
+            # Grondmetingen mogen niet wachten op de zwaardere radarcyclus.
+            # De bronhelpers hierboven begrenzen de externe frequentie:
+            # METAR elke minuut, Netatmo/Synoptic maximaal elke vijf minuten.
+            async_track_time_interval(
+                hass, _poll_netatmo, timedelta(minutes=1)
+            ),
             async_track_time_interval(
                 hass, _poll_eumetsat_li, timedelta(minutes=2)
             ),
@@ -2573,6 +5998,11 @@ async def _async_setup_runtime(
                 previous_region.storage_key, previous_region.storm_engine
             )
             _activate_region(region)
+            recover_durable_region = hass.data[DOMAIN].get(
+                "recover_durable_region"
+            )
+            if recover_durable_region is not None:
+                await recover_durable_region(region)
         else:
             active_region.target_locations[fictieve_entity] = (lat, lon)
         primary_target = hass.data[DOMAIN]["targets"]["home"]
@@ -2601,8 +6031,9 @@ async def _async_setup_runtime(
         )
         _LOGGER.info("Fictieve tracker: (%.4f,%.4f) — providers herinitialiseren", lat, lon)
         hass.bus.async_fire(f"{DOMAIN}_fictieve_update", {"lat": lat, "lon": lon})
-        await _init_location_providers(lat, lon)
-        hass.data[DOMAIN]["providers_initialized"] = True
+        if storm_manager.admission_ready:
+            await _init_location_providers(lat, lon)
+            hass.data[DOMAIN]["providers_initialized"] = True
 
     async def _refresh_fictieve_location() -> None:
         await _update_fictieve_location()
@@ -2657,6 +6088,11 @@ async def _async_setup_runtime(
             await mcs_store.async_save_engine(current.storage_key, current.storm_engine)
         region = storm_manager.assign_target(spec.entity_id, lat, lon)
         _prepare_region(region)
+        recover_durable_region = hass.data[DOMAIN].get(
+            "recover_durable_region"
+        )
+        if recover_durable_region is not None:
+            await recover_durable_region(region)
         _restore_pending_region_frames_and_audit()
         target_data.update({
             "latitude": lat,
@@ -2707,9 +6143,9 @@ async def _async_setup_runtime(
     async def _do_initial_setup(event=None):
         if not ha_started.is_set() or hass.state != CoreState.running:
             return
-        _activate_polling_schedules()
-        if lightning_source_mode != "satellite_test":
-            blitz.start()
+        # Bouw eerst iedere dynamische regio op en herstel haar duurzame
+        # trackinghead/backlog. Tot deze recoverybarrière voorbij is, mag geen
+        # intervalpoll of pushprovider nieuwe input toelaten.
         await _update_fictieve_location()
         for spec in secondary_specs:
             await _update_secondary_target(spec, initial=True)
@@ -2717,9 +6153,24 @@ async def _async_setup_runtime(
         # aanmaken. Geef zulke regio's alsnog hun bewaarde rasterketen en neem
         # ze daarna expliciet mee in de stormobject-herstartaudit.
         _restore_pending_region_frames_and_audit()
+        # Dit is de enige startup-overgang die de globale routepoort opent:
+        # iedere nu bekende regio is hersteld en de journalcontrole hierboven
+        # is al geslaagd. Providerinitialisatie volgt pas hierna.
+        storm_manager.complete_durable_recovery()
+        hass.data[DOMAIN]["durable_processing"].update({
+            "status": "ready",
+            "admission_ready": True,
+        })
         if not hass.data[DOMAIN].get("providers_initialized"):
             await _init_location_providers(home_lat, home_lon)
             hass.data[DOMAIN]["providers_initialized"] = True
+        hass.async_create_background_task(
+            _refresh_worker_calibration_snapshot(),
+            f"{DOMAIN}_calibration_corpus_snapshot",
+        )
+        _activate_polling_schedules()
+        if lightning_source_mode != "satellite_test":
+            blitz.start()
         await _poll_all()
         if lightning_source_mode == "satellite_test":
             hass.async_create_task(_poll_eumetsat_li())
@@ -2750,10 +6201,11 @@ async def _async_setup_runtime(
 
     @callback
     def _start_runtime_background() -> None:
-        hass.async_create_background_task(
+        task = hass.async_create_background_task(
             _do_initial_setup(),
             "storm_tracker_v3 initial setup",
         )
+        hass.data[DOMAIN]["initial_setup_task"] = task
 
     if hass.state != CoreState.running:
         @callback
@@ -2764,36 +6216,152 @@ async def _async_setup_runtime(
                 startup_timeout_handle.cancel()
                 startup_timeout_handle = None
             _start_runtime_background()
-        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_ha_started)
+        hass.data[DOMAIN]["unsubscribers"].append(
+            hass.bus.async_listen_once(
+                EVENT_HOMEASSISTANT_STARTED, _on_ha_started
+            )
+        )
         _schedule_start_timeout()
     else:
         _start_runtime_background()
 
+    async def _stop_region_runtime() -> None:
+        """Sluit OFE-timers vóór loopshutdown en bewaar daarna trackingstate."""
+        regions = list(storm_manager.get_all_engines())
+        reset_results = await asyncio.gather(
+            *(region.ofe.reset() for region in regions),
+            return_exceptions=True,
+        )
+        for region, result in zip(regions, reset_results):
+            if isinstance(result, Exception):
+                _LOGGER.warning(
+                    "OFE-stop voor %s mislukte: %s",
+                    region.engine_id,
+                    type(result).__name__,
+                )
+        await asyncio.gather(
+            *(
+                mcs_store.async_save_engine(
+                    region.storage_key, region.storm_engine
+                )
+                for region in regions
+            ),
+            return_exceptions=True,
+        )
+
+    shutdown_prepared = False
+
     @callback
-    def _on_ha_stop(event):
-        nonlocal startup_timeout_handle
+    def _prepare_shutdown() -> None:
+        """Sluit alle nieuwe admission één keer vóór de async drain."""
+        nonlocal startup_timeout_handle, shutdown_prepared
+        if shutdown_prepared:
+            return
+        shutdown_prepared = True
+        storm_manager.close_admission()
         if startup_timeout_handle is not None:
             startup_timeout_handle.cancel()
             startup_timeout_handle = None
         lightning_updates.close()
         blitz.stop()
-        hass.async_create_task(provider_lifecycle.async_stop_all())
-        hass.async_create_task(_flush_calibration_data())
-        for region in storm_manager.get_all_engines():
-            hass.async_create_task(
-                mcs_store.async_save_engine(region.storage_key, region.storm_engine)
-            )
         for unsubscribe in hass.data[DOMAIN].get("unsubscribers", []):
             unsubscribe()
         hass.data[DOMAIN]["unsubscribers"] = []
+        if hass.services.has_service(
+            DOMAIN, SERVICE_RETRY_QUARANTINED_OBSERVATIONS
+        ):
+            hass.services.async_remove(
+                DOMAIN, SERVICE_RETRY_QUARANTINED_OBSERVATIONS
+            )
 
-    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _on_ha_stop)
+    async def _shutdown_runtime() -> None:
+        """Stop producenten, wacht cycli uit en sluit pas daarna alle OFE's."""
+        _prepare_shutdown()
+        initial_setup_task = hass.data[DOMAIN].pop(
+            "initial_setup_task", None
+        )
+        if (
+            initial_setup_task is not None
+            and initial_setup_task is not asyncio.current_task()
+            and not initial_setup_task.done()
+        ):
+            initial_setup_task.cancel()
+            await asyncio.gather(
+                initial_setup_task, return_exceptions=True
+            )
+        try:
+            await provider_lifecycle.async_stop_all()
+        except Exception:
+            _LOGGER.exception(
+                "Afsluiten van providerlifecycle mislukte"
+            )
 
-    # ── Sensor platform laden ─────────────────────────────────────────────
-    from homeassistant.helpers import discovery
-    await discovery.async_load_platform(hass, "sensor", DOMAIN, {}, config)
+        enterprise_rainrate = hass.data[DOMAIN].get(
+            "noaa_enterprise_rainrate_provider"
+        )
+        if enterprise_rainrate is not None:
+            try:
+                await enterprise_rainrate.async_stop()
+            except Exception:
+                _LOGGER.exception(
+                    "Afsluiten van NOAA Enterprise Rainrate mislukte"
+                )
+
+        # De lifecyclelock wacht de interne fetch af; deze twee cyclussloten
+        # wachten vervolgens ook de verwerking van het opgehaalde resultaat af.
+        # Daardoor kan geen reeds lopende cyclus ná OFE.reset() nog observaties
+        # toevoegen.
+        for lock_name in ("provider_cycle_lock", "radar_poll_lock"):
+            cycle_lock = hass.data[DOMAIN].get(lock_name)
+            if cycle_lock is not None:
+                async with cycle_lock:
+                    pass
+
+        await storm_manager.async_drain_ingest()
+        await _flush_region_observation_batches()
+        await _flush_calibration_data()
+        calibration_flush_task = hass.data[DOMAIN].get(
+            "calibration_flush_task"
+        )
+        if calibration_flush_task is not None:
+            await asyncio.gather(
+                calibration_flush_task, return_exceptions=True
+            )
+        await _stop_region_runtime()
+        radar_frame_worker = hass.data[DOMAIN].get("radar_frame_worker")
+        if radar_frame_worker is not None:
+            radar_frame_worker.close()
+        from .worker_radar_client import close_worker_radar_client
+        close_worker_radar_client()
+
+    hass.data[DOMAIN]["async_shutdown_runtime"] = _shutdown_runtime
+
+    @callback
+    def _on_ha_stop(event):
+        """Compatibiliteitsroute voor HA-versies zonder shutdown jobs."""
+        _prepare_shutdown()
+        hass.data[DOMAIN]["shutdown_task"] = hass.async_create_task(
+            _shutdown_runtime()
+        )
+
+    add_shutdown_job = getattr(hass, "async_add_shutdown_job", None)
+    if callable(add_shutdown_job):
+        from homeassistant.core import HassJob
+        hass.data[DOMAIN]["remove_shutdown_job"] = add_shutdown_job(
+            HassJob(
+                _shutdown_runtime,
+                "storm_tracker_v3 ordered shutdown",
+            )
+        )
+    else:
+        hass.data[DOMAIN]["unsubscribers"].append(
+            hass.bus.async_listen_once(
+                EVENT_HOMEASSISTANT_STOP, _on_ha_stop
+            )
+        )
 
     _LOGGER.info(
-        "Storm Tracker V3 geladen; providers wachten tot Home Assistant gestart is"
+        "Storm Tracker V3 legacy-runtime geladen; providers wachten tot "
+        "Home Assistant gestart is"
     )
     return True

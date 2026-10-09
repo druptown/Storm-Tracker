@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from ftplib import FTP
-import gzip
 import io
 import logging
 import re
@@ -20,6 +19,7 @@ import numpy as np
 from pyproj import CRS, Transformer
 
 from ..engine.observation import Observation, ObservationType
+from ..engine.bounded_payload import decompress_limited
 from .odim_hdf5 import rain_rate_to_intensity
 from .raster_components import extract_components, extract_intensity_runs
 
@@ -117,9 +117,12 @@ def parse_h40b_netcdf(
         raise ValueError("H40B-frame is ouder dan 90 minuten")
     if len(payload) > MAX_COMPRESSED_BYTES:
         raise ValueError("H40B-download overschrijdt veiligheidslimiet")
-    netcdf = gzip.decompress(payload)
-    if len(netcdf) > MAX_UNCOMPRESSED_BYTES:
-        raise ValueError("Uitgepakt H40B-frame overschrijdt veiligheidslimiet")
+    netcdf = decompress_limited(
+        payload,
+        codec="gzip",
+        maximum_compressed_bytes=MAX_COMPRESSED_BYTES,
+        maximum_uncompressed_bytes=MAX_UNCOMPRESSED_BYTES,
+    )
 
     observations = []
     overlay_runs = []
@@ -216,10 +219,12 @@ def parse_h40b_netcdf(
                     area_km2=area_km2,
                     quality=max(0.0, min(1.0, component_quality)),
                     footprint_points=component.boundary,
+                    footprint_polygons=component.polygons,
                     radar_cell_id=component_id,
                     parent_system_id=component_id,
                     parent_area_km2=area_km2,
                     parent_footprint_points=component.boundary,
+                    parent_footprint_polygons=component.polygons,
                     source="hsaf_h40b",
                 ))
 
@@ -235,9 +240,10 @@ class HsafH40bProvider:
 
     plugin_id = "hsaf_h40b"
 
-    def __init__(self, username: str, password: str):
+    def __init__(self, username: str, password: str, *, hass=None):
         self._username = username
         self._password = password
+        self._hass = hass
         self._last_filename = None
         self._cached_observations = []
         self._last_success_ts = None
@@ -306,6 +312,52 @@ class HsafH40bProvider:
         ):
             return list(self._cached_observations)
         self._last_poll_attempt = now
+        if self._hass is not None:
+            try:
+                from ..worker_radar_client import async_fetch_worker_radar
+
+                observations, overlay, diagnostics, artifact = await async_fetch_worker_radar(
+                    self._hass,
+                    "hsaf_h40b_fetch",
+                    {
+                        "credential_ref": "worker_environment",
+                        "areas": [
+                            {
+                                "center_lat": area.center_lat,
+                                "center_lon": area.center_lon,
+                                "horizon_km": area.horizon_km,
+                            }
+                            for area in selected
+                        ],
+                    },
+                    provider="hsaf_h40b",
+                    timeout=80,
+                    max_age_seconds=MAX_FRAME_AGE_SECONDS,
+                )
+                self._cached_observations = list(observations)
+                self._last_area_signature = area_signature
+                self._last_success_ts = time.time()
+                self.overlay = overlay
+                self.last_worker_artifact = artifact
+                self.healthy = True
+                self.diagnostics = {
+                    "status": "active",
+                    "observations": len(observations),
+                    "transport": "worker",
+                    **diagnostics,
+                }
+                return list(observations)
+            except Exception as err:
+                self.healthy = False
+                self.diagnostics = {
+                    "status": "error",
+                    "error": str(err),
+                    "transport": "worker",
+                }
+                _LOGGER.warning(
+                    "H SAF-workerfout; lokale verwerking blijft uit: %s", err
+                )
+                return list(self._cached_observations)
         try:
             observations, overlay, filename, timestamp, downloaded = (
                 await asyncio.to_thread(self._fetch_sync, selected, area_signature)

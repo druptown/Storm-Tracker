@@ -18,6 +18,7 @@ COUNTRY_CODE_ALIASES = {
     "NEDERLAND": "NL", "NETHERLANDS": "NL",
     "DUITSLAND": "DE", "GERMANY": "DE",
     "FRANKRIJK": "FR", "FRANCE": "FR",
+    "VK": "GB", "UK": "GB",
     "GROOT-BRITTANNIE": "GB", "UNITED KINGDOM": "GB",
     "ITALIE": "IT", "ITALY": "IT",
     "SPANJE": "ES", "SPAIN": "ES",
@@ -76,6 +77,20 @@ def select_engine_radar_source(
         return EngineRadarDecision(
             "rainviewer", f"{local_reason}; {opera_reason}", countries, age
         )
+    enterprise = states.get(
+        "noaa_enterprise_rainrate", SourceState(False, False)
+    )
+    if enterprise.configured and enterprise.healthy:
+        age = (
+            now - enterprise.last_success
+            if enterprise.last_success is not None else None
+        )
+        return EngineRadarDecision(
+            "noaa_enterprise_rainrate",
+            f"{local_reason}; NOAA ERR wereldwijde satellietfallback",
+            countries,
+            age,
+        )
     hsaf = states.get("hsaf_h40b", SourceState(False, False))
     if hsaf.configured and hsaf.healthy:
         age = now - hsaf.last_success if hsaf.last_success is not None else None
@@ -106,6 +121,7 @@ def apply_echo_availability(
     now: float,
     hsaf_observations: int = 0,
     goes_observations: int = 0,
+    enterprise_observations: int = 0,
     opera_coverage_complete: bool = True,
     opera_corroborated_observations: int = 0,
 ) -> EngineRadarDecision:
@@ -139,6 +155,26 @@ def apply_echo_availability(
             age,
         )
     hsaf = states.get("hsaf_h40b", SourceState(False, False))
+    enterprise = states.get(
+        "noaa_enterprise_rainrate", SourceState(False, False)
+    )
+    if (
+        decision.source == "rainviewer"
+        and rainviewer_observations == 0
+        and enterprise_observations > 0
+        and enterprise.configured
+        and enterprise.healthy
+    ):
+        age = (
+            now - enterprise.last_success
+            if enterprise.last_success is not None else None
+        )
+        return EngineRadarDecision(
+            "noaa_enterprise_rainrate",
+            "RainViewer zonder lokale echo; NOAA ERR toont satellietneerslag",
+            decision.country_codes,
+            age,
+        )
     if (
         decision.source == "rainviewer"
         and rainviewer_observations == 0
@@ -179,16 +215,24 @@ def apply_quality_fallback(
     completeness_profile: dict | None,
     now: float,
 ) -> EngineRadarDecision:
-    """Vervang een structureel onvolledige bron door gezonde RainViewer-data."""
+    """Demote an official source only with independent ground confirmation.
+
+    Low overlap alone can also mean RainViewer clutter or a decoding artefact;
+    RainViewer must not be treated as its own ground truth.
+    """
     if decision.source in {None, "rainviewer"} or not completeness_profile:
         return decision
     rainviewer = states.get("rainviewer", SourceState(False, False))
     samples = int(completeness_profile.get("sample_count") or 0)
     detection = completeness_profile.get("mean_detection_ratio")
+    independent_confirmation = int(
+        completeness_profile.get("independent_confirmation_count") or 0
+    )
     if (
         samples < 30
         or detection is None
         or float(detection) >= 0.25
+        or independent_confirmation < 10
         or rainviewer_observations <= 0
         or not rainviewer.configured
         or not rainviewer.healthy
@@ -203,7 +247,9 @@ def apply_quality_fallback(
         (
             f"{decision.source} inhoudelijk onvolledig: slechts "
             f"{float(detection) * 100:.1f}% van onafhankelijke natte cellen "
-            f"gezien over {samples} vergelijkingen; RainViewer kwaliteitsfallback"
+            f"gezien over {samples} vergelijkingen en "
+            f"{independent_confirmation} grondcontroles; "
+            "RainViewer kwaliteitsfallback"
         ),
         decision.country_codes,
         age,

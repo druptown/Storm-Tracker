@@ -131,12 +131,17 @@ def _cell_source(cell) -> str | None:
     return cell_id.split(":", 1)[0]
 
 
-def _cell_matches_active_source(cell, active_radar_source: str | None) -> bool:
+def _cell_matches_active_source(cell, active_radar_source) -> bool:
     """Keep stale cells from an inactive radar provider out of the map feed."""
     if not active_radar_source:
         return True
     source = _cell_source(cell)
-    return source is None or source == active_radar_source
+    accepted = (
+        set(active_radar_source)
+        if isinstance(active_radar_source, (list, tuple, set, frozenset))
+        else {active_radar_source}
+    )
+    return source is None or source in accepted
 
 
 def _storm_has_reliable_motion(storm) -> bool:
@@ -158,6 +163,7 @@ def build_feature_collection(
     targets: dict, regions: list, active_radar_source: str | None = None,
     radar_sources_by_engine: dict | None = None,
     lightning_events: list | None = None,
+    virtual_probe_diagnostics: dict | None = None,
 ) -> dict:
     """Publiceer targets, regio's, systemen, hulls, cellen en vectoren compact."""
     features = []
@@ -167,15 +173,21 @@ def build_feature_collection(
 
     radar_sources_by_engine = radar_sources_by_engine or {}
     lightning_events = lightning_events or []
+    virtual_probe_diagnostics = virtual_probe_diagnostics or {}
     latest_by_region = {}
     radar_points_by_engine = {}
     for region in regions:
-        region_source = (radar_sources_by_engine.get(region.engine_id) or {}).get("source", active_radar_source)
+        region_decision = radar_sources_by_engine.get(region.engine_id) or {}
+        region_match_sources = (
+            region_decision.get("fusion", {}).get("sources")
+            if region_decision.get("fusion", {}).get("active")
+            else region_decision.get("source", active_radar_source)
+        )
         timestamps = [
             float(cell.timestamp)
             for storm in region.storm_engine.get_storms()
             for cell in storm.radar_cells.values()
-            if _cell_matches_active_source(cell, region_source)
+            if _cell_matches_active_source(cell, region_match_sources)
         ]
         latest_by_region[region.engine_id] = max(timestamps, default=None)
 
@@ -203,6 +215,11 @@ def build_feature_collection(
     for region in regions:
         region_decision = radar_sources_by_engine.get(region.engine_id) or {}
         region_source = region_decision.get("source", active_radar_source)
+        region_match_sources = (
+            region_decision.get("fusion", {}).get("sources")
+            if region_decision.get("fusion", {}).get("active")
+            else region_source
+        )
         features.append(_feature(
             f"region:{region.engine_id}",
             {"type": "Point", "coordinates": _point(region.center_lon, region.center_lat)},
@@ -218,7 +235,7 @@ def build_feature_collection(
         for storm in region.storm_engine.get_storms():
             all_cells = [
                 cell for cell in storm.radar_cells.values()
-                if _cell_matches_active_source(cell, region_source)
+                if _cell_matches_active_source(cell, region_match_sources)
             ]
             latest_timestamp = latest_by_region.get(region.engine_id)
             cells = sorted(
@@ -338,6 +355,65 @@ def build_feature_collection(
                 ))
                 radar_cells_written += 1
 
+    storms_by_key = {
+        (str(region.engine_id), str(storm.storm_id)): storm
+        for region in regions
+        for storm in region.storm_engine.get_storms()
+    }
+    virtual_probes_written = 0
+    for probe in virtual_probe_diagnostics.get("probes", []):
+        latitude = probe.get("latitude")
+        longitude = probe.get("longitude")
+        if latitude is None or longitude is None:
+            continue
+        probe_id = str(probe.get("probe_id", virtual_probes_written))
+        common = {
+            "engine_id": probe.get("region_id"),
+            "probe_id": probe_id,
+            "storm_id": probe.get("storm_id"),
+            "station_id": probe.get("station_id"),
+            "calibration_only": True,
+            "status": "actief",
+            "status_text": probe.get("status_text"),
+            "summary": probe.get("summary"),
+            "eta_minutes": probe.get("minutes_until_expected"),
+            "expected_at": probe.get("expected_at"),
+            "passage": probe.get("passage"),
+            "pass_distance_km": probe.get("pass_distance_km"),
+            "confidence": probe.get("motion_confidence"),
+        }
+        features.append(_feature(
+            f"virtual-probe:{probe_id}",
+            {
+                "type": "Point",
+                "coordinates": _point(longitude, latitude),
+            },
+            layer="virtual_probe",
+            **common,
+        ))
+        storm = storms_by_key.get((
+            str(probe.get("region_id")), str(probe.get("storm_id"))
+        ))
+        if storm is not None:
+            features.append(_feature(
+                f"virtual-probe-path:{probe_id}",
+                {
+                    "type": "LineString",
+                    "coordinates": [
+                        _point(storm.centroid_lon, storm.centroid_lat),
+                        _point(longitude, latitude),
+                    ],
+                },
+                layer="virtual_probe_path",
+                **common,
+            ))
+        virtual_probes_written += 1
+
+    # Afgewerkte verkenners blijven in de secundaire database en in de
+    # tekstdiagnostiek, maar niet als permanente kaartpunten. Alleen actieve
+    # controlepunten en hun actuele traject horen op de live kaart.
+    virtual_probe_outcomes_written = 0
+
     lightning_written = 0
     lightning_cutoff = time.time() - LIGHTNING_MAX_AGE_S
     valid_engine_ids = {region.engine_id for region in regions}
@@ -415,5 +491,9 @@ def build_feature_collection(
             "lightning_events_included": lightning_written,
             "lightning_zones_included": lightning_zones_written,
             "lightning_max_age_minutes": LIGHTNING_MAX_AGE_S // 60,
+            "virtual_probes_included": virtual_probes_written,
+            "virtual_probe_outcomes_included": (
+                virtual_probe_outcomes_written
+            ),
         },
     }

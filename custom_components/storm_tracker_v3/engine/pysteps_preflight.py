@@ -7,7 +7,11 @@ from typing import Iterable
 
 from .radar_frame import RadarFrame
 
-MAX_TRANSLATION_KMH = 180.0
+# Resource policy, geen meteorologische snelheidsgrens. De zoeklus onderzoekt
+# maximaal (2 * N + 1)² verschuivingen rond de verplaatsing van het binaire
+# neerslagmasker. Daardoor kan het centrum op eender welke rastersprong liggen
+# zonder een onbegrensde brute-force zoekactie te starten.
+COMPUTE_SEARCH_HALF_WINDOW_CELLS = 12
 
 
 def _weighted_centroid(frame: RadarFrame) -> tuple[float, float] | None:
@@ -17,6 +21,24 @@ def _weighted_centroid(frame: RadarFrame) -> tuple[float, float] | None:
     return (
         sum(row * intensity for row, _, intensity in frame.cells) / total,
         sum(column * intensity for _, column, intensity in frame.cells) / total,
+    )
+
+
+def _support_centroid(frame: RadarFrame) -> tuple[float, float] | None:
+    """Geometrisch centrum van natte cellen, onafhankelijk van intensiteit."""
+    if not frame.cells:
+        return None
+    count = len(frame.cells)
+    return (
+        sum(row for row, _, _ in frame.cells) / count,
+        sum(column for _, column, _ in frame.cells) / count,
+    )
+
+
+def _axis_search_window(center: int, maximum_shift: int) -> tuple[int, int]:
+    return (
+        max(-maximum_shift, center - COMPUTE_SEARCH_HALF_WINDOW_CELLS),
+        min(maximum_shift, center + COMPUTE_SEARCH_HALF_WINDOW_CELLS),
     )
 
 
@@ -96,22 +118,36 @@ def _shifted_iou(
 
 @lru_cache(maxsize=16)
 def _match_translation(origin: RadarFrame, observed: RadarFrame) -> dict | None:
-    """Zoek de beste gehele rasterverschuiving binnen een fysieke snelheidslimiet."""
+    """Zoek rond een onbeperkte centroidverplaatsing met een vaste werkbudget.
+
+    Het venster is in rastercellen uitgedrukt, niet in km/u. Een beste match op
+    een kunstmatige vensterrand wordt als gecensureerde kandidaat teruggegeven;
+    de caller mag die dus niet als een exact gemeten vector behandelen.
+    """
     import numpy as np
 
     minutes = (observed.nominal_timestamp - origin.nominal_timestamp) / 60.0
     if minutes <= 0 or not origin.cells or not observed.cells:
         return None
-    center_lat = (origin.bounds[1] + origin.bounds[3]) / 2.0
-    row_cell_km = origin.grid_deg * 110.574
-    column_cell_km = (
-        origin.grid_deg * 111.320
-        * max(0.1, abs(math.cos(math.radians(center_lat))))
+    origin_center = _support_centroid(origin)
+    observed_center = _support_centroid(observed)
+    if origin_center is None or observed_center is None:
+        return None
+    center_row_shift = round(observed_center[0] - origin_center[0])
+    center_column_shift = round(observed_center[1] - origin_center[1])
+    max_row_shift = origin.height - 1
+    max_column_shift = origin.width - 1
+    row_min, row_max = _axis_search_window(
+        center_row_shift, max_row_shift
     )
-    max_distance = MAX_TRANSLATION_KMH * minutes / 60.0
-    max_rows = max(1, min(origin.height - 1, math.ceil(max_distance / row_cell_km)))
-    max_columns = max(
-        1, min(origin.width - 1, math.ceil(max_distance / column_cell_km))
+    column_min, column_max = _axis_search_window(
+        center_column_shift, max_column_shift
+    )
+    search_window_exhaustive = (
+        row_min == -max_row_shift
+        and row_max == max_row_shift
+        and column_min == -max_column_shift
+        and column_max == max_column_shift
     )
     origin_mask = np.zeros((origin.height, origin.width), dtype=np.bool_)
     observed_mask = np.zeros((observed.height, observed.width), dtype=np.bool_)
@@ -125,8 +161,8 @@ def _match_translation(origin: RadarFrame, observed: RadarFrame) -> dict | None:
     observed_mask[observed_rows, observed_columns] = True
     actual_count = int(np.count_nonzero(observed_mask))
     best = None
-    for row_shift in range(-max_rows, max_rows + 1):
-        for column_shift in range(-max_columns, max_columns + 1):
+    for row_shift in range(row_min, row_max + 1):
+        for column_shift in range(column_min, column_max + 1):
             origin_row_start = max(0, -row_shift)
             origin_row_stop = min(origin.height, origin.height - row_shift)
             origin_column_start = max(0, -column_shift)
@@ -146,7 +182,12 @@ def _match_translation(origin: RadarFrame, observed: RadarFrame) -> dict | None:
             union_count = expected_count + actual_count - overlap
             iou = overlap / union_count if union_count else 0.0
             candidate = (
-                iou, overlap, -(row_shift ** 2 + column_shift ** 2),
+                iou,
+                overlap,
+                -(
+                    (row_shift - center_row_shift) ** 2
+                    + (column_shift - center_column_shift) ** 2
+                ),
                 row_shift, column_shift,
             )
             if best is None or candidate[:3] > best[:3]:
@@ -157,6 +198,26 @@ def _match_translation(origin: RadarFrame, observed: RadarFrame) -> dict | None:
     speed, heading = _motion_values(
         origin, row_shift / minutes, column_shift / minutes
     )
+    artificial_boundary_hit = (
+        (row_shift == row_min and row_min > -max_row_shift)
+        or (row_shift == row_max and row_max < max_row_shift)
+        or (
+            column_shift == column_min
+            and column_min > -max_column_shift
+        )
+        or (
+            column_shift == column_max
+            and column_max < max_column_shift
+        )
+    )
+    translation_censored = artificial_boundary_hit or (
+        overlap == 0 and not search_window_exhaustive
+    )
+    censor_reason = None
+    if artificial_boundary_hit:
+        censor_reason = "beste_match_op_rand_computationeel_zoekvenster"
+    elif overlap == 0 and not search_window_exhaustive:
+        censor_reason = "geen_overlap_binnen_computationeel_zoekvenster"
     return {
         "row_shift": row_shift,
         "column_shift": column_shift,
@@ -166,6 +227,18 @@ def _match_translation(origin: RadarFrame, observed: RadarFrame) -> dict | None:
         "heading_deg": heading,
         "match_iou": iou,
         "overlap_cells": overlap,
+        "search_center_row_shift": center_row_shift,
+        "search_center_column_shift": center_column_shift,
+        "search_window_row_min": row_min,
+        "search_window_row_max": row_max,
+        "search_window_column_min": column_min,
+        "search_window_column_max": column_max,
+        "search_window_candidates": (
+            (row_max - row_min + 1) * (column_max - column_min + 1)
+        ),
+        "search_window_exhaustive": search_window_exhaustive,
+        "translation_censored": translation_censored,
+        "censor_reason": censor_reason,
     }
 
 
@@ -182,6 +255,8 @@ def evaluate_frames(frames: Iterable[RadarFrame]) -> dict:
         "feeds_detection": False,
         "frames_used": len(frames),
         "method": "bounded_grid_match_v1",
+        "search_policy": "centroid_guided_fixed_cell_window_v2",
+        "compute_search_half_window_cells": COMPUTE_SEARCH_HALF_WINDOW_CELLS,
         "confidence": "insufficient",
         "translation_km_per_hour": None,
         "heading_deg": None,
@@ -191,6 +266,10 @@ def evaluate_frames(frames: Iterable[RadarFrame]) -> dict:
         "wet_cell_ratio": None,
         "centroid_translation_km_per_hour": None,
         "centroid_heading_deg": None,
+        "search_window_candidates": None,
+        "search_window_exhaustive": None,
+        "translation_censored": None,
+        "translation_uncertainty": None,
         "reason": None,
     }
     if len(frames) < 2:
@@ -230,14 +309,50 @@ def evaluate_frames(frames: Iterable[RadarFrame]) -> dict:
             round(centroid[0], 1) if centroid else None
         ),
         "centroid_heading_deg": round(centroid[1], 0) if centroid else None,
+        "search_window_candidates": latest_match["search_window_candidates"],
+        "search_window_exhaustive": latest_match["search_window_exhaustive"],
+        "translation_censored": latest_match["translation_censored"],
+        "translation_uncertainty": (
+            "open_ended_outside_compute_window"
+            if latest_match["translation_censored"]
+            else "resolved_inside_compute_window"
+        ),
         "reason": "tweede_opeenvolgende_vector_nodig",
     }
+    if latest_match["translation_censored"]:
+        return {
+            **result,
+            "status": "motion_indeterminate",
+            "confidence": "indeterminate",
+            "reason": latest_match["censor_reason"],
+        }
+    if latest_match["overlap_cells"] <= 0:
+        return {
+            **result,
+            "status": "no_motion_match",
+            "confidence": "insufficient",
+            "reason": "geen_rasteroverlap",
+        }
     if len(frames) < 3:
         return result
 
     previous_match = _match_translation(frames[0], frames[1])
     if previous_match is None:
         return {**result, "status": "no_motion_match", "reason": "geen_vorige_rastermatch"}
+    if previous_match["translation_censored"]:
+        return {
+            **result,
+            "status": "motion_indeterminate",
+            "confidence": "indeterminate",
+            "reason": "vorige_vector_buiten_computationeel_zoekvenster",
+        }
+    if previous_match["overlap_cells"] <= 0:
+        return {
+            **result,
+            "status": "no_motion_match",
+            "confidence": "insufficient",
+            "reason": "geen_vorige_rasteroverlap",
+        }
     verification_minutes = (
         frames[2].nominal_timestamp - frames[1].nominal_timestamp
     ) / 60.0

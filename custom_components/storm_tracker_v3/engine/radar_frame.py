@@ -71,8 +71,9 @@ class RadarFrame:
         import numpy as np
 
         values = np.zeros((self.height, self.width), dtype=np.uint8)
-        for row, column, intensity in self.cells:
-            values[row, column] = intensity
+        if self.cells:
+            cells = np.asarray(self.cells, dtype=np.int32)
+            values[cells[:, 0], cells[:, 1]] = cells[:, 2]
         return values
 
     def to_dict(self) -> dict[str, Any]:
@@ -144,7 +145,13 @@ def frame_from_overlay(
 
     grid_deg, height, width = _grid_shape(tuple(float(value) for value in bounds))
     west, south, east, north = bounds
-    raster: dict[tuple[int, int], int] = {}
+    # Een Python-dict per doelcel houdt de GIL vast en kan bij een vol
+    # RainViewer-frame Home Assistant tientallen seconden vertragen, zelfs
+    # wanneer dit werk in een executor-thread draait. NumPy voert de
+    # rechthoekvullingen in native code uit en geeft de GIL daarbij vrij.
+    import numpy as np
+
+    raster = np.zeros((height, width), dtype=np.uint8)
     valid_runs = 0
     for run in overlay.get("runs", ()):
         try:
@@ -166,10 +173,21 @@ def frame_from_overlay(
         first_row = max(0, int((north - run_north) / grid_deg))
         last_row = min(height - 1, int((north - run_south) / grid_deg))
         value = min(255, intensity)
-        for row in range(first_row, last_row + 1):
-            for column in range(first_col, last_col + 1):
-                key = (row, column)
-                raster[key] = max(value, raster.get(key, 0))
+        view = raster[
+            first_row:last_row + 1,
+            first_col:last_col + 1,
+        ]
+        np.maximum(view, value, out=view)
+
+    rows, columns = np.nonzero(raster)
+    intensities = raster[rows, columns]
+    cells = tuple(
+        zip(
+            rows.astype(int).tolist(),
+            columns.astype(int).tolist(),
+            intensities.astype(int).tolist(),
+        )
+    )
 
     return RadarFrame(
         source=source,
@@ -178,7 +196,7 @@ def frame_from_overlay(
         grid_deg=grid_deg,
         height=height,
         width=width,
-        cells=tuple((row, column, value) for (row, column), value in sorted(raster.items())),
+        cells=cells,
         input_runs=valid_runs,
     )
 

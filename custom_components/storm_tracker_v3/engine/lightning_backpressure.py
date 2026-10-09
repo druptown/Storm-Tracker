@@ -2,7 +2,57 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from math import floor
 from typing import Any
+
+
+def aggregate_lightning_rows(
+    observations: list[dict], *, grid_deg: float = 0.05
+) -> list[dict]:
+    """Vat ruwe inslagen samen per minuut en geografische rastercel."""
+    buckets: dict[tuple, dict] = {}
+    for item in observations:
+        timestamp = float(item["timestamp"])
+        latitude = float(item["lat"])
+        longitude = float(item["lon"])
+        key = (
+            int(timestamp // 60),
+            str(item.get("source") or "unknown"),
+            floor(latitude / grid_deg),
+            floor(longitude / grid_deg),
+        )
+        bucket = buckets.setdefault(key, {
+            "nominal_minute": key[0],
+            "source": key[1],
+            "grid_lat": key[2],
+            "grid_lon": key[3],
+            "grid_deg": grid_deg,
+            "strike_count": 0,
+            "latitude_sum": 0.0,
+            "longitude_sum": 0.0,
+            "latitude_min": latitude,
+            "latitude_max": latitude,
+            "longitude_min": longitude,
+            "longitude_max": longitude,
+            "first_timestamp": timestamp,
+            "last_timestamp": timestamp,
+            "region_ids": set(),
+        })
+        bucket["strike_count"] += 1
+        bucket["latitude_sum"] += latitude
+        bucket["longitude_sum"] += longitude
+        bucket["latitude_min"] = min(bucket["latitude_min"], latitude)
+        bucket["latitude_max"] = max(bucket["latitude_max"], latitude)
+        bucket["longitude_min"] = min(bucket["longitude_min"], longitude)
+        bucket["longitude_max"] = max(bucket["longitude_max"], longitude)
+        bucket["first_timestamp"] = min(bucket["first_timestamp"], timestamp)
+        bucket["last_timestamp"] = max(bucket["last_timestamp"], timestamp)
+        bucket["region_ids"].update(str(value) for value in item.get("engine_ids", ()))
+    result = []
+    for bucket in buckets.values():
+        bucket["region_ids"] = sorted(bucket["region_ids"])
+        result.append(bucket)
+    return result
 
 
 class LightningUpdateCoalescer:
@@ -72,7 +122,7 @@ class LightningUpdateCoalescer:
             "update_interval_s": self._sensor_interval_s,
         })
         if rows:
-            self._write_log_batch(rows)
+            self._write_log_batch(aggregate_lightning_rows(rows))
 
     def _flush_map(self) -> None:
         self._map_handle = None

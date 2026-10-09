@@ -117,9 +117,11 @@ def parse_odim_rainfall(
             intensity=component.max_intensity,
             area_km2=area_km2, quality=quality,
             footprint_points=component.boundary,
+            footprint_polygons=component.polygons,
             radar_cell_id=component_id, parent_system_id=component_id,
             parent_area_km2=area_km2,
             parent_footprint_points=component.boundary,
+            parent_footprint_polygons=component.polygons,
             source=source,
         ))
     return observations

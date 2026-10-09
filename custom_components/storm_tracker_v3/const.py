@@ -1,6 +1,27 @@
 """Storm Tracker V3 — const.py v0.4.3"""
 
 DOMAIN = "storm_tracker_v3"
+INTEGRATION_VERSION = "1.14.37"
+OPERATIONAL_SNAPSHOT_UPDATE_EVENT = f"{DOMAIN}_operational_snapshot_update"
+WARNING_SENT_EVENT = f"{DOMAIN}_warning_sent"
+WORKER_TECHNICAL_DIAGNOSTICS_UPDATE_EVENT = (
+    f"{DOMAIN}_worker_technical_diagnostics_update"
+)
+
+# Final config-entry runtime selection. Schema-v3 entries persist one exact
+# mode; worker-only is the UI default and legacy is the explicit reversible
+# normal-Home-Assistant provider/OFE/StormEngine route.
+CONF_RUNTIME_MODE = "runtime_mode"
+CONF_WARNING_NOTIFICATIONS_ENABLED = "warning_notifications_enabled"
+RUNTIME_MODE_LEGACY = "legacy"
+RUNTIME_MODE_WORKER_ONLY = "worker_only"
+RUNTIME_MODES = frozenset({RUNTIME_MODE_LEGACY, RUNTIME_MODE_WORKER_ONLY})
+
+# Per-entry lifecycle records are kept separately from the worker bridge's
+# bounded MQTT state in hass.data[DOMAIN].
+DATA_ENTRY_RUNTIMES = "entry_runtimes"
+DATA_WORKER_TECHNICAL_DIAGNOSTICS = "worker_technical_diagnostics"
+DATA_WORKER_TECHNICAL_SOURCE = "worker_technical_source"
 
 # Providers
 PROVIDER_BLITZORTUNG = "blitzortung"

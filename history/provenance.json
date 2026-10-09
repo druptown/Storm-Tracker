@@ -1,27 +1,39 @@
 {
   "kind": "recovered_archive_source",
   "component": "integration",
-  "version": "0.4.123",
-  "source_id": "ad75db61533c1d3c613930466dceedfafda4fa110745cd35442f4ada32c4071a",
+  "version": "1.14.37",
+  "source_id": "a39ef257be2e9d8a5bdb5dc725a0cfec02c66b7ed66d1185a801a02d3ee58803",
   "recovered_on": "2026-10-09",
   "files": [
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "0fa9c242c95acfb2680917045772526a90b3e79620b4692ce981d8437270ec68",
-      "size": 124097
+      "sha256": "6051b84e4fbc81d92b43277df7e55aa54ce362697cae58fb8722aa39579ec4cf",
+      "size": 268460
     },
     {
       "path": "config_flow.py",
       "mode": 420,
-      "sha256": "5105930eb7ae4d5e404e99997c9f7fdea62fcb1e1a55f1a935f11683fe605b0a",
-      "size": 7239
+      "sha256": "114dd1f6ee004f56ecc6de80532aa996395cab0fa37494e726f1aed3cf995c4d",
+      "size": 17903
     },
     {
       "path": "const.py",
       "mode": 420,
-      "sha256": "0941dde42314e5cfb86c42cb9b2e91e3859cb0185980e240e1a5b82b74454b0d",
-      "size": 1466
+      "sha256": "7db0d34e5210fb358760e962b414a32e98ef93a6cd26442cd1c90ebc7974bd81",
+      "size": 2461
+    },
+    {
+      "path": "desired_state_builder.py",
+      "mode": 420,
+      "sha256": "b34005a5cc32de51192a7a040ab826dd652dd64232545262b6c6c2729eddd99f",
+      "size": 14476
+    },
+    {
+      "path": "desired_state_controller.py",
+      "mode": 420,
+      "sha256": "c5af7d15eeaf75a6e001a1c5208ca5c9b9094c34105421c696c72fe1f26b0632",
+      "size": 34501
     },
     {
       "path": "engine/__init__.py",
@@ -30,52 +42,196 @@
       "size": 39
     },
     {
+      "path": "engine/analysis_grid.py",
+      "mode": 420,
+      "sha256": "87d04c69e521d983bc152bc6fb72deb418bc4465b0fbeaa2ee04b30eb2a8cb60",
+      "size": 8769
+    },
+    {
+      "path": "engine/artifact_capture_admission.py",
+      "mode": 420,
+      "sha256": "f2d803c01e048b0712e5cceb91da87afacf18b429feb23e13d60a0ba47800a97",
+      "size": 32807
+    },
+    {
+      "path": "engine/artifact_retention_planner.py",
+      "mode": 420,
+      "sha256": "7a403b6158e24221a7857c46d0a913802447698c5e7461ccad98f11403739499",
+      "size": 23574
+    },
+    {
+      "path": "engine/association_features.py",
+      "mode": 420,
+      "sha256": "5415c6fc1001ff75bbcffd2740310966d871ea459ea24d656b9c36fe446a4419",
+      "size": 10421
+    },
+    {
+      "path": "engine/association_graph.py",
+      "mode": 420,
+      "sha256": "036d23e63ee679946da329f85bd70650e73c2395e3f054c29248f408e4c261af",
+      "size": 9214
+    },
+    {
+      "path": "engine/bounded_payload.py",
+      "mode": 420,
+      "sha256": "d3c96eaad7b814eeafcc993d483a254c91d4ee52e8ea23ec07bc84edee13b482",
+      "size": 6385
+    },
+    {
       "path": "engine/calibration_store.py",
       "mode": 420,
-      "sha256": "1f1f21e6a7912e0a954d6f6799a97b2646a328c2b3d5396e3805e07652c50bc1",
-      "size": 59115
+      "sha256": "36f196a4e2ece5b0280c798ae885b9b781a2b927c2ea1d713686cbddc13c32f6",
+      "size": 106458
+    },
+    {
+      "path": "engine/cell_track.py",
+      "mode": 420,
+      "sha256": "9fcb477bd7ed9526a673bf04db808a6d034f5d41a13dd6fcf11e18d972939264",
+      "size": 6164
+    },
+    {
+      "path": "engine/cell_track_lifecycle.py",
+      "mode": 420,
+      "sha256": "f17eb0620a4c8c6a6684bd2bf7f12f78d4d48f8391e7bbec46f03d075d38e6c0",
+      "size": 43311
+    },
+    {
+      "path": "engine/durable_processing.py",
+      "mode": 420,
+      "sha256": "cbeb903319a4920ffef3e0d82068b5ae8488b1769eb1a3c5e05adcf0ea3d8491",
+      "size": 86833
+    },
+    {
+      "path": "engine/event_probability_calibration.py",
+      "mode": 420,
+      "sha256": "cc67633f189d98fe46780faefea83f9cf03809b97ba29d16e957a5e13d42130e",
+      "size": 26882
+    },
+    {
+      "path": "engine/forecast_verification.py",
+      "mode": 420,
+      "sha256": "184b35393cc6969e2a198dd9e41e472c6b1081efa7a541b184c6e7b6a3df14ac",
+      "size": 64577
     },
     {
       "path": "engine/geojson.py",
       "mode": 420,
-      "sha256": "d0790753a70d94d18c75433d2a0e627a99bd4fc9a0bb4e83c5430b52c04401d0",
-      "size": 16698
+      "sha256": "7b367d2ec63c68b8837904d1af26edf047c79d2cfd6596a3a3c025a83fae5166",
+      "size": 19824
+    },
+    {
+      "path": "engine/global_assignment.py",
+      "mode": 420,
+      "sha256": "1bd6bf4acb877f0aba7cf50581b72fdfbd7783748cc768e9d7bb4359892b4688",
+      "size": 35213
+    },
+    {
+      "path": "engine/ground_fusion.py",
+      "mode": 420,
+      "sha256": "7c09567ed68d86de04aabfdb900dec0752a802a0482754a27a33e0c7dd9d2cb6",
+      "size": 37998
+    },
+    {
+      "path": "engine/ground_observation_adapters.py",
+      "mode": 420,
+      "sha256": "c8396a745aaf938f66ceb4ec68615a799d00d4f9621972cf2b98ab9fcb878d70",
+      "size": 36921
+    },
+    {
+      "path": "engine/ground_verification.py",
+      "mode": 420,
+      "sha256": "170ea3e7e155628b00c51a52f9384953eb05f3a9bc35e85a86a358650c649367",
+      "size": 30295
+    },
+    {
+      "path": "engine/hierarchical_detection.py",
+      "mode": 420,
+      "sha256": "86e6905bda4f1f7ba70849ea50ddf1bdfda419eb1d939e3b84035f3f63ee3245",
+      "size": 21592
+    },
+    {
+      "path": "engine/kmi_radqpe_contract.py",
+      "mode": 420,
+      "sha256": "a3dba1e08191a1ce8b4e2359068924a07680a3420fe30f2c2820a7ab562cd2e8",
+      "size": 37210
     },
     {
       "path": "engine/lightning_backpressure.py",
       "mode": 420,
-      "sha256": "0c7f9b4e0ea25fa216363fce0dfe660477e74ec7500e60389d8c1f1cbf672c9d",
-      "size": 3472
+      "sha256": "e2b86216d6929176c0d4f3df1061dae7f4b8cdaa3a5c7ed40c1f1b899aef7071",
+      "size": 5483
+    },
+    {
+      "path": "engine/lucas_kanade_flow.py",
+      "mode": 420,
+      "sha256": "8f91e2f74ceb1dd31f6b5b873343725a963b4f3b79df6d1b8a4b0fde04695ef5",
+      "size": 30567
     },
     {
       "path": "engine/mcs_store.py",
       "mode": 420,
-      "sha256": "f0a49cc42fd11c7b07bd8087b4c3599797d5aeb66748ea0d4fc89901c35f0144",
-      "size": 1420
+      "sha256": "9c77ac31f437aa5011ccd272a31b240af4922334169a25b6bdc3e08bf7859820",
+      "size": 1965
+    },
+    {
+      "path": "engine/meteorological_evidence_store.py",
+      "mode": 420,
+      "sha256": "cbe080444023c98b6e9b748948d36dfdce7d47058481dc893b2d611ebcd3cde7",
+      "size": 251224
+    },
+    {
+      "path": "engine/motion_identity_evidence.py",
+      "mode": 420,
+      "sha256": "964285b0c281ad7fe700cf3442b4886180a613a154a90e35074fe3c9cf764c03",
+      "size": 24517
+    },
+    {
+      "path": "engine/motion_prediction.py",
+      "mode": 420,
+      "sha256": "7ac25b19f0b3430dbf7d80f993f5f91c4272d706b765c641044cbae1a574a388",
+      "size": 10735
     },
     {
       "path": "engine/netatmo_local.py",
       "mode": 420,
-      "sha256": "8a372b5142d683c69d17b81eec8b80867a0c6cd9d7fc22f939b6da165352c636",
-      "size": 3627
+      "sha256": "c15923bb1ff702a064c33b67bc85661e76d1e252b9f8373fdc1fc19097587a8c",
+      "size": 30307
     },
     {
       "path": "engine/nowcast.py",
       "mode": 420,
-      "sha256": "68678223f98db3a8c664af56ea373a97984b3d1caa5c05230471ceebe62cbfe6",
-      "size": 26340
+      "sha256": "d574116a4fe253c18dfe105dc8b970170617b7da038faa174fe15da4b00efcc5",
+      "size": 27506
+    },
+    {
+      "path": "engine/nowcast_baselines.py",
+      "mode": 420,
+      "sha256": "f5f08c36be099d627c1f5ce7dab52788df66fa8eaaf4d658e688f6e18a46706a",
+      "size": 17432
     },
     {
       "path": "engine/observation.py",
       "mode": 420,
-      "sha256": "f28f853999a87cf397b340e19fc730301385fa2f2f6eb9a14dc6340278e183c5",
-      "size": 3647
+      "sha256": "4658a97a1f191ad040145478087c4be29c2698d47263762e1b5a88099bd42ebc",
+      "size": 10408
     },
     {
       "path": "engine/observation_fusion_engine.py",
       "mode": 420,
-      "sha256": "78b6c5f6cb9ca714d45ebf3cafff63794c6cc7347a0635c47663b20ef19fed54",
-      "size": 6784
+      "sha256": "ea6ee4029a7a9129b6bf6aa214c3fcca0673d8e7849fb0fb25fda20ed2a6a314",
+      "size": 59215
+    },
+    {
+      "path": "engine/observation_time_quality.py",
+      "mode": 420,
+      "sha256": "e1f3a5aed6f4f52a657b73e47335356ea011acb6815cdb8dc0771a453d4272cd",
+      "size": 11892
+    },
+    {
+      "path": "engine/physical_site_catalog.py",
+      "mode": 420,
+      "sha256": "80b295c61b397f5a0ae2e751a88b0b59612d0fde4412f2de8058e0097acca9c7",
+      "size": 67377
     },
     {
       "path": "engine/pressure_trend.py",
@@ -84,46 +240,88 @@
       "size": 6049
     },
     {
+      "path": "engine/provider_artifact_contracts.py",
+      "mode": 420,
+      "sha256": "0a2646a5ce8f1d6ecf35619d1a6cd0a2de7b829738c59721e0235ebc30021482",
+      "size": 55392
+    },
+    {
       "path": "engine/provider_bias.py",
       "mode": 420,
       "sha256": "eeaa5dc109bc927c2eb3a24cb322b5ca915f30d5035f25c3b54cfebe9bd292ca",
       "size": 4856
     },
     {
+      "path": "engine/provider_handoff.py",
+      "mode": 420,
+      "sha256": "74b1a78f3d66a99a9530d47476cd39de59761bf0937325e29e3acd62cdcc1686",
+      "size": 57632
+    },
+    {
+      "path": "engine/provider_quality_runtime.py",
+      "mode": 420,
+      "sha256": "2cce26de9a3443f90b4271f92f5ddee3b8efeb833a32d0b1455c0caf824101ad",
+      "size": 19241
+    },
+    {
+      "path": "engine/pyramidal_sparse_flow.py",
+      "mode": 420,
+      "sha256": "051d29fb4db757f21225f264017f3e18035deae71a3b6a7d2d10d34c19bba248",
+      "size": 50587
+    },
+    {
+      "path": "engine/pysteps_challenger.py",
+      "mode": 420,
+      "sha256": "a83c0a78121f019297882fad4eccd43f948116bbf575f4b46203c303e685b1e9",
+      "size": 50316
+    },
+    {
       "path": "engine/pysteps_preflight.py",
       "mode": 420,
-      "sha256": "d01327e2c5ba4c62df9cd0f27a05740b4794992eb35f2677fa0d3b7a5003892a",
-      "size": 10215
+      "sha256": "39f4f3831b77f7cd5ca95a99d790d91ab5d7624ee9e3c9b223e3cc9965906b7b",
+      "size": 14777
     },
     {
       "path": "engine/radar_calibration.py",
       "mode": 420,
-      "sha256": "c259237b94267e84291e56a4af3466ce2e691df663c436507bd7ae21ba987837",
-      "size": 19215
+      "sha256": "7cdd7fe99335c86a4be434af92a19dc35af06b5c4c7d1498a6cba618e73941f5",
+      "size": 22246
     },
     {
       "path": "engine/radar_frame.py",
       "mode": 420,
-      "sha256": "58916921e877a23c12055e3d90f0237c65893500eb6499beaa3adb20e32376eb",
-      "size": 10817
+      "sha256": "387477073e26b70da7c26127a66f261daa20088fc3a2b41bd51fd14058c85e39",
+      "size": 11311
+    },
+    {
+      "path": "engine/raw_artifact_store.py",
+      "mode": 420,
+      "sha256": "392acab796091592720f0a801012616102913bbd331011af85bbc1a2ff06cafd",
+      "size": 65216
+    },
+    {
+      "path": "engine/recursive_track_estimator.py",
+      "mode": 420,
+      "sha256": "57b70096d4767839a1c1398af5f4fc7dfd2d48e725f4fdf4daf91c689103e558",
+      "size": 21463
     },
     {
       "path": "engine/region_manager.py",
       "mode": 420,
-      "sha256": "f6c68c3c206ff4bab26657d75086422dea25b9606f774118ef261b0d7734d67c",
-      "size": 7614
+      "sha256": "f41b0e076a79425737dc930913451badcd7a72f844fe405ea30864d8165410b4",
+      "size": 23979
     },
     {
       "path": "engine/storm.py",
       "mode": 420,
-      "sha256": "c2b19baee76e4ddad64417ece056e438d842b80869c03d77ad7847aa08b58ad4",
-      "size": 39196
+      "sha256": "ea10ca79e806aafb20b9b7a3d619b10a92c54c914adbd3352bfad5c7eafc9ab4",
+      "size": 53805
     },
     {
       "path": "engine/storm_engine.py",
       "mode": 420,
-      "sha256": "2d9e1e395ef2500e634eb172e81f7b791ccb3fa63c624dfa563665d058762e8f",
-      "size": 35869
+      "sha256": "9aba95b194d308bd84b6368b7abc873ad5a434cf8cca2d09a93079bab3ffd746",
+      "size": 74232
     },
     {
       "path": "engine/targets.py",
@@ -132,10 +330,40 @@
       "size": 2885
     },
     {
+      "path": "engine/track_motion_prior.py",
+      "mode": 420,
+      "sha256": "05d396548df38bfb72851f7b1fd8971384df9379a4db42783e7eabad16594fe7",
+      "size": 12763
+    },
+    {
+      "path": "engine/tracker_forecast_contract.py",
+      "mode": 420,
+      "sha256": "cb2cd406efc98fdf6b49fa172c03c89115cd8a929dd9be5cb099f691b63a5126",
+      "size": 77505
+    },
+    {
       "path": "engine/trajectory.py",
       "mode": 420,
-      "sha256": "149073006b380bd72e5ac304cfa7871a89d43084ebbb2d269abb81f0b4f1c8a1",
-      "size": 9630
+      "sha256": "a2273d4252e543e080a25107ae6319b427bc5432a780e63c78f1250792913ee0",
+      "size": 11975
+    },
+    {
+      "path": "engine/virtual_probe.py",
+      "mode": 420,
+      "sha256": "a154cf6b9ef9eada54b84ebb34bfd3b6aafa2d34edd78eb1520a8b6ab9ccf76e",
+      "size": 31795
+    },
+    {
+      "path": "engine/weather_system_grouping.py",
+      "mode": 420,
+      "sha256": "06d2c7aa653a8c592d4898db27d8e9e35052e5b97f0919963c64327fcfefb9a1",
+      "size": 48784
+    },
+    {
+      "path": "geojson_worker.py",
+      "mode": 420,
+      "sha256": "256ae813eb7c55342eb2a73462e7d7b088a84d53c297cf6c21fc2ff7c4319503",
+      "size": 5775
     },
     {
       "path": "geometry/__init__.py",
@@ -174,28 +402,46 @@
       "size": 2372
     },
     {
+      "path": "geometry/polygon.py",
+      "mode": 420,
+      "sha256": "35e6a2ca0689c0932adbe805078721c15b7ce0bfb448287c9056f1813c8ee526",
+      "size": 24776
+    },
+    {
       "path": "http.py",
       "mode": 420,
-      "sha256": "29b0f67f424e9ae59fe58f2bff875a62c9279b0bc19f6543feec27c1c6571c96",
-      "size": 1206
+      "sha256": "e665667f580023ebd5f36f9e7ec213c7bc232273c8390fcddda6bdbd5e0b852b",
+      "size": 1114
     },
     {
       "path": "manifest.json",
       "mode": 420,
-      "sha256": "bfb9562dfa2ce4b422d246736662c48dd4ebaef2a4a40c042aeb8721a262f3b7",
-      "size": 471
+      "sha256": "e7875ff548b12cf6c63ac95f711e6c4a39611de75835522b319f1873aeb26be9",
+      "size": 467
+    },
+    {
+      "path": "operational_snapshot.py",
+      "mode": 420,
+      "sha256": "c503a60a4b34e8bf9afcc316a04eff2e7fc28417310e8b68432c09a70443c720",
+      "size": 61434
+    },
+    {
+      "path": "operational_snapshot_sensors.py",
+      "mode": 420,
+      "sha256": "75af72c1c52e22822143f369a29a6981562cbfe9f8db80bfd66e5acd1bb9ce1e",
+      "size": 31999
+    },
+    {
+      "path": "operational_snapshot_views.py",
+      "mode": 420,
+      "sha256": "ad6b7b47b063ec090fb93764869f9c43ad2abcd0a109f44dc5af8905e3e59beb",
+      "size": 9580
     },
     {
       "path": "plogger/__init__.py",
       "mode": 420,
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "size": 0
-    },
-    {
-      "path": "plogger/provider_logger.py",
-      "mode": 420,
-      "sha256": "6a9d9f20cf1da6caa10d88be9faea0e5c33d3e547828139539f1624526844d1e",
-      "size": 8177
     },
     {
       "path": "projection/__init__.py",
@@ -206,8 +452,8 @@
     {
       "path": "provider_policy.json",
       "mode": 420,
-      "sha256": "13443031782149d15e0a929c059b91840beb8415b005258375e88477b5b7c382",
-      "size": 3414
+      "sha256": "dc748dae5c15669787dc669f1c0ff1c3398444f4aa03c1c87f9098006b0bf04c",
+      "size": 4013
     },
     {
       "path": "providers/__init__.py",
@@ -218,181 +464,265 @@
     {
       "path": "providers/aemet_radar.py",
       "mode": 420,
-      "sha256": "92e2597e181716e7c461d1f6cf3207e15d15abd93bc408aac0e3bef92bf3139f",
-      "size": 6686
+      "sha256": "ebb2ccc8ccac1ff5b02bf40ddc76de385a2fd9dfe3ea1ded3a36a5e064d6da41",
+      "size": 8418
     },
     {
       "path": "providers/base.py",
       "mode": 420,
-      "sha256": "7a9932907d242e9fb87bb3f942705e448a45e1af5f23340cd175308329b63cab",
-      "size": 13893
+      "sha256": "003baf29ceda70ee3251f0c80a1985d1dc6ba1ed6c705a1234cc0ca61ed334a8",
+      "size": 13494
     },
     {
       "path": "providers/blitzortung.py",
       "mode": 420,
-      "sha256": "fd1f4834f4db47e8f69f6ee5ffd9281581fba535e1940b9bb2ab44ce6d1a811b",
-      "size": 10408
+      "sha256": "660bd6a06e2da5a2ca0450d32aa7c299c4db94edcc5d98a97b2547d1928fb960",
+      "size": 10509
     },
     {
       "path": "providers/dpc_radar.py",
       "mode": 420,
-      "sha256": "7cb1705c0fccd7063136c863a2f44a6cfe8a047be00ab8cfd4318b389321ab74",
-      "size": 6829
+      "sha256": "766245c6f1f5c985f459f3af327967a7f5323f393c32ef326da64ba31b51f3e9",
+      "size": 8958
     },
     {
       "path": "providers/dwd_radolan.py",
       "mode": 420,
-      "sha256": "d2667c0ac4cdaee6f2c1aa36695e94893fbe7c127220d8f3e033282b9a1ed4f6",
-      "size": 7326
+      "sha256": "dbeed58968377fa3abb14b5f64bbd398c84a5f871fd1382c82c7ffa35d5c6d2d",
+      "size": 25073
     },
     {
       "path": "providers/engine_radar_policy.py",
       "mode": 420,
-      "sha256": "9a816a345c14847f5baa30128208e934d148699588f5c21010af5aedcdbeacb8",
-      "size": 7555
+      "sha256": "cd27ecd19e91339fba915bb8b124363a945b627a0339502073bf0fd076501bbe",
+      "size": 9117
     },
     {
       "path": "providers/eumetsat_li.py",
       "mode": 420,
-      "sha256": "a16b2fb6ca5bd1c12d97fe7143c5fd4e81fca176b34b9ed8366c24761ef1d924",
-      "size": 7536
+      "sha256": "a0c0cae4fca5f0abdde278837929fdcf424f4dc42dac4ea2d09b7a0c63b49e61",
+      "size": 10234
     },
     {
       "path": "providers/geosphere_at.py",
       "mode": 420,
-      "sha256": "5471de1e965544a7ce0aa370928da80e1db5e9212d8d6b0ef216aec32fd15656",
-      "size": 2664
+      "sha256": "574b5b03b7e6e611eb579ee15a0395a448df712a4c523606670e7e039186f3e9",
+      "size": 3758
     },
     {
       "path": "providers/hsaf_h40b.py",
       "mode": 420,
-      "sha256": "a63e137d84cf8ef1c303e797252e5a99ad6c2fe3aea19ee2515d9328eb10d375",
-      "size": 13625
+      "sha256": "51eae96702e849c361c62f38ed0cc3d571f995478cd9ce0524444987937ec077",
+      "size": 15783
     },
     {
       "path": "providers/italiameteo.py",
       "mode": 420,
-      "sha256": "37c45b4a29afdfa7bcf80a75a23f5e81c3c4376e6ca9feaeee4ad3b911b4790f",
-      "size": 5877
+      "sha256": "daf26dc13e5ce9ebc2958bcc4c58f00532bdf9d350c04cca4ceb26c4f6d6ff39",
+      "size": 7080
     },
     {
       "path": "providers/kmi.py",
       "mode": 420,
-      "sha256": "118a83e227db9ed66ae3a4532f42e69efdaf5331eca56b38b487248c1ceed4d6",
-      "size": 9727
+      "sha256": "e28997418077184ca35cb23d1f99fd3d0cb42d1330111fc140ae6c6a0bc76173",
+      "size": 12391
+    },
+    {
+      "path": "providers/kmi_public_radar_composite.py",
+      "mode": 420,
+      "sha256": "07e850c230187bc7f0ef30e4222584f62c190450be83ee00b9563efb659d584b",
+      "size": 9440
     },
     {
       "path": "providers/knmi.py",
       "mode": 420,
-      "sha256": "4bd60f6450a7544c4adb3114b36594542823ac8f2fd82f394e4ca668badd4dd7",
-      "size": 9867
+      "sha256": "1355e2adb338211d268b377546d1c423e7386ddda47f8c0de36226b31c9cfcf8",
+      "size": 13285
     },
     {
       "path": "providers/lifecycle.py",
       "mode": 420,
-      "sha256": "37e81a6c34ab9d3ec997eb499c5293178cca4240811db662c89324ec5953b81e",
-      "size": 8950
+      "sha256": "444984e95b6c44711f159c33db0e6a8eac8e9aa3d80df6506aea7b01e19d8f88",
+      "size": 13194
     },
     {
       "path": "providers/met_office_radar.py",
       "mode": 420,
-      "sha256": "798b69425184c8219aaf4cab499faaaf6dc5bf6acf633ce04b067c5f08a18ac9",
-      "size": 3120
+      "sha256": "63b0ad04ca6f8c29672ecb832f1ef086a8e1bd66191e68abd3b0f2e8afe2cd0f",
+      "size": 6049
     },
     {
       "path": "providers/meteofrance_radar.py",
       "mode": 420,
-      "sha256": "426f243f3da051a370ce1b6481ef923cb88e53791a370ed700fc74632f874531",
-      "size": 4715
+      "sha256": "bbacd8727d7c3deebdeb277d4d5b720ff2b49e1ae4a6fab6970ac7f0bd1b78a3",
+      "size": 6637
     },
     {
       "path": "providers/meteolux.py",
       "mode": 420,
-      "sha256": "e94b401444607ddc0e296a7ed76a9da728655a1796be959e1d1c9671deac6967",
-      "size": 1479
+      "sha256": "5d41dabff28354eea4235bdc9f51cff6880ddb2611fcd1723301e78545497395",
+      "size": 2514
     },
     {
       "path": "providers/netatmo.py",
       "mode": 420,
-      "sha256": "d10d2736dc0a93072462f8fe5840ef3b9e0c04f63647be2967452757b2302171",
-      "size": 13229
+      "sha256": "1a74bc75c34a4fdf04e25ebfcc787551df1fa268431f8d17e55a9fa408a429f8",
+      "size": 14839
+    },
+    {
+      "path": "providers/noaa_enterprise_rainrate.py",
+      "mode": 420,
+      "sha256": "46cf443bc093cc18259ad974a6778e6321ca9cbddb906218904166a8e21c8f10",
+      "size": 5289
     },
     {
       "path": "providers/noaa_goes_glm.py",
       "mode": 420,
-      "sha256": "6bb600f750da41612abdb9c21ee60c0ca21ecd5db21ca9f48c7507eab4974ca5",
-      "size": 8677
+      "sha256": "ed2907bb578fcd50d1d86351b0973c5e6a22d64ba83eb8ba79ff3d64d38ed08c",
+      "size": 11322
     },
     {
       "path": "providers/noaa_goes_rrqpe.py",
       "mode": 420,
-      "sha256": "f86b59948f4adbe05da994b440f5135adf3d6f8e1b22830a2f51c10333966e04",
-      "size": 12001
+      "sha256": "2e81363c6ca4435fc875f95e36a893826b28f5f0ca1afb8391b764a471e2852c",
+      "size": 15052
     },
     {
       "path": "providers/odim_hdf5.py",
       "mode": 420,
-      "sha256": "7b4acbe18012462f52c62a1a45b6b8050ea92355108420d8668f115fcfe8c7e0",
-      "size": 4879
+      "sha256": "be8d26db5176ee1da48fff452b1f45d06cd0363fb1cd1a09d4d4a440fb865189",
+      "size": 4988
     },
     {
       "path": "providers/open_meteo.py",
       "mode": 420,
-      "sha256": "699d0642ba803c8366b3c1bf5bde2a380828a748d348d253ac28bf4b8a6aab1c",
-      "size": 23997
+      "sha256": "8e295137e37d0f2797135e21b49fb61ae6cc0ca5cc76381c6fa6eea82ddbe5b9",
+      "size": 27011
     },
     {
       "path": "providers/opera.py",
       "mode": 420,
-      "sha256": "a0d5d7d1836c56345761bb611e26d21de8ab6056ab107644b55758e17432b3f2",
-      "size": 40722
+      "sha256": "f8f48bc60f36c84597bb77185cd19451cacebc18cec710e9b799a836c91efe88",
+      "size": 55578
+    },
+    {
+      "path": "providers/radar_fusion.py",
+      "mode": 420,
+      "sha256": "d4244510d26c0402e53f8ba0e434a1ed8552da64425f7ef0ddbbca7180349866",
+      "size": 4712
     },
     {
       "path": "providers/radar_policy.py",
       "mode": 420,
-      "sha256": "a5cc597d8324583bb29916687903b11bf60e79cda6abb4958b5b1d10067a1583",
-      "size": 11455
+      "sha256": "343fdac7113d5cda695e9b047c43092846585a5f1baf93b1a4309fd3df981b20",
+      "size": 12966
     },
     {
       "path": "providers/rainviewer.py",
       "mode": 420,
-      "sha256": "47822c85c4c8254236dade46dcadf7e35450c74e73c0417220af02e71f71a26c",
-      "size": 14839
+      "sha256": "7a9a2f6829b95e114db71df2dd17bf682317a7c5b8c6bdb6ae8ff97d4e0a4abc",
+      "size": 24745
     },
     {
       "path": "providers/raster_components.py",
       "mode": 420,
-      "sha256": "606fad89582de5fdc0751c8c8ca05a119397a26884c9f8e40bf694db592566a6",
-      "size": 5907
+      "sha256": "0bd4be71e8b55be148c45d9767a9cefd4862f6ade2d27bce9db2d59511f98606",
+      "size": 11070
+    },
+    {
+      "path": "providers/registry.py",
+      "mode": 420,
+      "sha256": "62f717a7d711e82872fb5d2e072ffebcd2e91b8f015efa4fb2aa0b06d8339162",
+      "size": 792
+    },
+    {
+      "path": "radar_frame_worker.py",
+      "mode": 420,
+      "sha256": "4a8526fd203a00293652b7f726e56320239f72a6ba9f9742b86a49bcc0e09ff8",
+      "size": 5283
     },
     {
       "path": "sensor.py",
       "mode": 420,
-      "sha256": "1cddbcacedd374ab6239d08248c8a86c419473b02ceee66146175573e0d584a9",
-      "size": 62433
+      "sha256": "ae1c0ff7fcf012518356b367e1ba8ff46c953ee1918dcb9a577c473085b5cbff",
+      "size": 97079
+    },
+    {
+      "path": "services.yaml",
+      "mode": 420,
+      "sha256": "5ff61e56f70f952e4f2ddccae044408e018d62bf9bebafbea0560293ff5cfc12",
+      "size": 449
     },
     {
       "path": "strings.json",
       "mode": 420,
-      "sha256": "b93892009c39c61a84275ffb19d1aa426abfb333ad27e07ba3307606883597e4",
-      "size": 3735
+      "sha256": "0064918a7717b16dc43c33f1faee80d969147675049b80e13c5b7cd414b2d38c",
+      "size": 10290
     },
     {
       "path": "translations/nl.json",
       "mode": 420,
-      "sha256": "b93892009c39c61a84275ffb19d1aa426abfb333ad27e07ba3307606883597e4",
-      "size": 3735
+      "sha256": "0064918a7717b16dc43c33f1faee80d969147675049b80e13c5b7cd414b2d38c",
+      "size": 10290
+    },
+    {
+      "path": "warning_dispatcher.py",
+      "mode": 420,
+      "sha256": "89b443fa1dc1305205b41c2f28608f41577447a898e6dbda0d080732c6e2cd61",
+      "size": 27873
+    },
+    {
+      "path": "worker_bridge.py",
+      "mode": 420,
+      "sha256": "6ea8dbfe0c684cb3de3bab23b3d4b1caa277a5a0b33809456572d7246a77981b",
+      "size": 35517
+    },
+    {
+      "path": "worker_only_entry.py",
+      "mode": 420,
+      "sha256": "315cafb5b6965045038a14ee73c445319caa1415a4382e4e8fb7494093292631",
+      "size": 42978
+    },
+    {
+      "path": "worker_only_runtime.py",
+      "mode": 420,
+      "sha256": "aae83e3e75790247e298fc2d1f8eabe3037232074dff223b1df96ef3cfcea6dd",
+      "size": 25574
+    },
+    {
+      "path": "worker_radar_client.py",
+      "mode": 420,
+      "sha256": "9317007a61f5f0c6a6ab0f079f2b1949c1157e30b8c7b34a8777627d046ec632",
+      "size": 19293
+    },
+    {
+      "path": "worker_technical_diagnostics.py",
+      "mode": 420,
+      "sha256": "c91dd41b57f820f8ad8ea2f860b9c42744b35f584b8eb5c4c80d7aa60e957a27",
+      "size": 20901
+    },
+    {
+      "path": "worker_technical_diagnostics_sensor.py",
+      "mode": 420,
+      "sha256": "20897535f57b655d5ad34229672b6b838da89f5c2f762c48887a4831148f8f92",
+      "size": 7125
     }
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_v3_v0.4.123_deploy.zip",
-      "archive_sha256": "d91acffe54b05971620cbe4e968871546b1d94357f6e3a462163f4ce24810bf5",
-      "bytes": 204482,
-      "evidence_checks": [],
-      "nested_member": "storm_tracker_v3_v0.4.123_deploy.zip",
-      "container_sha256": "7858fd723135c99fa8551d91ecd4ea900d0df7ce904eea184bae837e2b1e8410",
-      "windows_paths": true
+      "filename": "storm_tracker_v3_v1.14.37_deploy.zip",
+      "archive_sha256": "50fe187f740ce382c51b9c9ed1f11e82dadf9346a629537c5984d957f6992aa9",
+      "bytes": 674528,
+      "evidence_checks": [
+        {
+          "manifest": "storm_tracker_release_v1.14.37_worker_v1.17.38_evidence.json",
+          "archive_and_source_match": true
+        },
+        {
+          "manifest": "storm_tracker_release_v1.14.37_worker_v1.17.38_evidence.json",
+          "archive_and_source_match": true
+        }
+      ]
     }
   ],
   "deployment_status": "not_inferred",

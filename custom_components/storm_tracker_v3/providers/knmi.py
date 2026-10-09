@@ -3,7 +3,7 @@
 Provider: KNMI radar
 
 Datasets:
-  - radar_forecast_2.0: nowcast 0-120 min, layer: precipitation_nowcast
+  - radar_forecast_2.0: providerdata tot 120 min; operationeel gebruiken we 0-90 min
   - nl-rdr-data-rtcor-5m: huidig gecorrigeerd radar (vereist API key)
 
 Dekking: lat 48.9-56.0°N, lon 0.0-10.9°O (Nederland + Noord-België + omgeving)
@@ -15,6 +15,7 @@ Versiegeschiedenis:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from datetime import datetime, timezone, timedelta
@@ -22,6 +23,7 @@ from typing import Optional
 
 import aiohttp
 
+from ..engine.bounded_payload import iter_limited_async
 from ..engine.observation import Observation, ObservationType
 from .raster_components import extract_components, extract_intensity_runs
 
@@ -30,6 +32,10 @@ _LOGGER = logging.getLogger(__name__)
 KNMI_WMS_BASE  = "https://api.dataplatform.knmi.nl/wms/adaguc-server"
 KNMI_TIMEOUT_S = 20
 KNMI_IMG_SIZE  = 512
+KNMI_FORECAST_CONCURRENCY = 5
+KNMI_FORECAST_HORIZON_MIN = 90
+KNMI_WMS_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+_HTTP_CHUNK_BYTES = 64 * 1024
 
 # Exacte dekkingsgrenzen uit GetCapabilities (EPSG:4326)
 KNMI_LAT_MIN = 48.895
@@ -44,6 +50,19 @@ LAYER_FORECAST   = "precipitation_nowcast"
 # Huidig gecorrigeerd radar (vereist API key)
 DATASET_CURRENT  = "nl-rdr-data-rtcor-5m"
 LAYER_CURRENT    = "RAD_NL25_RAC_RT"
+
+
+async def _read_bounded_response(response, *, maximum_bytes: int) -> bytes:
+    """Lees één ongecomprimeerde HTTP-body onder een expliciet bytecontract."""
+    encoding = response.headers.get("Content-Encoding")
+    if encoding and encoding.lower() != "identity":
+        raise ValueError("KNMI-response gebruikt onverwachte transportcompressie")
+    return await iter_limited_async(
+        response.content.iter_chunked(_HTTP_CHUNK_BYTES),
+        maximum_bytes=maximum_bytes,
+        declared_bytes=response.headers.get("Content-Length"),
+        require_declared_match=True,
+    )
 
 
 def _pixel_to_latlon(px: int, py: int, width: int, height: int) -> tuple[float, float]:
@@ -87,19 +106,50 @@ class KnmiProvider:
     Levert alle natte pixels als RADAR Observations met werkelijke lat/lon.
     """
 
-    def __init__(self, lat: float, lon: float, api_key: str, wms_api_key: str = None) -> None:
+    def __init__(self, lat: float, lon: float, api_key: str, wms_api_key: str = None, hass=None) -> None:
         self._lat      = lat
         self._lon      = lon
         self._api_key  = api_key
         self._wms_key  = wms_api_key or api_key
-        self._headers     = {"Authorization": api_key}
-        self._wms_headers = {"Authorization": self._wms_key}
+        self._hass = hass
+        self._headers = {
+            "Accept-Encoding": "identity",
+            "Authorization": api_key,
+        }
+        self._wms_headers = {
+            "Accept-Encoding": "identity",
+            "Authorization": self._wms_key,
+        }
         self.overlay = None
         self.last_frame_timestamp: Optional[float] = None
         self.last_fetch_success = False
 
     async def fetch_observations(self) -> list[Observation]:
         self.last_fetch_success = False
+        if self._hass is not None:
+            try:
+                from ..worker_radar_client import async_fetch_worker_radar
+
+                observations, overlay, _, artifact = await async_fetch_worker_radar(
+                    self._hass,
+                    "knmi_fetch",
+                    {"credential_ref": "worker_environment"},
+                    provider="knmi",
+                    timeout=115,
+                    max_age_seconds=20 * 60,
+                    allowed_sources=frozenset({"knmi", "knmi_forecast"}),
+                )
+                self.overlay = overlay
+                self.last_worker_artifact = artifact
+                self.last_frame_timestamp = float(overlay["timestamp"])
+                self.last_fetch_success = True
+                return observations
+            except Exception as err:
+                _LOGGER.warning(
+                    "KNMI-worker niet beschikbaar; lokale decode is bewust uitgeschakeld: %s",
+                    err,
+                )
+                return []
         obs = []
 
         # Huidige neerslag (gecorrigeerd)
@@ -109,19 +159,31 @@ class KnmiProvider:
         )
         obs.extend(current)
 
-        # Nowcast: alle 25 tijdstappen +0 tot +120 min (elke 5 min)
+        # Haal vijfminutenstappen op tot dezelfde 90-minutenhorizon als de
+        # operationele waarschuwing. De provider biedt ook 120 minuten,
+        # maar die extra stappen worden nergens operationeel gebruikt.
         now = datetime.now(timezone.utc)
-        for step in range(0, 121, 5):
+        semaphore = asyncio.Semaphore(KNMI_FORECAST_CONCURRENCY)
+
+        async def _fetch_forecast_step(step: int) -> list[Observation]:
             future   = now + timedelta(minutes=step)
             time_str = future.replace(second=0, microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
             source   = "knmi_forecast" if step > 0 else "knmi"
-            frame    = await self._fetch_frame(
-                DATASET_FORECAST, LAYER_FORECAST, time_str, source, auth=True
-            )
+            async with semaphore:
+                return await self._fetch_frame(
+                    DATASET_FORECAST, LAYER_FORECAST,
+                    time_str, source, auth=True,
+                )
+
+        frames = await asyncio.gather(*(
+            _fetch_forecast_step(step)
+            for step in range(0, KNMI_FORECAST_HORIZON_MIN + 1, 5)
+        ))
+        for frame in frames:
             obs.extend(frame)
 
         _LOGGER.debug(
-            "KnmiProvider: %d totaal (%d huidig, %d nowcast, 25 tijdstappen)",
+            "KnmiProvider: %d totaal (%d huidig, %d nowcast, 19 tijdstappen)",
             len(obs),
             sum(1 for o in obs if o.source == "knmi"),
             sum(1 for o in obs if o.source == "knmi_forecast"),
@@ -143,6 +205,7 @@ class KnmiProvider:
         params = {
             "DATASET": dataset,
             "SERVICE": "WMS",
+            # Dit is de WMS-protocolversie, niet de Storm Tracker-versie.
             "VERSION": "1.3.0",
             "REQUEST": "GetMap",
             "LAYERS":  layer,
@@ -164,12 +227,34 @@ class KnmiProvider:
                     if resp.status != 200:
                         _LOGGER.debug("KnmiProvider: %d voor %s t=%s", resp.status, dataset, time_str)
                         return []
-                    image_data = await resp.read()
+                    image_data = await _read_bounded_response(
+                        resp,
+                        maximum_bytes=KNMI_WMS_MAX_RESPONSE_BYTES,
+                    )
 
+            return await asyncio.to_thread(
+                self._extract_observations,
+                image_data,
+                time_str,
+                source,
+            )
+
+        except ImportError:
+            _LOGGER.warning("KnmiProvider: Pillow niet beschikbaar")
+            return []
+        except Exception:
+            _LOGGER.exception("KnmiProvider: fout voor %s t=%s", dataset, time_str)
+            return []
+
+    def _extract_observations(
+        self, image_data: bytes, time_str: str, source: str
+    ) -> list[Observation]:
+        """Decodeer een WMS-frame buiten de Home Assistant-eventloop."""
+        try:
             from PIL import Image
             import io
 
-            img    = Image.open(io.BytesIO(image_data)).convert("RGBA")
+            img = Image.open(io.BytesIO(image_data)).convert("RGBA")
             w, h   = img.size
             pixels = img.load()
             ts     = datetime.fromisoformat(time_str.replace("Z", "+00:00")).timestamp()
@@ -213,10 +298,12 @@ class KnmiProvider:
                     intensity=component.max_intensity,
                     area_km2=area_km2, quality=0.98,
                     footprint_points=component.boundary,
+                    footprint_polygons=component.polygons,
                     radar_cell_id=component_id,
                     parent_system_id=component_id,
                     parent_area_km2=area_km2,
                     parent_footprint_points=component.boundary,
+                    parent_footprint_polygons=component.polygons,
                     source=source,
                 ))
 
@@ -227,7 +314,7 @@ class KnmiProvider:
             _LOGGER.warning("KnmiProvider: Pillow niet beschikbaar")
             return []
         except Exception:
-            _LOGGER.exception("KnmiProvider: fout voor %s t=%s", dataset, time_str)
+            _LOGGER.exception("KnmiProvider: parsefout t=%s", time_str)
             return []
 
 

@@ -125,13 +125,13 @@ def _reliability_score(
     motion_score = int(guidance_score) if guidance_score is not None else fit_score
     prediction_error = getattr(storm, "motion_prediction_error_km", None)
     hindcast_score = (
-        max(0, round(100 - float(prediction_error) / 30.0 * 100))
+        max(0, round(100 - float(prediction_error) / 12.0 * 100))
         if prediction_error is not None
         else 35
     )
     passage_score = {
         "raak": 100,
-        "rand": 70,
+        "rand": 55,
         "mist": 30,
     }.get(motion.get("passage_classification"), 20)
     source_score = 90 if radar_source else 35
@@ -152,6 +152,15 @@ def _reliability_score(
         + source_score * 0.10
     )
     score = max(0, min(100, score))
+    passage = motion.get("passage_classification")
+    if passage == "rand":
+        score = min(score, 74)
+    elif passage == "mist":
+        score = min(score, 54)
+    elif passage not in {"raak", "rand"}:
+        score = min(score, 34)
+    if prediction_error is not None and float(prediction_error) > 5.0:
+        score = min(score, 69)
     label = (
         "Hoog"
         if score >= 75
@@ -165,7 +174,7 @@ def _reliability_score(
 
 
 def _guided_storm(storm, guidance: dict | None):
-    """Gebruik een streng begrensde rastervector als de stormvector nog rijpt."""
+    """Gebruik een numeriek geldige rastervector als de stormvector nog rijpt."""
     metadata = {
         "motion_guidance_source": None,
         "motion_guidance_stage": None,
@@ -185,16 +194,23 @@ def _guided_storm(storm, guidance: dict | None):
     heading = guidance.get("heading_deg")
     match_iou = guidance.get("motion_match_iou")
     wet_ratio = guidance.get("wet_cell_ratio")
+    try:
+        speed_value = float(speed)
+        heading_value = float(heading)
+        match_iou_value = float(match_iou)
+        wet_ratio_value = float(wet_ratio)
+    except (TypeError, ValueError):
+        return storm, metadata
     if (
         status not in {"warming_up_vectors", "ready"}
         or frames < 2
-        or speed is None
-        or heading is None
-        or match_iou is None
-        or not 2.0 <= float(speed) <= 120.0
-        or float(match_iou) < 0.50
-        or wet_ratio is None
-        or not 0.40 <= float(wet_ratio) <= 2.50
+        or not math.isfinite(speed_value)
+        or speed_value < 0.0
+        or not math.isfinite(heading_value)
+        or not math.isfinite(match_iou_value)
+        or match_iou_value < 0.50
+        or not math.isfinite(wet_ratio_value)
+        or not 0.40 <= wet_ratio_value <= 2.50
     ):
         return storm, metadata
 
@@ -215,12 +231,12 @@ def _guided_storm(storm, guidance: dict | None):
         )
         stage = "verified"
     else:
-        score = 25 + min(25, round(float(match_iou) * 30))
+        score = 25 + min(25, round(match_iou_value * 30))
         stage = "provisional"
 
     guided = copy(storm)
-    guided.heading_deg = float(heading)
-    guided.speed_kmh = float(speed)
+    guided.heading_deg = heading_value
+    guided.speed_kmh = speed_value
     # Matig ontsluit de bestaande, conservatieve contourprojectie. De aparte
     # verified-gate hieronder bepaalt of een ETA ook waarschuwingen mag voeden.
     guided.confidence = "Matig"
@@ -228,12 +244,16 @@ def _guided_storm(storm, guidance: dict | None):
     guided.motion_basis = "pysteps_raster"
     guided.motion_sample_count = frames
     guided.motion_history_minutes = max(0.0, (frames - 1) * 10.0)
-    guided.motion_fit_quality = float(match_iou)
+    guided.motion_fit_quality = match_iou_value
     guided.motion_prediction_error_km = max(
-        2.0, (1.0 - float(match_iou)) * 20.0
+        2.0, (1.0 - match_iou_value) * 20.0
     )
-    guided.velocity_east_kmh = float(speed) * math.sin(math.radians(float(heading)))
-    guided.velocity_north_kmh = float(speed) * math.cos(math.radians(float(heading)))
+    guided.velocity_east_kmh = speed_value * math.sin(
+        math.radians(heading_value)
+    )
+    guided.velocity_north_kmh = speed_value * math.cos(
+        math.radians(heading_value)
+    )
     guided.acceleration_east_kmh2 = 0.0
     guided.acceleration_north_kmh2 = 0.0
     return guided, {
@@ -612,6 +632,19 @@ def build_precipitation_status(
         "max_dbz": round(max(radar_dbz), 1) if radar_dbz else None,
         "heading_deg": round(storm.heading_deg, 0) if storm.heading_deg is not None else None,
         "speed_kmh": round(storm.speed_kmh, 1) if storm.speed_kmh is not None else None,
+        "average_speed_kmh": getattr(storm, "motion_average_speed_kmh", None),
+        "average_heading_deg": getattr(
+            storm, "motion_average_heading_deg", None
+        ),
+        "motion_estimate_status": getattr(
+            storm, "motion_estimate_status", "unavailable"
+        ),
+        "forecast_speed_min_kmh": getattr(
+            storm, "motion_forecast_speed_min_kmh", None
+        ),
+        "forecast_speed_max_kmh": getattr(
+            storm, "motion_forecast_speed_max_kmh", None
+        ),
         "approach_speed_kmh": motion["approach_speed_kmh"],
         "moving_towards": motion["moving_towards"],
         "eta_minutes": published_eta,

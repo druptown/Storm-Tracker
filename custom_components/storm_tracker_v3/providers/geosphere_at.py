@@ -2,10 +2,29 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 
+from ..engine.bounded_payload import iter_limited_async
 from .base import Capability, CoverageResult
 
 URL = "https://dataset.api.hub.geosphere.at/v1/timeseries/forecast/nowcast-v1-15min-1km"
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+_HTTP_CHUNK_BYTES = 64 * 1024
+
+
+async def _read_bounded_response(response, *, maximum_bytes: int) -> bytes:
+    headers = response.headers
+    encoding = headers.get("Content-Encoding")
+    if encoding and encoding.lower() != "identity":
+        raise ValueError(
+            "GeoSphere-response gebruikt onverwachte transportcompressie"
+        )
+    return await iter_limited_async(
+        response.content.iter_chunked(_HTTP_CHUNK_BYTES),
+        maximum_bytes=maximum_bytes,
+        declared_bytes=headers.get("Content-Length"),
+        require_declared_match=headers.get("Content-Length") is not None,
+    )
 
 
 def summarize_nowcast(payload: dict) -> dict:
@@ -46,9 +65,23 @@ class GeoSphereAustriaProvider:
     async def async_fetch(self):
         summaries = []
         for area in self._areas:
-            async with self._session.get(URL, params={"parameters": "rr", "lat_lon": f"{area.center_lat},{area.center_lon}", "output_format": "geojson"}) as response:
+            async with self._session.get(
+                URL,
+                params={
+                    "parameters": "rr",
+                    "lat_lon": f"{area.center_lat},{area.center_lon}",
+                    "output_format": "geojson",
+                },
+                headers={"Accept-Encoding": "identity"},
+            ) as response:
                 response.raise_for_status()
-                summaries.append(summarize_nowcast(await response.json()))
+                raw = await _read_bounded_response(
+                    response,
+                    maximum_bytes=MAX_RESPONSE_BYTES,
+                )
+                summaries.append(
+                    summarize_nowcast(json.loads(raw.decode("utf-8")))
+                )
         self.diagnostics = {
             "source_role": "nowcast_validation",
             "areas_queried": len(summaries),

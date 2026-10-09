@@ -19,7 +19,8 @@ Architectuurprincipes (uit review 12 juli 2026):
       NOWCAST     → beste beschikbare + fallback
       WARNING     → meerdere bronnen combineren
   - Sharing radius is configureerbaar (DEFAULT_ENGINE_SHARING_DISTANCE_KM)
-  - Observatie horizon is afgeleid: forecast_time × max_storm_speed
+  - De caller levert een expliciete observatiehorizon als dekkingscontract;
+    die straal is geen meteorologische geldigheidsgrens
   - CoverageResult geeft niet alleen True/False maar ook fractie en kwaliteit
 
 Versiegeschiedenis:
@@ -43,26 +44,6 @@ _LOGGER = logging.getLogger(__name__)
 DEFAULT_ENGINE_SHARING_DISTANCE_KM = 50.0
 """Maximale afstand tussen twee ProjectionTargets om dezelfde RegionEngine
 te delen. Configureerbaar — waarde wordt bepaald op basis van praktijkervaring."""
-
-DEFAULT_MAX_STORM_SPEED_KMH = 100.0
-"""Maximale buisnelheid voor berekening observatie horizon."""
-
-DEFAULT_FORECAST_TIME_H = 2.0
-"""Gewenste voorspellingstijd in uren."""
-
-
-def compute_observation_horizon(
-    forecast_time_h: float = DEFAULT_FORECAST_TIME_H,
-    max_storm_speed_kmh: float = DEFAULT_MAX_STORM_SPEED_KMH,
-) -> float:
-    """
-    Bereken de observatie horizon in km.
-    Afgeleid van voorspellingstijd en maximale buisnelheid — niet hardcoded.
-
-    Voorbeeld: 2u × 100km/u = 200km horizon
-    """
-    return forecast_time_h * max_storm_speed_kmh
-
 
 # ── Capability ────────────────────────────────────────────────────────────────
 
@@ -89,11 +70,13 @@ class CoverageArea:
     Het geografische gebied dat een RegionEngine monitort.
 
     Later uit te breiden naar polygon-gebaseerde dekking.
-    Momenteel een cirkel gedefinieerd door centrum + horizon radius.
+    Momenteel een cirkel gedefinieerd door centrum + horizon radius. De caller
+    kiest die expliciete data-/rekenstraal; hij wordt niet afgeleid van een
+    veronderstelde maximale stormsnelheid.
     """
     center_lat:     float
     center_lon:     float
-    horizon_km:     float  # observatie horizon (afgeleid, niet hardcoded)
+    horizon_km:     float  # expliciet callercontract voor data-/rekenbereik
 
     def contains(self, lat: float, lon: float) -> bool:
         """True als het punt binnen de horizon valt."""
