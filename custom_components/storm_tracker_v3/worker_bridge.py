@@ -44,6 +44,8 @@ REQUEST_TOPIC = f"{TOPIC_ROOT}/jobs/request"
 JOB_STATUS_TOPIC = f"{TOPIC_ROOT}/jobs/+/status"
 OPERATIONAL_SNAPSHOT_TOPIC = f"{TOPIC_ROOT}/operational/snapshot"
 OPERATIONAL_GEOJSON_TOPIC = f"{TOPIC_ROOT}/operational/geojson"
+OPERATIONAL_PASSAGES_TOPIC = f"{TOPIC_ROOT}/operational/passages"
+OPERATIONAL_VALIDATION_TOPIC = f"{TOPIC_ROOT}/operational/validation"
 PING_INTERVAL = timedelta(seconds=30)
 WORKER_STALE_SECONDS = 35.0
 COMPRESS_PAYLOAD_FROM_BYTES = 128_000
@@ -1156,6 +1158,19 @@ async def async_setup_worker_bridge(hass: HomeAssistant) -> None:
         "last_ping_state": None,
     }
     data["worker_pending_jobs"] = {}
+    data["worker_passages"] = {
+        "schema_version": 1,
+        "evaluated_at": None,
+        "items": [],
+        "overflow_count": 0,
+    }
+    data["worker_validation"] = {
+        "schema_version": 1,
+        "evaluated_at": None,
+        "status": "waiting",
+        "new_count": 0,
+        "outcomes": {},
+    }
     initial_now = time.time()
     if not math.isfinite(initial_now) or initial_now < 0.0:
         initial_now = 0.0
@@ -1231,6 +1246,61 @@ async def async_setup_worker_bridge(hass: HomeAssistant) -> None:
         ):
             return
         _apply_operational_geojson(payload)
+
+    @callback
+    def _apply_bounded_result(
+        payload: bytes | str,
+        *,
+        data_key: str,
+        event_suffix: str,
+        maximum_bytes: int,
+        maximum_items: int | None = None,
+    ) -> None:
+        try:
+            raw = payload.decode("utf-8") if isinstance(payload, bytes) else payload
+            if not isinstance(raw, str) or len(raw.encode("utf-8")) > maximum_bytes:
+                raise ValueError("resultaatpayload overschrijdt de grens")
+            value = json.loads(raw)
+            if not isinstance(value, dict) or value.get("schema_version") != 1:
+                raise ValueError("ongeldig resultaatcontract")
+            if maximum_items is not None:
+                items = value.get("items")
+                if not isinstance(items, list) or len(items) > maximum_items:
+                    raise ValueError("ongeldige resultaatitems")
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as err:
+            _LOGGER.warning("Ongeldig operationeel workerresultaat: %s", err)
+            return
+        data[data_key] = value
+        hass.bus.async_fire(f"{DOMAIN}_{event_suffix}")
+
+    @callback
+    def _operational_passages(message) -> None:
+        payload = message.payload
+        if _dispatch_to_hass_event_loop(
+            hass, _operational_passages, message
+        ):
+            return
+        _apply_bounded_result(
+            payload,
+            data_key="worker_passages",
+            event_suffix="worker_passages_update",
+            maximum_bytes=256_000,
+            maximum_items=256,
+        )
+
+    @callback
+    def _operational_validation(message) -> None:
+        payload = message.payload
+        if _dispatch_to_hass_event_loop(
+            hass, _operational_validation, message
+        ):
+            return
+        _apply_bounded_result(
+            payload,
+            data_key="worker_validation",
+            event_suffix="worker_validation_update",
+            maximum_bytes=32_000,
+        )
 
     @callback
     def _apply_worker_status(payload: bytes | str) -> None:
@@ -1327,6 +1397,22 @@ async def async_setup_worker_bridge(hass: HomeAssistant) -> None:
             # explicitly disable that conversion for this one binary-safe
             # subscription so the receiver does not reject every live frame.
             encoding=None,
+        )
+    )
+    data["unsubscribers"].append(
+        await mqtt.async_subscribe(
+            hass,
+            OPERATIONAL_PASSAGES_TOPIC,
+            _operational_passages,
+            qos=1,
+        )
+    )
+    data["unsubscribers"].append(
+        await mqtt.async_subscribe(
+            hass,
+            OPERATIONAL_VALIDATION_TOPIC,
+            _operational_validation,
+            qos=1,
         )
     )
     data["unsubscribers"].append(
