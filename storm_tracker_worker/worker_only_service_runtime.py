@@ -112,10 +112,6 @@ _SAFE_FAILURE_REASON_CODES = frozenset({
     "ground fact row bound reached",
     "ground member-link row bound reached",
     "ground QC row bound reached",
-    "motion_arrival_horizon_invalid",
-    "motion_arrival_shadow_contract_changed",
-    "motion_arrival_target_not_available",
-    "motion_arrivals_contain_invalid_type",
     "desired_state_changed_during_plan",
     "desired_state_future",
     "desired_state_inconsistent",
@@ -377,7 +373,6 @@ class WorkerOnlyServiceRuntime:
             "model_guidance_failures": 0,
             "model_guidance_skipped_stale": 0,
             "model_guidance_successes": 0,
-            "motion_enrichment_failures": 0,
             "ground_failures": 0,
             "ground_successes": 0,
             "ground_track_match_failures": 0,
@@ -917,45 +912,22 @@ class WorkerOnlyServiceRuntime:
                     else getattr(self._cell_tracker, "shadow_arrivals", None)
                 )
                 arrivals = () if not callable(arrival_reader) else arrival_reader()
-                if arrivals:
-                    try:
-                        committed = build_radar_motion_nowcast_revision(
-                            desired,
-                            cycle,
-                            observations,
-                            arrivals,
-                            revision=next_revision,
-                            evaluated_at=now,
-                            worker_state=worker_state,
-                            queue_depth=queue_depth,
-                            failed_jobs=failed_jobs,
-                            provider_status_overrides=provider_status_overrides,
-                            ready_source_ids=ready_source_ids,
-                        )
-                    except WorkerOnlyMotionSnapshotError as error:
-                        # Motion is optional enrichment on top of an already
-                        # certified radar fact. A stale/invalid shadow arrival
-                        # may withhold ETA, but must never erase current radar
-                        # precipitation or reflectivity evidence.
-                        self._increment("motion_enrichment_failures")
-                        _LOGGER.warning(
-                            "Worker-only motion enrichment withheld: reason=%s",
-                            _safe_failure_reason(error),
-                        )
-                        committed = build_positive_radar_fact_revision(
-                            desired,
-                            cycle,
-                            observations,
-                            revision=next_revision,
-                            evaluated_at=now,
-                            worker_state=worker_state,
-                            queue_depth=queue_depth,
-                            failed_jobs=failed_jobs,
-                            provider_status_overrides=provider_status_overrides,
-                            ready_source_ids=ready_source_ids,
-                        )
-                else:
-                    committed = build_positive_radar_fact_revision(
+                committed = (
+                    build_radar_motion_nowcast_revision(
+                        desired,
+                        cycle,
+                        observations,
+                        arrivals,
+                        revision=next_revision,
+                        evaluated_at=now,
+                        worker_state=worker_state,
+                        queue_depth=queue_depth,
+                        failed_jobs=failed_jobs,
+                        provider_status_overrides=provider_status_overrides,
+                        ready_source_ids=ready_source_ids,
+                    )
+                    if arrivals
+                    else build_positive_radar_fact_revision(
                         desired,
                         cycle,
                         observations,
@@ -967,7 +939,11 @@ class WorkerOnlyServiceRuntime:
                         provider_status_overrides=provider_status_overrides,
                         ready_source_ids=ready_source_ids,
                     )
-            except MultiSourceRadarSnapshotError:
+                )
+            except (
+                MultiSourceRadarSnapshotError,
+                WorkerOnlyMotionSnapshotError,
+            ):
                 # Quantitative evidence is optional enrichment.  A source
                 # becoming stale or authority-incompatible while a parallel
                 # batch is being restaged must withhold that enrichment, not

@@ -2,7 +2,7 @@
   "kind": "recovered_archive_source",
   "component": "worker",
   "version": "1.17.125",
-  "source_id": "07e605cf10cac32324b4bb407c0b39e4e2496b98bbb12e5aece9cc9f3f20e235",
+  "source_id": "6a363a90de568df84563a13340b453cd53110b48e69f381fc79e53b58cadfa32",
   "recovered_on": "2026-10-09",
   "files": [
     {
@@ -968,8 +968,8 @@
     {
       "path": "service.py",
       "mode": 420,
-      "sha256": "cf4d35df657c67df6bf7bc16c873ca2f61a0cc50e681759e038a5883b97b1568",
-      "size": 265519
+      "sha256": "5d8da0f3136a520e56318ce0ecf7157910c9df1bbcce221e6c680de625ec4cf3",
+      "size": 265469
     },
     {
       "path": "survey_cli.py",
@@ -1412,22 +1412,18 @@
     {
       "path": "worker_only_service_runtime.py",
       "mode": 420,
-      "sha256": "65194848fdd09e33163a51358020ab76d26d78ee3a02a876290d9a567473846a",
-      "size": 95347
+      "sha256": "8554c13495536c13c8bc9a0d4713aee954a8525eff5bec3c295da574c16ffb7c",
+      "size": 93886
     }
   ],
   "artifacts": [
     {
       "filename": "storm_tracker_worker_v1.17.125_deploy.tar.gz",
-      "archive_sha256": "a9c8c3919d915c9388c521c134df28e616e58e724cb654af26961eccbc7bfa9f",
-      "bytes": 2276969,
+      "archive_sha256": "7636cf865ce114f02c022972fe1ac06459db6c3f4f41c4c9b23b7590f72c4576",
+      "bytes": 2276752,
       "evidence_checks": [
         {
           "manifest": "storm_tracker_release_v1.14.108_worker_v1.17.125_evidence.json",
-          "archive_and_source_match": true
-        },
-        {
-          "manifest": "storm_tracker_release_v1.14.109_worker_v1.17.125_evidence.json",
           "archive_and_source_match": true
         }
       ]
