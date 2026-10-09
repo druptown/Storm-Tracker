@@ -1,14 +1,14 @@
 {
   "kind": "recovered_archive_source",
   "component": "integration",
-  "version": "1.14.103",
-  "source_id": "20f5e85c4996caf9c7009a8f64ce3a848a3da926914a17212a8be789211a1216",
+  "version": "1.14.104",
+  "source_id": "ed01312d2b1dc7b2cd99ac8f498494d40f916eae5d7044211b1797e8d1a24ee2",
   "recovered_on": "2026-10-09",
   "files": [
     {
       "path": "__init__.py",
       "mode": 420,
-      "sha256": "ca67ddccf332e96a55cd4d9b7dd47b8d37d17b613e4e9d53e72e4bf01f805b9d",
+      "sha256": "f379dd24435747fbb4756cd5eb3b5c3c9b9db08c86443b01ee0a0e39e62f8e7a",
       "size": 268462
     },
     {
@@ -20,7 +20,7 @@
     {
       "path": "const.py",
       "mode": 420,
-      "sha256": "012cb8c54cd66ba793303053df15f47951d4d6acf800b0f56e0a2ac929aec0fa",
+      "sha256": "289fae5cf95ad12f68d10a92c22ec34aefd41257d06e7ff2f3d3d17df600d697",
       "size": 2462
     },
     {
@@ -416,7 +416,7 @@
     {
       "path": "manifest.json",
       "mode": 420,
-      "sha256": "151a8fae482017d72d66f371cb10fb7e4383f956b9bd7f576d0d2ca23b60cc3d",
+      "sha256": "b98674970b2826c28e44929c4a48f88fd7f0f8318e1bdebba9e9e12a0ae8fa0f",
       "size": 468
     },
     {
@@ -710,12 +710,12 @@
   ],
   "artifacts": [
     {
-      "filename": "storm_tracker_v3_v1.14.103_deploy.zip",
-      "archive_sha256": "817e26d77a962e71af9e876135415de5ea1cdaf8d7f9d8825754bae1c3d4fafc",
-      "bytes": 678005,
+      "filename": "storm_tracker_v3_v1.14.104_deploy.zip",
+      "archive_sha256": "ba158584afa2d1c930124a5d2d6e59de3e520522f292d6b688849db07e9f74b8",
+      "bytes": 678007,
       "evidence_checks": [
         {
-          "manifest": "storm_tracker_release_v1.14.103_worker_v1.17.119_evidence.json",
+          "manifest": "storm_tracker_release_v1.14.104_worker_v1.17.120_evidence.json",
           "archive_and_source_match": true
         }
       ]
