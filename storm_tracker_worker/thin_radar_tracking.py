@@ -261,6 +261,14 @@ class ThinRadarTracker:
                 self._policy,
             )
         result = advance_cell_track_engine(state, prepared.frame, self._policy)
+        if (
+            result.status == "indeterminate"
+            and "analysis_grid_changed" in result.reason_codes
+        ):
+            state = create_cell_track_engine_state(state.engine_id, self._policy)
+            result = advance_cell_track_engine(
+                state, prepared.frame, self._policy
+            )
         self._states[key] = result.next_state
         self._motion_consensus[key] = dict(
             build_transition_motion_consensus(result)
