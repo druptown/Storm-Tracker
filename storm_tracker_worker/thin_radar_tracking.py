@@ -386,7 +386,9 @@ class ThinRadarTracker:
                     None if consensus is None else consensus.agreement_angle_deg
                 ),
                 field_identity=field.identity,
-                footprint_pixels=hierarchy.footprint_pixels,
+                footprint_pixels=_source_footprint_pixels(
+                    hierarchy.footprint_pixels, state.last_frame.grid, field,
+                ),
                 lineage_status="tracked",
                 radar_field=field,
             ))
@@ -456,7 +458,7 @@ class ThinRadarTracker:
                 motion_supporting_methods=admission.supporting_methods,
                 motion_agreement_angle_deg=None,
                 field_identity=field.identity,
-                footprint_pixels=pixels,
+                footprint_pixels=_source_footprint_pixels(pixels, grid, field),
                 lineage_status=admission.lineage_status,
                 predecessor_system_ids=admission.predecessor_system_ids,
                 lineage_reason_codes=tuple(system.system_uncertainty),
@@ -514,6 +516,17 @@ class ThinRadarTracker:
                     )))),
                 ))
         return tuple(result)
+
+
+def _source_footprint_pixels(
+    pixels: tuple[tuple[int, int], ...],
+    grid: AnalysisGrid,
+    field: ThinRadarField,
+) -> tuple[tuple[int, int], ...]:
+    """Bind crop-local labels to the original QPE raster used by advection."""
+    row_offset = round((field.origin_y_m - grid.origin_y_m) / field.y_resolution_m)
+    column_offset = round((grid.origin_x_m - field.origin_x_m) / field.x_resolution_m)
+    return tuple((row + row_offset, column + column_offset) for row, column in pixels)
 
 
 def _digest(value: Any) -> str:
