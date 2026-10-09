@@ -1129,6 +1129,7 @@ class ThinOperationalRuntime:
             maximum_total_runs=MAX_TOTAL_RADAR_OVERLAY_RUNS,
         )
         target_features: list[dict[str, Any]] = []
+        ground_station_features: list[dict[str, Any]] = []
         cell_feature_groups: list[tuple[float, str, list[dict[str, Any]]]] = []
         lightning_features: list[dict[str, Any]] = []
         default_region_id = (
@@ -1153,6 +1154,83 @@ class ThinOperationalRuntime:
                     "primary": target.kind == "home",
                     "radar_covered": True,
                     "region_engine": region_id,
+                },
+            })
+
+        targets_by_id = {
+            target.target_id: target
+            for target in region_plan.targets
+        }
+        stations: dict[tuple[str, str], dict[str, Any]] = {}
+        for observation in fusion.observations:
+            station_id = str(observation.metadata.get("station_id") or "").strip()
+            target_id = observation.target_id
+            if not station_id or target_id not in targets_by_id:
+                continue
+            key = (observation.provider_id, station_id.casefold())
+            station = stations.setdefault(key, {
+                "provider_id": observation.provider_id,
+                "station_id": station_id,
+                "latitude": observation.latitude,
+                "longitude": observation.longitude,
+                "observed_at": observation.observed_at,
+                "target_ids": set(),
+                "engine_ids": set(),
+                "measurements": set(),
+                "target_distances_km": {},
+            })
+            if observation.observed_at >= station["observed_at"]:
+                station["latitude"] = observation.latitude
+                station["longitude"] = observation.longitude
+                station["observed_at"] = observation.observed_at
+            station["target_ids"].add(target_id)
+            station["measurements"].add(observation.kind.value)
+            region_id = region_plan.region_id_for(target_id) or default_region_id
+            station["engine_ids"].add(region_id)
+            target = targets_by_id[target_id]
+            latitude_delta = math.radians(observation.latitude - target.latitude)
+            longitude_delta = math.radians(observation.longitude - target.longitude)
+            target_latitude = math.radians(target.latitude)
+            station_latitude = math.radians(observation.latitude)
+            haversine = (
+                math.sin(latitude_delta / 2.0) ** 2
+                + math.cos(target_latitude)
+                * math.cos(station_latitude)
+                * math.sin(longitude_delta / 2.0) ** 2
+            )
+            station["target_distances_km"][target_id] = round(
+                6371.0088 * 2.0 * math.asin(min(1.0, math.sqrt(haversine))),
+                1,
+            )
+
+        for (provider_id, normalized_station_id), station in sorted(stations.items()):
+            measurements = sorted(station["measurements"])
+            ground_station_features.append({
+                "type": "Feature",
+                "id": f"ground-station:{provider_id}:{normalized_station_id}",
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [station["longitude"], station["latitude"]],
+                },
+                "properties": {
+                    "layer": "ground_station",
+                    "provider_id": provider_id,
+                    "station_id": station["station_id"],
+                    "target_ids": sorted(station["target_ids"]),
+                    "engine_ids": sorted(station["engine_ids"]),
+                    "measurements": measurements,
+                    "target_distances_km": dict(sorted(
+                        station["target_distances_km"].items()
+                    )),
+                    "observed_at": station["observed_at"],
+                    "age_seconds": max(
+                        0,
+                        round(fusion.evaluated_at - station["observed_at"]),
+                    ),
+                    "summary": (
+                        f"{provider_id} · {station['station_id']} · "
+                        + ", ".join(measurements)
+                    ),
                 },
             })
 
@@ -1275,7 +1353,12 @@ class ThinOperationalRuntime:
                 if item[1] in selected_ids
                 for feature in item[2]
             ]
-            features = target_features + cell_features + lightning_features
+            features = (
+                target_features
+                + ground_station_features
+                + cell_features
+                + lightning_features
+            )
             return {
                 "type": "FeatureCollection",
                 "features": features,
@@ -1286,6 +1369,7 @@ class ThinOperationalRuntime:
                     "radar_cells_included": len(selected),
                     "radar_cells_total": total_cells,
                     "lightning_events_included": lightning_count,
+                    "ground_stations_included": len(ground_station_features),
                     "truncated": len(selected) < total_cells,
                     "state": "operational",
                     "builder": "thin_worker",
