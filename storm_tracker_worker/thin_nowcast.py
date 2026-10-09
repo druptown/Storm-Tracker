@@ -223,20 +223,23 @@ def _field_target_forecast(target_id, latitude, longitude, issued_at, region_id,
             "availability_basis": "regional_submission"})
     selected = select_primary(candidates, previous_provider)
     samples = selected["samples"]
-    intervals = rain_intervals(samples)
+    intervals = rain_intervals(samples, threshold=0.)
     known = sum(s["rate_mm_h"] is not None for s in samples)
     summary = {key: selected[key] for key in (
         "primary_provider", "source_conflict", "selection_reason", "policy_version")}
     summary.update(issued_at=issued_at, region_id=region_id,
         support_state="unknown" if not known else "complete" if known == 121 else "partial",
         known_sample_count=known, total_sample_count=121,
-        threshold_mm_h=.1, intervals=intervals,
+        threshold_mm_h=0., threshold_operator="gt", intervals=intervals,
+        intensity_threshold_mm_h=.1, intensity_threshold_operator="ge",
+        intensity_intervals=rain_intervals(samples, threshold=.1),
         weak_positive_sample_count=sum(s["rate_mm_h"] is not None and
             0 < s["rate_mm_h"] < .1 for s in samples),
         candidates=[{**{k:v for k,v in c.items() if k != "samples"},
             "known_sample_count": sum(s["rate_mm_h"] is not None for s in c["samples"]),
             "reason_codes": sorted({s["reason"] for s in c["samples"] if s["reason"]}),
-            "intervals": rain_intervals(c["samples"])} for c in candidates],
+            "intervals": rain_intervals(c["samples"], threshold=0.),
+            "intensity_intervals": rain_intervals(c["samples"], threshold=.1)} for c in candidates],
         intensity_core_windows=[{"cell_id":p.cell_id, "provider_id":p.provider_id,
             "entry_at":p.entry_at, "exit_at":p.exit_at,
             "mean_mm_h":p.predicted_intensity_mm_h, "peak_mm_h":p.peak_intensity_mm_h}

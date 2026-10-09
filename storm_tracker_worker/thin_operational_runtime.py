@@ -1962,7 +1962,7 @@ class ThinOperationalRuntime:
         storm_items = [{
             "storm_id": cell.cell_id,
             "region_id": default_region,
-            "display_name": cell.cell_id,
+            "display_name": cell.cell_id if len(cell.cell_id) <= 160 else cell.cell_id[:159]+"…",
             "state": "active",
             "diagnostic_quality_percent": None,
             "diagnostic_quality_kind": None,
