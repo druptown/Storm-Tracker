@@ -2,7 +2,7 @@
   "kind": "recovered_archive_source",
   "component": "worker",
   "version": "1.18.0",
-  "source_id": "115668f0b4065e79062fe1d953ca9750ea12fe9e97a991d46298ac7db3fa13ae",
+  "source_id": "16d2b916222a9ffa22601a0522901b01e51670eff2d038b606a3eaf0dde1762e",
   "recovered_on": "2026-10-09",
   "files": [
     {
@@ -1016,8 +1016,8 @@
     {
       "path": "thin_mqtt_service.py",
       "mode": 420,
-      "sha256": "e43ad1498875a4acb69b8a70a2812c69e4cbc4b4c46ac62d15ec716249fae14c",
-      "size": 11293
+      "sha256": "0efdc344aa16e90fc677afb16da569cb334337ee0ca8d1e65e48d1bc000797de",
+      "size": 12599
     },
     {
       "path": "thin_nowcast.py",
@@ -1052,8 +1052,8 @@
     {
       "path": "thin_provider_catalog.py",
       "mode": 420,
-      "sha256": "b4803378bf039b9d87252edd4f720966af1cec67320850da0ee59c38833fd4f7",
-      "size": 4091
+      "sha256": "e8cfb72d26f7ecae78d8daaeefd531baaada35126c0e4f35767a6687632e9c5a",
+      "size": 4179
     },
     {
       "path": "thin_provider_runtime.py",
@@ -1473,8 +1473,8 @@
   "artifacts": [
     {
       "filename": "storm_tracker_worker_v1.18.0_deploy.tar.gz",
-      "archive_sha256": "c0fa17fc6babc43f68d3eabb879f8ba9b1b2f25aff2750fefa5e85b9e1ce7fc4",
-      "bytes": 2300928,
+      "archive_sha256": "5f78be108ecc30f6538817febe9c867cb837611736bfb6ec98af3fad6fa4c2ff",
+      "bytes": 2301251,
       "evidence_checks": [
         {
           "manifest": "storm_tracker_release_v1.14.110_worker_v1.18.0_evidence.json",

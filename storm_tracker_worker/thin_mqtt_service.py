@@ -52,6 +52,7 @@ class ThinMqttService:
         self._job_results: dict[str, dict[str, Any]] = {}
         self._last_snapshot_revision = 0
         self._last_error: str | None = None
+        self._last_cycle_summary: tuple[Any, ...] | None = None
 
     def _heartbeat(self, state: str = "online") -> bytes:
         return encode(envelope(
@@ -159,6 +160,33 @@ class ThinMqttService:
                 payload = encode_control_envelope(result.snapshot)
                 self._last_snapshot_revision = int(result.snapshot["revision"])
                 self._last_error = None
+                provider_items = result.snapshot.get("providers", {}).get("items", [])
+                provider_summary = tuple(
+                    sorted(
+                        (
+                            str(item.get("provider_id")),
+                            str(item.get("state")),
+                            ",".join(str(code) for code in item.get("reason_codes", [])),
+                        )
+                        for item in provider_items
+                        if isinstance(item, dict)
+                    )
+                )
+                cycle_summary = (
+                    len(result.fusion.observations),
+                    provider_summary,
+                    result.postgis.status,
+                    result.postgis.last_error_code,
+                )
+                if cycle_summary != self._last_cycle_summary:
+                    _LOGGER.info(
+                        "Dunne cyclus: observaties=%d providers=%s postgis=%s fout=%s",
+                        cycle_summary[0],
+                        provider_summary,
+                        result.postgis.status,
+                        result.postgis.last_error_code,
+                    )
+                    self._last_cycle_summary = cycle_summary
                 self.client.publish(
                     topic(self.topic_root, "operational/snapshot"),
                     payload,
